@@ -37,7 +37,6 @@ a:hover { text-decoration: underline; }
 .mark { width: 34px; height: 34px; flex: none; filter: drop-shadow(0 4px 10px rgba(20,184,166,.25)); transition: transform .2s ease; }
 .brand:hover .mark { transform: translateY(-1px) rotate(-3deg); }
 .brand-name { font-family: var(--display); color: #fff; font-weight: 700; font-size: 22px; line-height: 1; letter-spacing: -.045em; display: flex; align-items: flex-end; }
-.brand-name .dot { width: 6px; height: 6px; border-radius: 2px; background: var(--brand-grad); margin: 0 0 3px 2px; }
 .biz { font-size: 11.5px; color: #7f8ba1; margin-top: 4px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #nav nav a { display: block; color: var(--nav-ink); padding: 7px 10px; border-radius: 6px; font-size: 13.5px; }
 #nav nav a:hover { background: rgba(255,255,255,.06); text-decoration: none; color: #fff; }
