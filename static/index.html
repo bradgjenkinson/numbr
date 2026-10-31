@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="shell">
+  <aside id="nav">
+    <div class="brand"><span class="mark">L</span><div><div class="brand-name">Ledger</div><div class="biz" id="bizname"></div></div></div>
+    <nav>
+      <a href="#/dashboard" data-sec="dashboard">Dashboard</a>
+      <div class="navhead">Money in & out</div>
+      <a href="#/sales" data-sec="sales">Sales</a>
+      <a href="#/purchases" data-sec="purchases">Purchases</a>
+      <a href="#/banking" data-sec="banking">Banking</a>
+      <a href="#/reconcile" data-sec="reconcile">Reconcile</a>
+      <a href="#/recurring" data-sec="recurring">Recurring</a>
+      <div class="navhead">Reports</div>
+      <a href="#/reports/pl" data-sec="reports/pl">Profit &amp; Loss</a>
+      <a href="#/reports/bs" data-sec="reports/bs">Balance Sheet</a>
+      <a href="#/reports/aged-ar" data-sec="reports/aged-ar">Aged Receivables</a>
+      <a href="#/reports/aged-ap" data-sec="reports/aged-ap">Aged Payables</a>
+      <a href="#/reports/tb" data-sec="reports/tb">Trial Balance</a>
+      <div class="navhead">Setup</div>
+      <a href="#/contacts" data-sec="contacts">Contacts</a>
+      <a href="#/accounts" data-sec="accounts">Chart of Accounts</a>
+      <a href="#/journal" data-sec="journal">General Journal</a>
+      <a href="#/settings" data-sec="settings">Settings</a>
+    </nav>
+  </aside>
+  <main id="main"><div class="loading">Loading…</div></main>
+</div>
+<div id="toast"></div>
+<div id="modal" hidden><div class="modal-card" role="dialog" aria-modal="true"></div></div>
+<script src="/app.js"></script>
+</body>
+</html>

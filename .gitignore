@@ -1,0 +1,21 @@
+# Real financial data and backups - never commit
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Test output
+tests/screenshots/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
