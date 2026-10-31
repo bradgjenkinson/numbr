@@ -94,6 +94,15 @@ const c2d = c => (c / 100).toFixed(2);
 const TYPE_GROUPS = [['asset', 'Assets'], ['liability', 'Liabilities'], ['equity', 'Equity'], ['income', 'Income'], ['cos', 'Cost of Sales'], ['expense', 'Expenses']];
 const TYPE_LABEL = Object.fromEntries(TYPE_GROUPS);
 const isBank = a => a.subtype === 'bank';
+// Shared bank accounts: share_bp is the user's share in basis points (10000 = 100%).
+const isShared = a => isBank(a) && a.share_bp < 10000;
+const pctText = bp => `${+(bp / 100).toFixed(2)}%`;
+const parsePct = (v, name) => {
+  const t = String(v).trim().replace(/%$/, '');
+  const n = t === '' ? 100 : Number(t);
+  if (isNaN(n) || n <= 0 || n > 100) throw new Error(`${name}: your share must be more than 0% and no more than 100%`);
+  return n;
+};
 const postable = a => !['ar', 'ap'].includes(a.subtype);
 
 function acctOptions(sel, filter = () => true, blank = 'Choose account…') {
@@ -323,6 +332,7 @@ async function dashboard() {
     ? `<div class="notice warn">Setup isn't finished yet. <a href="#/setup">Continue setup</a> to enter your start date and opening balances.</div>` : '';
   const banks = d.banks.map(b => `<div class="stat"><div class="label">${esc(b.name)}</div>
       <a class="value" href="#/register/${b.id}">${$fmt(b.balance)}</a>
+      ${b.share_bp < 10000 ? `<div class="note">Your share (${pctText(b.share_bp)}): <b>${$fmt(b.my_balance)}</b></div>` : ''}
       <div class="note">${b.last_reconciled ? `Reconciled to ${dfmt(b.last_reconciled)}` : 'Not reconciled yet'}
       ${b.uncleared ? ` · <a href="#/reconcile?account=${b.id}">${b.uncleared} unreconciled</a>` : ''}</div></div>`).join('');
   const tm = d.this_month, lm = d.last_month;
@@ -696,7 +706,7 @@ async function bankingHome() {
   }
   await registerView(sel, {
     title: 'Banking',
-    picker: `<div class="tabs">${banks.map(b => `<a href="#/banking?account=${b.id}" class="${b.id == sel ? 'active' : ''}">${esc(b.name)}</a>`).join('')}</div>`,
+    picker: `<div class="tabs">${banks.map(b => `<a href="#/banking?account=${b.id}" class="${b.id == sel ? 'active' : ''}">${esc(b.name)}${isShared(b) ? ` <span class="muted">(${pctText(b.share_bp)})</span>` : ''}</a>`).join('')}</div>`,
     actions: `<button id="bk-manage">Manage accounts</button><a class="btn" href="#/banking/transfer">Transfer</a><a class="btn" href="#/banking/receive">Receive money</a>
       <a class="btn" href="#/banking/spend">Spend money</a><a class="btn primary" href="#/reconcile?account=${sel}">Reconcile</a>`,
     hashBase: `#/banking?account=${sel}`,
@@ -710,9 +720,12 @@ function manageBankAccounts() {
     const banks = S.accounts.filter(a => isBank(a) && !a.archived);
     modal(`<h2>Bank accounts</h2>
       <p class="muted">Rename an account by editing its name. Accounts that have transactions can only be removed once their balance is zero; they're archived so history is kept.</p>
-      ${banks.length ? `<table><thead><tr><th>Name</th><th>Kind</th><th class="num">Balance</th><th></th></tr></thead><tbody>
+      <p class="muted">For a shared account (e.g. a joint account), set <b>Your share</b> to the percentage that belongs to you. Reports then show only your share of its balance and transactions. It applies to all past and future transactions in that account.</p>
+      ${banks.length ? `<table><thead><tr><th>Name</th><th>Kind</th><th class="num">Your share %</th><th class="num">Balance</th><th></th></tr></thead><tbody>
       ${banks.map(a => `<tr data-id="${a.id}"><td><input class="mb-name" value="${esc(a.name)}" aria-label="Account name"></td>
-        <td class="muted">${a.type === 'asset' ? 'Bank account' : 'Credit card'}</td><td class="num">${$fmt(a.balance)}</td>
+        <td class="muted">${a.type === 'asset' ? 'Bank account' : 'Credit card'}</td>
+        <td class="num"><input class="mb-share num" style="width:80px" inputmode="decimal" value="${+(a.share_bp / 100).toFixed(2)}" aria-label="Your share percent"></td>
+        <td class="num">${$fmt(a.balance)}</td>
         <td><button class="small danger mb-del">Remove</button></td></tr>`).join('')}
       </tbody></table>` : '<div class="empty">No bank accounts</div>'}
       <div class="actions" style="margin-top:10px"><button class="small" id="mb-add-bank">+ Bank account</button><button class="small" id="mb-add-cc">+ Credit card</button></div>
@@ -721,7 +734,11 @@ function manageBankAccounts() {
         for (const tr of el.querySelectorAll('tr[data-id]')) {
           const a = acct(tr.dataset.id), name = tr.querySelector('.mb-name').value.trim();
           if (!name) throw new Error('Every bank account needs a name');
-          if (name !== a.name) await api('PUT', `/api/accounts/${a.id}`, { name });
+          const pct = parsePct(tr.querySelector('.mb-share').value, name);
+          const b = {};
+          if (name !== a.name) b.name = name;
+          if (Math.round(pct * 100) !== a.share_bp) b.share_pct = pct;
+          if (Object.keys(b).length) await api('PUT', `/api/accounts/${a.id}`, b);
         }
       };
       const add = async type => {
@@ -753,22 +770,26 @@ async function registerPage(id) {
 async function registerView(id, { title, picker = '', actions = '', hashBase }) {
   const from = QS.get('from') || addDays(S.today, -92), to = QS.get('to') || '';
   const r = await GET(`/api/register?account_id=${id}&from=${from}${to ? `&to=${to}` : ''}`);
-  const a = r.account, bank = isBank(a);
+  const a = r.account, bank = isBank(a), sh = r.shared;
+  const sgn = ['asset', 'cos', 'expense'].includes(a.type) ? 1 : -1;  // show the share in the account's natural sign
   const lines = [...r.lines].reverse();
   page(title || `${esc(a.code)} ${esc(a.name)}`, title ? '' : TYPE_LABEL[a.type], actions,
     `${picker}<div class="filters"><div class="field"><label>From</label><input type="date" id="r-from" value="${from}"></div>
       <div class="field"><label>To</label><input type="date" id="r-to" value="${to}"></div>
       <div class="field"><label>Search</label><input id="r-q" placeholder="Description, contact, amount"></div>
       <div style="margin-left:auto;text-align:right"><div class="muted" style="font-size:12px">Balance${to ? ` at ${dfmt(to)}` : ''}</div>
-      <div style="font-size:20px;font-weight:650">${$fmt(r.closing)}</div></div></div>
+      <div style="font-size:20px;font-weight:650">${$fmt(r.closing)}</div>
+      ${sh ? `<div class="muted" style="font-size:12px">Your share ${$fmt(r.share_closing)}</div>` : ''}</div></div>
+    ${sh ? `<div class="notice info">${isShared(a) ? `This is a shared account. ${pctText(a.share_bp)} of it is yours.` : 'Some of these transactions came from a shared bank account.'} Reports use the <b>Your share</b> column.</div>` : ''}
     <div class="panel flush">${lines.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Type</th><th>Ref</th>
-      <th class="num">${bank ? 'Money in' : 'Debit'}</th><th class="num">${bank ? 'Money out' : 'Credit'}</th><th class="num">Balance</th>${bank ? '<th></th>' : ''}</tr></thead><tbody>
+      <th class="num">${bank ? 'Money in' : 'Debit'}</th><th class="num">${bank ? 'Money out' : 'Credit'}</th><th class="num">Balance</th>${sh ? '<th class="num">Your share</th><th class="num">Your balance</th>' : ''}${bank ? '<th></th>' : ''}</tr></thead><tbody>
       ${lines.map(l => `<tr class="click" data-href="${sourceHref(l.source, l.source_id, l.journal_id)}" data-q="${esc((l.memo + ' ' + (l.description || '') + ' ' + (l.contact_name || '') + ' ' + fmt(Math.abs(l.amount))).toLowerCase())}">
         <td>${dfmt(l.date)}</td><td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))}</td>
         <td class="muted">${SOURCE_LABEL[l.source] || l.source}</td><td class="muted">${esc(l.reference || '')}</td>
         <td class="num">${l.amount > 0 ? fmt(l.amount) : ''}</td><td class="num">${l.amount < 0 ? fmt(-l.amount) : ''}</td><td class="num">${fmt(l.balance)}</td>
+        ${sh ? `<td class="num">${fmt(l.share * sgn)}</td><td class="num">${fmt(l.share_balance)}</td>` : ''}
         ${bank ? `<td title="${l.recon_id ? 'Reconciled' : 'Not reconciled'}">${l.recon_id ? '✓' : ''}</td>` : ''}</tr>`).join('')}
-      <tr class="total"><td colspan="6">Opening balance ${dfmt(from)}</td><td class="num">${fmt(r.opening)}</td>${bank ? '<td></td>' : ''}</tr>
+      <tr class="total"><td colspan="6">Opening balance ${dfmt(from)}</td><td class="num">${fmt(r.opening)}</td>${sh ? `<td></td><td class="num">${fmt(r.share_opening)}</td>` : ''}${bank ? '<td></td>' : ''}</tr>
       </tbody></table></div>` : '<div class="empty">No transactions in this period</div>'}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   const sep = hashBase.includes('?') ? (hashBase.endsWith('?') ? '' : '&') : '?';
@@ -1294,7 +1315,7 @@ async function reportBS() {
   });
   rowsHtml += valsRow('Net assets', d.net_assets, 'grand');
   rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${E.title}</td></tr>`;
-  E.rows.forEach(r => { rowsHtml += valsRow(esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : ''), r.values, 'sub', r.account_id ? `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : ''); });
+  E.rows.forEach(r => { rowsHtml += valsRow(esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(money moved in or out of shared accounts that belongs to the other owners)</span>' : ''), r.values, 'sub', r.account_id ? `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : ''); });
   rowsHtml += valsRow('Total equity', E.totals, 'grand');
   const hist = E.rows.find(r => r.subtype === 'hist');
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
@@ -1351,7 +1372,7 @@ async function reportTB() {
   page('Trial Balance', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `<div class="filters"><div class="field"><label>As at</label><input type="date" id="f-at" value="${RF.tbAt}"></div></div>
     <div class="report">${reportHead('Trial Balance', `As at ${dfmt(d.as_at)}`)}<table><thead><tr><th>Code</th><th>Account</th><th>Type</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead><tbody>
-    ${d.rows.map(r => `<tr class="click" data-href="#/register/${r.account_id}?from=2000-01-01&to=${d.as_at}"><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td class="muted">${TYPE_LABEL[r.type]}</td><td class="num">${fmt(r.debit, { blankZero: true })}</td><td class="num">${fmt(r.credit, { blankZero: true })}</td></tr>`).join('')}
+    ${d.rows.map(r => `<tr${r.account_id ? ` class="click" data-href="#/register/${r.account_id}?from=2000-01-01&to=${d.as_at}"` : ''}><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td class="muted">${TYPE_LABEL[r.type]}</td><td class="num">${fmt(r.debit, { blankZero: true })}</td><td class="num">${fmt(r.credit, { blankZero: true })}</td></tr>`).join('')}
     <tr class="grand"><td colspan="3">Total</td><td class="num">${fmt(d.debit)}</td><td class="num">${fmt(d.credit)}</td></tr></tbody></table></div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   $('#f-at').onchange = () => { RF.tbAt = val('#f-at'); reportTB(); };
@@ -1414,7 +1435,7 @@ async function accountsPage() {
     const list = S.accounts.filter(a => a.type === t && (showArch || !a.archived));
     if (!list.length) return;
     rowsHtml += `<tr class="sechead"><td colspan="4">${label}</td></tr>` + list.map(a => `<tr class="click sub" data-id="${a.id}"><td>${esc(a.code)}</td><td>${esc(a.name)}
-      ${a.archived ? ' <span class="pill">archived</span>' : ''}</td><td class="muted">${a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') : a.system ? 'System' : ''}</td>
+      ${a.archived ? ' <span class="pill">archived</span>' : ''}</td><td class="muted">${a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') + (isShared(a) ? ` · shared, yours ${pctText(a.share_bp)}` : '') : a.system ? 'System' : ''}</td>
       <td class="num">${a.used ? `<a href="#/register/${a.id}?from=2000-01-01" onclick="event.stopPropagation()">${fmt(a.balance)}</a>` : ''}</td></tr>`).join('');
   });
   page('Chart of accounts', '', `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button class="primary" id="a-new">New account</button>`,
@@ -1432,15 +1453,19 @@ function accountModal(a) {
       <div class="field"><label>Name</label><input id="am-name" value="${esc(a ? a.name : '')}"></div>
       <div class="field"><label>Type</label><select id="am-type" ${sys ? 'disabled' : ''}>${TYPE_GROUPS.map(([t, l]) => `<option value="${t}" ${a && a.type === t ? 'selected' : ''}>${l.replace(/s$/, '').replace('Liabilitie', 'Liability').replace('Cost of Sale', 'Cost of Sales')}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select id="am-sub" ${sys ? 'disabled' : ''}><option value="other">Normal</option><option value="bank" ${a && a.subtype === 'bank' ? 'selected' : ''}>Bank / credit card (reconcilable)</option></select></div>
+      <div class="field am-share"><label>Your share %</label><input id="am-share" inputmode="decimal" value="${a ? +(a.share_bp / 100).toFixed(2) : 100}"><div class="hint">Less than 100 for a shared account. Reports show only your share.</div></div>
     </div>
     ${a && !sys ? `<label class="check"><input type="checkbox" id="am-arch" ${a.archived ? 'checked' : ''}> Archived</label>` : ''}
     <div class="modal-foot">${a && !sys && !a.used ? '<button class="danger" data-x="del" style="margin-right:auto">Delete</button>' : ''}<button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
     el.querySelector('[data-x=no]').onclick = closeModal;
+    const shareVis = () => { el.querySelector('.am-share').hidden = val('#am-sub', el) !== 'bank'; };
+    el.querySelector('#am-sub').onchange = shareVis; shareVis();
     const del = el.querySelector('[data-x=del]');
     if (del) del.onclick = async () => { try { await api('DELETE', `/api/accounts/${a.id}`); closeModal(); toast('Deleted'); accountsPage(); } catch (e) { fail(e); } };
     el.querySelector('[data-x=yes]').onclick = async () => {
       try {
         const b = { code: val('#am-code', el), name: val('#am-name', el), type: val('#am-type', el), subtype: val('#am-sub', el) };
+        if (b.subtype === 'bank') b.share_pct = parsePct(val('#am-share', el), b.name || 'Account');
         if (a && !sys) b.archived = el.querySelector('#am-arch').checked;
         if (a) await api('PUT', `/api/accounts/${a.id}`, b); else await api('POST', '/api/accounts', b);
         closeModal(); toast('Saved'); accountsPage();

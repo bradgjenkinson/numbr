@@ -42,6 +42,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 - Retained earnings and Current Year Earnings are **computed** from the financial-year start (`fy_start_month`, default 7 = July). There are no year-end closing entries.
 - System accounts are found by `accounts.subtype`: `ar`, `ap`, `re` (retained earnings), `hist` (historical balancing). `bank` marks reconcilable accounts (bank and credit cards). AR/AP may only be touched by invoices, bills and payments, never by journals or spend/receive lines, so the aged reports always tie to the balance sheet.
 - Each `journal_lines.role` is `'bank'`, `'control'` or NULL. It's used to rebuild editable forms from a journal.
+- **Shared bank accounts:** `accounts.share_bp` < 10000 marks a bank account the user only partly owns. The ledger keeps full amounts (reconciliation is unchanged); reports must read lines through `report_lines()`, which cuts them to the user's share and sends the remainder to the computed "Other owners' share" equity line (`PARTNER`). Don't query `journal_lines` directly for a report. See `docs/ARCHITECTURE.md`.
 
 ### Invariants the code enforces (keep them)
 

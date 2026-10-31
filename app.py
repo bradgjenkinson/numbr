@@ -8,6 +8,7 @@ Your books live in data/books.db. Backups go to data/backups/.
 """
 import calendar
 import datetime as dt
+import itertools
 import json
 import mimetypes
 import os
@@ -35,6 +36,9 @@ PL_TYPES = ('income', 'cos', 'expense')
 FREQS = ('weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')
 SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist')
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
+SHARE_FULL = 10000          # share_bp of an account the user owns outright
+PARTNER = 0                 # pseudo account id for other owners' share of shared bank accounts
+PARTNER_NAME = "Other owners' share of shared accounts"
 
 
 class ApiError(Exception):
@@ -51,7 +55,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('asset','liability','equity','income','cos','expense')),
   subtype TEXT NOT NULL DEFAULT 'other',
-  archived INTEGER NOT NULL DEFAULT 0
+  archived INTEGER NOT NULL DEFAULT 0,
+  share_bp INTEGER NOT NULL DEFAULT 10000   -- shared bank accounts: user's share in basis points (10000 = 100%)
 );
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY,
@@ -340,6 +345,9 @@ def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     db = connect()
     db.executescript(SCHEMA)
+    cols = {r[1] for r in db.execute('PRAGMA table_info(accounts)')}
+    if 'share_bp' not in cols:
+        db.execute('ALTER TABLE accounts ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
     db.execute('BEGIN')
     for k, v in DEFAULT_SETTINGS.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)', (k, v))
@@ -689,13 +697,25 @@ def account_payload(db, body, existing=None):
     dup = scalar(db, 'SELECT id FROM accounts WHERE code=? AND id<>?', (code, existing['id'] if existing else 0))
     if dup:
         raise ApiError(f'Account code {code} is already used')
-    return code, name, typ, sub
+    share = SHARE_FULL
+    if sub == 'bank':
+        share = existing['share_bp'] if existing else SHARE_FULL
+        if body.get('share_pct') not in (None, ''):
+            try:
+                pct = float(body['share_pct'])
+            except (TypeError, ValueError):
+                raise ApiError('Your share must be a percentage, e.g. 50')
+            if not 0 < pct <= 100:
+                raise ApiError('Your share must be more than 0% and no more than 100%')
+            share = int(round(pct * 100))
+    return code, name, typ, sub, share
 
 
 @route('POST', '/api/accounts')
 def api_account_create(db, q, body):
-    code, name, typ, sub = account_payload(db, body)
-    cur = db.execute('INSERT INTO accounts(code, name, type, subtype) VALUES (?,?,?,?)', (code, name, typ, sub))
+    code, name, typ, sub, share = account_payload(db, body)
+    cur = db.execute('INSERT INTO accounts(code, name, type, subtype, share_bp) VALUES (?,?,?,?,?)',
+                     (code, name, typ, sub, share))
     audit(db, 'account_create', 'account', cur.lastrowid, body)
     return {'id': cur.lastrowid}
 
@@ -703,7 +723,7 @@ def api_account_create(db, q, body):
 @route('PUT', '/api/accounts/:aid')
 def api_account_update(db, q, body, aid):
     a = account(db, as_int(aid))
-    code, name, typ, sub = account_payload(db, body, a)
+    code, name, typ, sub, share = account_payload(db, body, a)
     used = scalar(db, 'SELECT COUNT(*) FROM journal_lines WHERE account_id=?', (a['id'],))
     if used and (typ != a['type']):
         if (typ in PL_TYPES) != (a['type'] in PL_TYPES):
@@ -717,8 +737,8 @@ def api_account_update(db, q, body, aid):
         bal = scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=?', (a['id'],))
         if bal:
             raise ApiError('Only accounts with a zero balance can be archived. Move the balance to another account first.')
-    db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=? WHERE id=?',
-               (code, name, typ, sub, archived, a['id']))
+    db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=?, share_bp=? WHERE id=?',
+               (code, name, typ, sub, archived, share, a['id']))
     audit(db, 'account_update', 'account', a['id'], body)
     return {'id': a['id']}
 
@@ -1263,7 +1283,29 @@ def api_register(db, q, body):
     for r in out:
         bal += s * r['amount']
         r['balance'] = bal
-    return {'account': a, 'opening': opening, 'closing': bal, 'lines': out}
+    res = {'account': a, 'opening': opening, 'closing': bal, 'lines': out, 'shared': False}
+    shared = shared_accounts(db)
+    if shared:
+        # The user's share of each line, as the reports see it (see report_lines). Shown only when it differs.
+        share = {}
+        for jid in {r['journal_id'] for r in out}:
+            jl = db.execute('SELECT l.id, l.account_id, a.subtype, l.amount, j.source FROM journal_lines l '
+                            'JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id '
+                            'WHERE l.journal_id=? ORDER BY l.id', (jid,)).fetchall()
+            amts, _ = share_journal([(x[1], x[2], x[3]) for x in jl], jl[0][4], shared)
+            share.update({x[0]: amt for x, amt in zip(jl, amts)})
+        sopen = 0
+        if frm:
+            sopen = s * sum(amt for aid, _, _, amt in report_lines(db, to=(D(frm) - dt.timedelta(days=1)).isoformat())
+                            if aid == a['id'])
+        sbal = sopen
+        for r in out:
+            r['share'] = share[r['id']]
+            sbal += s * r['share']
+            r['share_balance'] = sbal
+        if sopen != opening or any(r['share'] != r['amount'] for r in out):
+            res.update(shared=True, share_opening=sopen, share_closing=sbal)
+    return res
 
 
 # ----------------------------------------------------------------------------
@@ -1481,21 +1523,83 @@ def run_recurring(db, upto=None):
 # Reports
 # ----------------------------------------------------------------------------
 
+# Shared bank accounts
+# A bank account can be shared with other people (e.g. a joint account). Its share_bp says how much of it
+# belongs to the user. The ledger always stores the full amounts (so the account reconciles to the real
+# statement); reports show only the user's share:
+#   * lines in a shared bank account are cut to that account's share;
+#   * in a journal whose bank lines are all in one shared account (a spend, receive or journal from it),
+#     the other lines are cut by the same share, except AR/AP, which stay full so aged reports tie;
+#   * everything else (transfers to/from unshared accounts, opening balances) stays full.
+# Whatever no longer balances is the other owners' part and goes to the PARTNER pseudo account, shown
+# as a computed equity line, so every report still balances.
+
+def shared_accounts(db):
+    return {r[0]: r[1] for r in db.execute("SELECT id, share_bp FROM accounts WHERE subtype='bank' AND share_bp<?",
+                                           (SHARE_FULL,))}
+
+
+def cut(amount, bp):
+    """amount * bp / 10000 in whole cents, rounding half away from zero, without floats."""
+    q, r = divmod(abs(amount) * bp, SHARE_FULL)
+    v = q + (1 if 2 * r >= SHARE_FULL else 0)
+    return v if amount >= 0 else -v
+
+
+def share_journal(lines, source, shared):
+    """lines: [(account_id, subtype, amount)]. Returns (user's share of each line, PARTNER amount)."""
+    if not any(l[0] in shared for l in lines):
+        return [l[2] for l in lines], 0
+    banks = {shared.get(aid, SHARE_FULL) for aid, sub, _ in lines if sub == 'bank'}
+    rest = banks.pop() if len(banks) == 1 and source != 'opening' else SHARE_FULL
+    out = []
+    for aid, sub, amt in lines:
+        if aid in shared:
+            out.append(cut(amt, shared[aid]))
+        elif sub in ('bank', 'ar', 'ap'):
+            out.append(amt)
+        else:
+            out.append(cut(amt, rest))
+    return out, -sum(out)
+
+
+def report_lines(db, to=None, frm=None):
+    """Yield (account_id, type, date, amount) for frm <= date <= to, with shared accounts cut to the user's share.
+    Rows with account_id PARTNER (type 'equity') carry the other owners' part so each journal still balances."""
+    shared = shared_accounts(db)
+    sql = ('SELECT l.journal_id, j.date, j.source, l.account_id, a.type, a.subtype, l.amount FROM journal_lines l '
+           'JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id WHERE 1=1')
+    args = []
+    if to:
+        sql += ' AND j.date<=?'
+        args.append(to)
+    if frm:
+        sql += ' AND j.date>=?'
+        args.append(frm)
+    if not shared:
+        for r in db.execute(sql, args):
+            yield r[3], r[4], r[1], r[6]
+        return
+    sql += ' ORDER BY l.journal_id, l.id'
+    for _, grp in itertools.groupby(db.execute(sql, args), key=lambda r: r[0]):
+        grp = list(grp)
+        amts, partner = share_journal([(r[3], r[5], r[6]) for r in grp], grp[0][2], shared)
+        for r, amt in zip(grp, amts):
+            yield r[3], r[4], r[1], amt
+        if partner:
+            yield PARTNER, 'equity', grp[0][1], partner
+
+
 def balances_as_at(db, date):
-    return {r[0]: r[1] for r in db.execute('SELECT l.account_id, SUM(l.amount) FROM journal_lines l '
-                                           'JOIN journals j ON j.id=l.journal_id WHERE j.date<=? GROUP BY l.account_id',
-                                           (date,))}
+    out = {}
+    for aid, _, _, amt in report_lines(db, to=date):
+        out[aid] = out.get(aid, 0) + amt
+    return out
 
 
 def profit_between(db, frm, to):
     """Net profit (natural sign) for frm <= date <= to. frm may be None."""
-    sql = ('SELECT COALESCE(SUM(l.amount),0) FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
-           'JOIN accounts a ON a.id=l.account_id WHERE a.type IN (\'income\',\'cos\',\'expense\') AND j.date<=?')
-    args = [to]
-    if frm:
-        sql += ' AND j.date>=?'
-        args.append(frm)
-    return -scalar(db, sql, args)
+    return -sum(amt for _, typ, _, amt in report_lines(db, to=to, frm=frm) if typ in PL_TYPES)
 
 
 def fy_start(db, date_s):
@@ -1513,11 +1617,9 @@ def api_report_pl(db, q, body):
     idx = {m: i for i, m in enumerate(months)}
     accts = {a['id']: a for a in rows(db.execute("SELECT * FROM accounts WHERE type IN ('income','cos','expense') ORDER BY code"))}
     data = {}
-    for aid, ym, amt in db.execute(
-            'SELECT l.account_id, substr(j.date,1,7), SUM(l.amount) FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
-            'JOIN accounts a ON a.id=l.account_id WHERE a.type IN (\'income\',\'cos\',\'expense\') AND j.date BETWEEN ? AND ? '
-            'GROUP BY l.account_id, substr(j.date,1,7)', (start, end)):
-        data.setdefault(aid, [0] * len(months))[idx[ym]] += SIGN[accts[aid]['type']] * amt
+    for aid, typ, date, amt in report_lines(db, to=end, frm=start):
+        if typ in PL_TYPES:
+            data.setdefault(aid, [0] * len(months))[idx[date[:7]]] += SIGN[typ] * amt
     n = len(months)
 
     def section(typ, title):
@@ -1566,6 +1668,9 @@ def api_report_bs(db, q, body):
                 rs.append({'account_id': a['id'], 'code': a['code'], 'name': a['name'], 'values': vals,
                            'subtype': a['subtype']})
         if typ == 'equity':
+            partner = [-(c.get(PARTNER) or 0) for c in cols]
+            if any(partner):
+                rs.append({'account_id': None, 'code': '', 'name': PARTNER_NAME, 'values': partner, 'partner': True})
             rs.append({'account_id': None, 'code': '', 'name': 'Current Year Earnings', 'values': cye_vals, 'computed': True})
         tot = [sum(r['values'][i] for r in rs) for i in range(n)]
         return {'type': typ, 'title': title, 'rows': rs, 'totals': tot}
@@ -1622,6 +1727,10 @@ def api_report_tb(db, q, body):
         if v:
             out.append({'account_id': a['id'], 'code': a['code'], 'name': a['name'], 'type': a['type'],
                         'debit': v if v > 0 else 0, 'credit': -v if v < 0 else 0})
+    v = bal.get(PARTNER) or 0
+    if v:
+        out.append({'account_id': None, 'code': '', 'name': PARTNER_NAME, 'type': 'equity',
+                    'debit': v if v > 0 else 0, 'credit': -v if v < 0 else 0})
     return {'as_at': as_at, 'rows': out, 'debit': sum(r['debit'] for r in out), 'credit': sum(r['credit'] for r in out),
             'business_name': get_setting(db, 'business_name')}
 
@@ -1637,6 +1746,7 @@ def api_dashboard(db, q, body):
                               (a['id'],)))
         unc = scalar(db, 'SELECT COUNT(*) FROM journal_lines WHERE account_id=? AND recon_id IS NULL', (a['id'],))
         banks.append({'id': a['id'], 'name': a['name'], 'type': a['type'], 'balance': bal,
+                      'share_bp': a['share_bp'], 'my_balance': cut(bal, a['share_bp']),
                       'last_reconciled': last['statement_date'] if last else None,
                       'last_reconciled_balance': last['statement_balance'] if last else None, 'uncleared': unc})
 
@@ -1655,11 +1765,12 @@ def api_dashboard(db, q, body):
     last_m = add_months(month_start(this_m), -1, 1).strftime('%Y-%m')
 
     def month_pl(ym):
-        s, e = month_start(ym).isoformat(), month_end(ym).isoformat()
-        inc = -scalar(db, "SELECT COALESCE(SUM(l.amount),0) FROM journal_lines l JOIN journals j ON j.id=l.journal_id "
-                          "JOIN accounts a ON a.id=l.account_id WHERE a.type='income' AND j.date BETWEEN ? AND ?", (s, e))
-        exp = scalar(db, "SELECT COALESCE(SUM(l.amount),0) FROM journal_lines l JOIN journals j ON j.id=l.journal_id "
-                         "JOIN accounts a ON a.id=l.account_id WHERE a.type IN ('cos','expense') AND j.date BETWEEN ? AND ?", (s, e))
+        inc = exp = 0
+        for _, typ, _, amt in report_lines(db, to=month_end(ym).isoformat(), frm=month_start(ym).isoformat()):
+            if typ == 'income':
+                inc -= amt
+            elif typ in ('cos', 'expense'):
+                exp += amt
         return {'month': ym, 'income': inc, 'expenses': exp, 'profit': inc - exp}
 
     recent = []

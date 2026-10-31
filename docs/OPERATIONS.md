@@ -29,6 +29,16 @@ How the books are run day to day with numbr. For installing it, see `README.md`.
 
 Nothing needs closing. Retained earnings roll over automatically on 1 July. Give your accountant the P&L for the year, the balance sheet at 30 June, the aged reports and the trial balance.
 
+## Shared bank accounts
+
+For an account you share with someone (e.g. a joint account), open Banking → Manage accounts and set **Your share %** (e.g. 50). Enter and reconcile its transactions at their full amounts, exactly as they appear on the statement. Reports then show only your share:
+
+- Spending and income in the shared account count at your share on the P&L.
+- The balance sheet shows your share of its balance.
+- Money you move in from your own account, or bills you pay from it, is split; the part that belongs to the other owners shows as *Other owners' share of shared accounts* under Equity.
+
+Changing the percentage changes all past reports for that account too, including locked months.
+
 ## Fixing mistakes
 
 | Situation | Fix |

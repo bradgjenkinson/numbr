@@ -8,7 +8,7 @@ data = tempfile.mkdtemp()
 env = dict(os.environ, LEDGER_DATA=data, LEDGER_PORT='8799')
 p = subprocess.Popen([sys.executable, APP, '--no-browser'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 time.sleep(1.2)
-BASE = 'http://localhost:8799'
+BASE = "http://127.0.0.1:8799"
 
 
 def call(method, path, body=None, expect_ok=True):
@@ -196,6 +196,62 @@ try:
     tb = call('GET', '/api/reports/tb')
     check(tb['debit'] == tb['credit'], 'TB still balances after bank account changes')
     check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], 'BS still balances after bank account changes')
+    # shared bank account: user owns 60%
+    r = call('POST', '/api/accounts', {'code': '1-1170', 'name': 'Joint', 'type': 'asset', 'subtype': 'bank', 'share_pct': 0},
+             expect_ok=False)
+    check('more than 0%' in r.get('error', ''), 'share of 0% rejected')
+    r = call('POST', '/api/accounts', {'code': '1-1170', 'name': 'Joint', 'type': 'asset', 'subtype': 'bank', 'share_pct': 150},
+             expect_ok=False)
+    check('no more than 100%' in r.get('error', ''), 'share over 100% rejected')
+    joint = call('POST', '/api/accounts', {'code': '1-1170', 'name': 'Joint', 'type': 'asset', 'subtype': 'bank',
+                                           'share_pct': 60})['id']
+    check([a for a in call('GET', '/api/accounts') if a['id'] == joint][0]['share_bp'] == 6000, 'share stored as 6000 bp')
+    pl0 = call('GET', '/api/reports/pl?from=2026-10&to=2026-10')['net_profit_total']
+    bs0 = call('GET', '/api/reports/bs?to=2026-10&count=1')
+    assets0 = bs0['sections'][0]['totals'][0]
+    # $1,000 from Bank 1 into Joint, spend $100 bank fees from Joint, receive $50.01 income into Joint
+    call('POST', '/api/txn/transfer', {'date': '2026-10-10', 'from_account_id': A['1-1100'], 'to_account_id': joint, 'amount': 100000})
+    call('POST', '/api/txn/spend', {'date': '2026-10-15', 'bank_account_id': joint,
+                                    'lines': [{'account_id': A['6-1200'], 'amount': 10000}]})
+    call('POST', '/api/txn/receive', {'date': '2026-10-16', 'bank_account_id': joint,
+                                      'lines': [{'account_id': A['4-1000'], 'amount': 5001}]})
+    # pay a $200 bill from Joint: AP must clear in full so aged payables still tie
+    jb = call('POST', '/api/invoices', {'kind': 'bill', 'contact_id': sup, 'date': '2026-10-18',
+                                        'lines': [{'account_id': A['6-1600'], 'amount': 20000}]})
+    call('POST', '/api/payments', {'kind': 'payment', 'contact_id': sup, 'date': '2026-10-20', 'bank_account_id': joint,
+                                   'allocations': [{'invoice_id': jb['id'], 'amount': 20000}]})
+    pl1 = call('GET', '/api/reports/pl?from=2026-10&to=2026-10')['net_profit_total']
+    # P&L: fee 60% of 100 = 60, income 60% of 50.01 = 30.01 (rounded), rent bill 200 in full (posted by the bill)
+    check(pl1 - pl0 == 3001 - 6000 - 20000, f'P&L shows user share of shared account txns {pl1 - pl0}')
+    bs1 = call('GET', '/api/reports/bs?to=2026-10&count=1')
+    check(bs1['balanced'], 'BS still balances with a shared account')
+    jrow = [r for r in bs1['sections'][0]['rows'] if r['account_id'] == joint][0]
+    # Joint holds 1000 - 100 + 50.01 - 200 = 750.01; 60% = 450.006 -> lines cut separately: 600 - 60 + 30.01 - 120
+    check(jrow['values'][0] == 60000 - 6000 + 3001 - 12000, f"BS shows user share of Joint {jrow['values'][0]}")
+    prow = [r for r in bs1['sections'][2]['rows'] if r.get('partner')]
+    # transfer in: 400 belongs to the other owner (-400 equity); bill paid: other owner paid 80 (+80 equity)
+    check(prow and prow[0]['values'][0] == -40000 + 8000, f"other owners' share line {prow and prow[0]['values']}")
+    check(bs1['sections'][0]['totals'][0] - assets0 == -100000 + jrow['values'][0], 'assets move by Bank 1 out and Joint share in')
+    tb = call('GET', '/api/reports/tb')
+    check(tb['debit'] == tb['credit'], 'TB still balances with a shared account')
+    agp = call('GET', '/api/reports/aged?kind=bill&as_at=2026-10-31')
+    check(agp['control_balance'] == agp['totals']['total'], 'AP still ties when a bill is paid from a shared account')
+    reg = call('GET', f'/api/register?account_id={joint}&from=2026-10-01')
+    check(reg['shared'] and reg['closing'] == 75001 and reg['share_closing'] == jrow['values'][0],
+          f"register shows full and share balances {reg['closing']} {reg.get('share_closing')}")
+    dash = call('GET', '/api/dashboard')
+    jd = [b for b in dash['banks'] if b['id'] == joint][0]
+    check(jd['balance'] == 75001 and jd['my_balance'] == 45001, f"dashboard shows user share {jd['my_balance']}")
+    rc = call('GET', f'/api/reconcile?account_id={joint}')
+    check(sum(l['amount'] for l in rc['lines']) == 75001, 'reconcile uses full amounts')
+    # back to 100%: reports go back to full amounts
+    call('PUT', f'/api/accounts/{joint}', {'share_pct': 100})
+    bs2 = call('GET', '/api/reports/bs?to=2026-10&count=1')
+    check(bs2['balanced'] and not [r for r in bs2['sections'][2]['rows'] if r.get('partner')], 'share of 100% removes partner line')
+    check([r for r in bs2['sections'][0]['rows'] if r['account_id'] == joint][0]['values'][0] == 75001, 'full balance at 100%')
+    call('PUT', f'/api/accounts/{joint}', {'share_pct': 60})
+    check(call('GET', '/api/reports/bs?to=2027-07&count=1')['balanced'], 'BS balances after FY rollover with a shared account')
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')
