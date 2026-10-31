@@ -140,9 +140,23 @@ function contactOptions(sel, kind, blank = 'Choose…') {
     `<option value="__new">+ Add new contact…</option>`;
 }
 
+// numbr was updated while an older copy was still running: the old server ignores new fields, so changes
+// (like a bank account's share) wouldn't save. Tell the user how to restart.
+function showStaleServer(stale) {
+  let el = document.getElementById('stale-server');
+  if (!stale) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'stale-server';
+  el.className = 'notice bad';
+  el.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:50;margin:0;box-shadow:0 4px 16px rgba(0,0,0,.15)';
+  el.innerHTML = '<b>numbr has been updated but the old version is still running.</b> Some changes won\'t save until you restart it. Close the numbr window, then double-click start.bat again.';
+  document.body.appendChild(el);
+}
 async function refreshState() {
   const st = await GET('/api/state');
   Object.assign(S, st);
+  showStaleServer(st.server_current !== true);
   document.getElementById('bizname').textContent = S.settings.business_name || '';
   document.title = S.settings.business_name ? `${S.settings.business_name} – numbr` : 'numbr';
   const made = (st.generated || []).filter(g => !g.skipped);

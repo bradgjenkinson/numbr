@@ -8,6 +8,7 @@ Your books live in data/books.db. Backups go to data/backups/.
 """
 import calendar
 import datetime as dt
+import hashlib
 import itertools
 import json
 import mimetypes
@@ -29,6 +30,18 @@ STATIC_DIR = os.path.join(APP_DIR, 'static')
 HOST = '127.0.0.1'
 PORT = int(os.environ.get('LEDGER_PORT', '8765'))
 KEEP_BACKUPS = 40
+
+
+def code_stamp():
+    """Fingerprint of app.py on disk. Lets a running server tell that numbr has been updated since it started."""
+    try:
+        with open(os.path.abspath(__file__), 'rb') as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError:
+        return ''
+
+
+STARTED_STAMP = code_stamp()
 
 # Natural sign: +1 means a debit increases the account's balance.
 SIGN = {'asset': 1, 'cos': 1, 'expense': 1, 'liability': -1, 'equity': -1, 'income': -1}
@@ -561,7 +574,7 @@ def api_state(db, q, body):
         generated = run_recurring(db)
         s = all_settings(db)
     return {'settings': s, 'accounts': list_accounts(db), 'contacts': list_contacts(db),
-            'today': today(), 'generated': generated}
+            'today': today(), 'generated': generated, 'server_current': code_stamp() == STARTED_STAMP}
 
 
 @route('PUT', '/api/settings')
@@ -1829,6 +1842,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.host_ok() or self.headers.get('X-Ledger') != '1':
             return self.send_json({'error': 'Forbidden'}, 403)
         u = urlparse(self.path)
+        if method == 'POST' and u.path == '/api/shutdown':
+            # Used by a newer copy of numbr starting up, so it can replace this (outdated) server.
+            self.send_json({'ok': True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         body = {}
         if method in ('POST', 'PUT'):
@@ -1888,6 +1906,59 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_api('DELETE')
 
 
+class Server(HTTPServer):
+    """HTTPServer that won't share its port. On Windows, SO_REUSEADDR (HTTPServer's default) lets a second
+    copy of numbr bind the same port while requests still reach the first, so use an exclusive bind there."""
+    if os.name == 'nt':
+        allow_reuse_address = False
+
+        def server_bind(self):
+            import socket
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+
+def running_server(method, path):
+    """Call the numbr server already on our port. Returns its JSON reply, or None if it didn't answer."""
+    import urllib.request
+    req = urllib.request.Request(f'http://127.0.0.1:{PORT}{path}', method=method,
+                                 headers={'X-Ledger': '1', 'Content-Type': 'application/json'},
+                                 data=b'{}' if method == 'POST' else None)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def bind_server():
+    """Start listening. If an outdated copy of numbr already holds the port, stop it and take over."""
+    import time
+    url = f'http://localhost:{PORT}/'
+    try:
+        return Server((HOST, PORT), Handler)
+    except OSError:
+        pass
+    st = running_server('GET', '/api/state')
+    if st is not None and st.get('server_current') is True:
+        print(f'numbr is already running. Opening {url}')
+        webbrowser.open(url)
+        return None
+    if st is not None and running_server('POST', '/api/shutdown'):
+        for _ in range(50):
+            time.sleep(0.1)
+            try:
+                srv = Server((HOST, PORT), Handler)
+                print('Replaced an older copy of numbr that was still running.')
+                return srv
+            except OSError:
+                pass
+    print()
+    print('  An older copy of numbr is still running, so this update can\'t start.')
+    print('  Close the other numbr window (or restart the computer), then double-click start.bat again.')
+    sys.exit(1)
+
+
 def main():
     mimetypes.add_type('application/javascript', '.js')
     mimetypes.add_type('text/css', '.css')
@@ -1902,11 +1973,8 @@ def main():
     db.execute('COMMIT')
     db.close()
     url = f'http://localhost:{PORT}/'
-    try:
-        srv = HTTPServer((HOST, PORT), Handler)
-    except OSError:
-        print(f'numbr already seems to be running. Opening {url}')
-        webbrowser.open(url)
+    srv = bind_server()
+    if srv is None:
         return
     print('=' * 60)
     print(f'  numbr is running at {url}')
