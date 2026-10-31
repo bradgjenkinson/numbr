@@ -1,12 +1,12 @@
-# Ledger
+# numbr
 
 Simple bookkeeping that runs on your own computer. Your books never leave your machine.
 
 ## Getting started (Windows)
 
 1. Install Python 3.10 or newer from python.org (tick **Add python.exe to PATH** during install). One-time only.
-2. Put this `Ledger` folder somewhere permanent, e.g. `Documents\Ledger`.
-3. Double-click **start.bat**. A small black window opens and Ledger opens in your browser at http://localhost:8765.
+2. Put this `numbr` folder somewhere permanent, e.g. `Documents\numbr`.
+3. Double-click **start.bat**. A small black window opens and numbr opens in your browser at http://localhost:8765.
 4. Leave the black window open while you work. Close it when you're done.
 
 Tip: right-click `start.bat` → Send to → Desktop (create shortcut) for a desktop icon.
@@ -25,7 +25,7 @@ The setup wizard walks you through:
 - **Sales / Purchases**: enter invoices and bills; record payments with *Receive payment* / *Pay bills*.
 - **Banking**: *Spend money* / *Receive money* for anything not on an invoice or bill (fees, direct debits, interest).
 - **Reconcile**: pick the account, enter the statement date and closing balance, tick what's on the statement until *Out by* is $0.00, then click Reconcile. Optionally *Import statement CSV* from your bank to auto-match and spot anything missing.
-- **Recurring**: rent, subscriptions, retainers and the like are created automatically on their date whenever Ledger is open.
+- **Recurring**: rent, subscriptions, retainers and the like are created automatically on their date whenever numbr is open.
 
 ## Month end
 
@@ -36,9 +36,9 @@ The setup wizard walks you through:
 ## Your data and backups
 
 - Everything is in `data\books.db` inside this folder.
-- A copy is saved to `data\backups` every time Ledger starts (latest 40 kept), plus *Settings → Back up now*.
+- A copy is saved to `data\backups` every time numbr starts (latest 40 kept), plus *Settings → Back up now*.
 - Also copy the `data` folder somewhere else regularly (OneDrive, USB drive).
-- To move to a new computer, copy the whole `Ledger` folder.
+- To move to a new computer, copy the whole `numbr` folder.
 
 ## Notes
 

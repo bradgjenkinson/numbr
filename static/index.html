@@ -3,13 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ledger</title>
+<title>numbr</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div id="shell">
   <aside id="nav">
-    <div class="brand"><span class="mark">L</span><div><div class="brand-name">Ledger</div><div class="biz" id="bizname"></div></div></div>
+    <a class="brand" href="#/dashboard" aria-label="numbr home">
+      <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <linearGradient id="mark-g" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#0e9f8e"/><stop offset="1" stop-color="#5eead4"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="16" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.10)"/>
+        <rect x="14" y="34" width="9" height="16" rx="4.5" fill="url(#mark-g)" opacity=".55"/>
+        <rect x="27.5" y="24" width="9" height="26" rx="4.5" fill="url(#mark-g)" opacity=".8"/>
+        <rect x="41" y="14" width="9" height="36" rx="4.5" fill="url(#mark-g)"/>
+      </svg>
+      <div><div class="brand-name">numbr<span class="dot"></span></div><div class="biz" id="bizname"></div></div>
+    </a>
     <nav>
       <a href="#/dashboard" data-sec="dashboard">Dashboard</a>
       <div class="navhead">Money in & out</div>

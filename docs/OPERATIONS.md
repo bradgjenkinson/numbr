@@ -1,6 +1,6 @@
 # Operations
 
-How the books are run day to day with Ledger. For installing it, see `README.md`.
+How the books are run day to day with numbr. For installing it, see `README.md`.
 
 ## Weekly
 
@@ -43,8 +43,8 @@ Nothing needs closing. Retained earnings roll over automatically on 1 July. Give
 
 - **Automatic:** each start copies `data/books.db` to `data/backups/books-YYYYMMDD-HHMMSS-startup.db` (latest 40 kept).
 - **Manual:** Settings → Back up now.
-- **Off-machine:** regularly copy the `data` folder to OneDrive or a USB drive while Ledger is closed. The `data` folder is deliberately **not** in git.
-- **Restore:** close Ledger, rename `data/books.db` aside, copy the chosen backup to `data/books.db`, then start Ledger.
+- **Off-machine:** regularly copy the `data` folder to OneDrive or a USB drive while numbr is closed. The `data` folder is deliberately **not** in git.
+- **Restore:** close numbr, rename `data/books.db` aside, copy the chosen backup to `data/books.db`, then start numbr.
 - **New computer:** clone this repo (or copy the folder), copy your `data` folder into it, then run `start.bat`.
 
 ## Checks if something looks wrong

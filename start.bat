@@ -1,5 +1,5 @@
 @echo off
-title Ledger
+title numbr
 cd /d "%~dp0"
 
 where py >nul 2>nul
@@ -15,7 +15,7 @@ if %errorlevel%==0 (
 )
 
 echo.
-echo  Ledger needs Python 3.10 or newer, which isn't installed yet.
+echo  numbr needs Python 3.10 or newer, which isn't installed yet.
 echo  Opening the download page now. During install, tick "Add python.exe to PATH".
 echo  Then double-click start.bat again.
 echo.
@@ -26,6 +26,6 @@ exit /b
 :done
 if errorlevel 1 (
   echo.
-  echo  Ledger stopped with an error. The message above explains what went wrong.
+  echo  numbr stopped with an error. The message above explains what went wrong.
   pause
 )

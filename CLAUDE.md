@@ -4,7 +4,7 @@ Guidance for Claude (and anyone else) working on this repository.
 
 ## What this is
 
-**Ledger** is Brad's self-built replacement for desktop MYOB: a single-user bookkeeping app that runs locally on Windows and opens in the browser. Scope is deliberately small:
+**numbr** is Brad's self-built replacement for desktop MYOB: a single-user bookkeeping app that runs locally on Windows and opens in the browser. Scope is deliberately small:
 
 - Weekly manual bank reconciliation (with optional bank CSV import and auto-matching)
 - Accounts receivable / payable (invoices, bills, part payments, aged reports)

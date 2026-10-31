@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ledger - simple local bookkeeping for a small business.
+numbr - simple local bookkeeping for a small business.
 
 Runs entirely on this computer using only the Python standard library and SQLite.
 Start it with start.bat (Windows) or:  python app.py
@@ -1690,7 +1690,7 @@ def api_backup(db, q, body):
 # ----------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'Ledger/1.0'
+    server_version = 'numbr/1.0'
 
     def log_message(self, fmt, *args):
         pass
@@ -1777,6 +1777,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     mimetypes.add_type('application/javascript', '.js')
     mimetypes.add_type('text/css', '.css')
+    mimetypes.add_type('image/svg+xml', '.svg')
     fresh = not os.path.exists(DB_PATH)
     init_db()
     if not fresh:
@@ -1790,11 +1791,11 @@ def main():
     try:
         srv = HTTPServer((HOST, PORT), Handler)
     except OSError:
-        print(f'Ledger already seems to be running. Opening {url}')
+        print(f'numbr already seems to be running. Opening {url}')
         webbrowser.open(url)
         return
     print('=' * 60)
-    print(f'  Ledger is running at {url}')
+    print(f'  numbr is running at {url}')
     print(f'  Your books: {DB_PATH}')
     if gen:
         print(f'  Created {len([g for g in gen if not g.get("skipped")])} recurring transaction(s)')

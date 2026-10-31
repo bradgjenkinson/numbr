@@ -1,5 +1,5 @@
 'use strict';
-/* Ledger front end - plain JavaScript, no build step. */
+/* numbr front end - plain JavaScript, no build step. */
 
 const S = { settings: {}, accounts: [], contacts: [], today: '' };
 const main = document.getElementById('main');
@@ -123,7 +123,7 @@ async function refreshState() {
   const st = await GET('/api/state');
   Object.assign(S, st);
   document.getElementById('bizname').textContent = S.settings.business_name || '';
-  document.title = S.settings.business_name ? `${S.settings.business_name} – Ledger` : 'Ledger';
+  document.title = S.settings.business_name ? `${S.settings.business_name} – numbr` : 'numbr';
   const made = (st.generated || []).filter(g => !g.skipped);
   const skipped = (st.generated || []).filter(g => g.skipped);
   if (made.length) toast(`Created ${made.length} recurring transaction${made.length > 1 ? 's' : ''}`);
@@ -348,12 +348,12 @@ async function setupPage(step) {
   const conv = S.settings.conversion_date;
   if (step === 1) {
     const defConv = S.today.slice(0, 7) + '-01';
-    main.innerHTML = `<div class="setup">${steps}<div class="panel"><h1 style="margin-top:0">Welcome to Ledger</h1>
+    main.innerHTML = `<div class="setup">${steps}<div class="panel"><h1 style="margin-top:0">Welcome to numbr</h1>
       <p class="muted">A few details to get your books started. You can change these later in Settings.</p>
       <div class="field"><label>Business name</label><input id="s-name" value="${esc(S.settings.business_name)}"></div>
       <div class="form-grid">
         <div class="field"><label>Start date</label><input id="s-conv" type="date" value="${esc(conv || defConv)}">
-          <div class="hint">The first day you'll record transactions in Ledger. Your opening balances are as at the day before.
+          <div class="hint">The first day you'll record transactions in numbr. Your opening balances are as at the day before.
           The start of a month (or financial year) is easiest.</div></div>
         <div class="field"><label>Financial year starts in</label><select id="s-fy">${[...Array(12)].map((_, i) =>
           `<option value="${i + 1}" ${+S.settings.fy_start_month === i + 1 ? 'selected' : ''}>${new Date(2000, i, 1).toLocaleDateString('en-AU', { month: 'long' })}</option>`).join('')}</select></div>
@@ -938,12 +938,12 @@ async function reconcilePage() {
     const unmatched = inPeriod.filter(c => !c.match);
     $('#rc-csv').innerHTML = `<div class="panel flush"><h2>Statement lines (${inPeriod.length} up to ${dfmt(sd)}) · ${inPeriod.length - unmatched.length} matched · ${unmatched.length} unmatched
         <button class="small" id="rc-csv-clear" style="float:right">Close statement</button></h2>
-      ${unmatched.length ? `<p class="muted" style="padding:0 18px">These statement lines have no matching transaction in Ledger. Create one, or enter it properly (e.g. as a customer payment) and come back.</p>
+      ${unmatched.length ? `<p class="muted" style="padding:0 18px">These statement lines have no matching transaction in numbr. Create one, or enter it properly (e.g. as a customer payment) and come back.</p>
       <table><thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody>
       ${unmatched.map(c => `<tr><td>${dfmt(c.date)}</td><td>${esc(c.description)}</td><td class="num${c.amount < 0 ? ' neg' : ''}">${fmt(c.amount)}</td>
         <td class="actions" style="justify-content:flex-end">${c.amount > 0 ? `<button class="small" data-pay="receipt" data-i="${R.csv.indexOf(c)}">Customer payment</button>` : `<button class="small" data-pay="payment" data-i="${R.csv.indexOf(c)}">Bill payment</button>`}
         <button class="small primary" data-new="${R.csv.indexOf(c)}">${c.amount < 0 ? 'Spend money' : 'Receive money'}</button></td></tr>`).join('')}
-      </tbody></table>` : '<div class="notice good" style="margin:12px 18px">Every statement line matches a transaction in Ledger.</div>'}</div>`;
+      </tbody></table>` : '<div class="notice good" style="margin:12px 18px">Every statement line matches a transaction in numbr.</div>'}</div>`;
     $('#rc-csv-clear').onclick = () => { R.csv = null; drawCsv(); drawLines(); };
     $$('[data-new]').forEach(b => b.onclick = () => {
       const c = R.csv[+b.dataset.new];
@@ -1099,7 +1099,7 @@ const RKIND = { sale: 'Sales invoice', bill: 'Supplier bill', spend: 'Spend mone
 
 async function recurringList() {
   const list = await GET('/api/recurring');
-  page('Recurring transactions', 'Created automatically on their date whenever Ledger is open (or the next time you open it)', `<a class="btn primary" href="#/recurring/new">New recurring</a>`,
+  page('Recurring transactions', 'Created automatically on their date whenever numbr is open (or the next time you open it)', `<a class="btn primary" href="#/recurring/new">New recurring</a>`,
     `<div class="panel flush">${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Creates</th><th>Who / account</th><th>How often</th><th>Next</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>
     ${list.map(r => `<tr class="click" data-href="#/recurring/${r.id}"><td>${esc(r.name)}</td><td>${RKIND[r.kind]}</td><td>${esc(r.contact_name || r.bank_name || '')}</td>
       <td>${FREQ_LABEL[r.frequency]}${r.anchor_day === 31 && r.frequency !== 'weekly' && r.frequency !== 'fortnightly' ? ' (month end)' : ''}</td>
@@ -1405,7 +1405,7 @@ async function settingsPage() {
       <div class="filters"><div class="field"><label>Lock transactions up to and including</label><input type="date" id="st-lock" value="${esc(st.lock_date)}"></div>
       <button id="st-lock-save">Update lock</button><button id="st-lock-last">Lock to ${dfmt(lastMonthEnd)}</button></div></div>
     <div class="panel"><h2>Backups</h2>
-      <p class="muted" style="margin-top:0">Ledger keeps all your data in one file (<code>data\\books.db</code> inside the Ledger folder) and copies it to <code>data\\backups</code> every time it starts, keeping the latest 40.
+      <p class="muted" style="margin-top:0">numbr keeps all your data in one file (<code>data\\books.db</code> inside the numbr folder) and copies it to <code>data\\backups</code> every time it starts, keeping the latest 40.
       For safety, also copy the <code>data</code> folder to OneDrive, a USB drive or similar from time to time.</p>
       <button id="st-backup">Back up now</button></div>
     <div class="panel"><h2>More</h2><div class="actions"><a class="btn" href="#/opening">Opening balances</a><a class="btn" href="#/accounts">Chart of accounts</a><a class="btn" href="#/audit">Audit log</a><a class="btn" href="#/setup/4">Unpaid items at start</a></div></div>`);
@@ -1420,7 +1420,7 @@ async function settingsPage() {
 
 async function auditPage() {
   const list = await GET('/api/audit');
-  page('Audit log', 'The last 300 changes made in Ledger', `<button onclick="history.back()">Back</button>`,
+  page('Audit log', 'The last 300 changes made in numbr', `<button onclick="history.back()">Back</button>`,
     `<div class="panel flush"><table><thead><tr><th>When</th><th>Action</th><th>Detail</th></tr></thead><tbody>
     ${list.map(a => `<tr><td class="muted" style="white-space:nowrap">${esc(a.ts.replace('T', ' '))}</td><td>${esc(a.action.replace(/_/g, ' '))}</td>
       <td class="muted" style="font-family:var(--mono);font-size:12px;word-break:break-all">${esc((a.detail || '').slice(0, 220))}</td></tr>`).join('')}</tbody></table></div>`);
@@ -1433,6 +1433,6 @@ async function auditPage() {
     if (S.settings.setup_done !== '1' && !location.hash) location.hash = '#/setup';
     router();
   } catch (e) {
-    main.innerHTML = `<div class="notice bad">Couldn't connect to Ledger. Make sure the Ledger window is still open, then refresh this page.<br><small>${esc(e.message)}</small></div>`;
+    main.innerHTML = `<div class="notice bad">Couldn't connect to numbr. Make sure the numbr window is still open, then refresh this page.<br><small>${esc(e.message)}</small></div>`;
   }
 })();
