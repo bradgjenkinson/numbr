@@ -32,7 +32,20 @@ def check(cond, msg):
 
 try:
     st = call('GET', '/api/state')
+    banks = [a['name'] for a in st['accounts'] if a['subtype'] == 'bank']
+    check(banks == ['Bank 1'], f'new books start with one bank account called Bank 1 {banks}')
+    # add a second bank account and a credit card
+    call('POST', '/api/accounts', {'code': '1-1200', 'name': 'Bank 2', 'type': 'asset', 'subtype': 'bank'})
+    call('POST', '/api/accounts', {'code': '2-1100', 'name': 'Credit Card 1', 'type': 'liability', 'subtype': 'bank'})
+    st = call('GET', '/api/state')
     A = {a['code']: a['id'] for a in st['accounts']}
+    check(len([a for a in st['accounts'] if a['subtype'] == 'bank']) == 3, 'bank accounts can be added')
+    call('PUT', f"/api/accounts/{A['1-1200']}", {'name': 'Savings'})
+    names = {a['id']: a['name'] for a in call('GET', '/api/accounts')}
+    check(names[A['1-1200']] == 'Savings', 'bank account can be renamed')
+    spare = call('POST', '/api/accounts', {'code': '1-1150', 'name': 'Spare', 'type': 'asset', 'subtype': 'bank'})['id']
+    call('DELETE', f'/api/accounts/{spare}')
+    check(spare not in [a['id'] for a in call('GET', '/api/accounts')], 'unused bank account can be removed')
     call('PUT', '/api/settings', {'business_name': 'Test Co', 'conversion_date': '2026-07-01', 'fy_start_month': 7})
     st = call('GET', '/api/state')
     check(st['settings']['lock_date'] == '2026-06-30', 'lock date defaults to day before start')
@@ -170,6 +183,19 @@ try:
     check(g['editable'] and g['total'] == 5000, 'general journal')
     reg = call('GET', f"/api/register?account_id={A['1-1100']}&from=2026-07-01")
     check(reg['opening'] == 1000000, 'register opening balance')
+    # removing used bank accounts
+    r = call('DELETE', f"/api/accounts/{A['1-1100']}", expect_ok=False)
+    check('Archive' in r.get('error', ''), 'used bank account cannot be deleted')
+    r = call('PUT', f"/api/accounts/{A['1-1100']}", {'archived': True}, expect_ok=False)
+    check('zero balance' in r.get('error', ''), 'bank account with a balance cannot be archived')
+    rec_bank = call('POST', '/api/accounts', {'code': '1-1160', 'name': 'Recurring only', 'type': 'asset', 'subtype': 'bank'})['id']
+    rr = call('POST', '/api/recurring', {'name': 'Future', 'kind': 'spend', 'bank_account_id': rec_bank, 'frequency': 'monthly',
+                                         'next_date': '2027-01-01', 'lines': [{'account_id': A['6-1700'], 'amount': 100}]})
+    r = call('DELETE', f'/api/accounts/{rec_bank}', expect_ok=False)
+    check('recurring' in r.get('error', ''), 'bank account used by a recurring template cannot be deleted')
+    tb = call('GET', '/api/reports/tb')
+    check(tb['debit'] == tb['credit'], 'TB still balances after bank account changes')
+    check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], 'BS still balances after bank account changes')
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')

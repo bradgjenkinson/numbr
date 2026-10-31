@@ -161,12 +161,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 DEFAULT_ACCOUNTS = [
-    ('1-1100', 'Business Bank Account', 'asset', 'bank'),
-    ('1-1200', 'Savings Account', 'asset', 'bank'),
+    ('1-1100', 'Bank 1', 'asset', 'bank'),
     ('1-1300', 'Accounts Receivable', 'asset', 'ar'),
     ('1-2000', 'Equipment', 'asset', 'other'),
     ('1-2100', 'Less Accumulated Depreciation', 'asset', 'other'),
-    ('2-1100', 'Business Credit Card', 'liability', 'bank'),
     ('2-1200', 'Accounts Payable', 'liability', 'ap'),
     ('2-1300', 'Income Tax Payable', 'liability', 'other'),
     ('2-2000', 'Loans', 'liability', 'other'),
@@ -718,7 +716,7 @@ def api_account_update(db, q, body, aid):
     if archived and not a['archived']:
         bal = scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=?', (a['id'],))
         if bal:
-            raise ApiError('Only accounts with a zero balance can be archived')
+            raise ApiError('Only accounts with a zero balance can be archived. Move the balance to another account first.')
     db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=? WHERE id=?',
                (code, name, typ, sub, archived, a['id']))
     audit(db, 'account_update', 'account', a['id'], body)
@@ -733,6 +731,11 @@ def api_account_delete(db, q, body, aid):
     if (scalar(db, 'SELECT COUNT(*) FROM journal_lines WHERE account_id=?', (a['id'],)) or
             scalar(db, 'SELECT COUNT(*) FROM invoice_lines WHERE account_id=?', (a['id'],))):
         raise ApiError('This account has been used. Archive it instead.')
+    if (scalar(db, 'SELECT COUNT(*) FROM payments WHERE bank_account_id=?', (a['id'],)) or
+            scalar(db, 'SELECT COUNT(*) FROM reconciliations WHERE account_id=?', (a['id'],))):
+        raise ApiError('This account has been used. Archive it instead.')
+    if scalar(db, 'SELECT COUNT(*) FROM recurring WHERE bank_account_id=?', (a['id'],)):
+        raise ApiError('This account is used by a recurring transaction. Change or delete that first.')
     for r in db.execute('SELECT lines FROM recurring'):
         if any(int(l['account_id']) == a['id'] for l in json.loads(r[0])):
             raise ApiError('This account is used by a recurring transaction')

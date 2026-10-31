@@ -111,6 +111,18 @@ function bankOptions(sel, blank = null) {
   return (blank ? `<option value="">${esc(blank)}</option>` : '') +
     list.map(a => `<option value="${a.id}" ${a.id == sel ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
 }
+// Create a bank account (type 'asset') or credit card (type 'liability') with the next free code and a default name.
+async function createBankAccount(type, name) {
+  const pre = type === 'asset' ? '1-11' : '2-11';
+  let n = 10; while (S.accounts.some(a => a.code === `${pre}${n}`)) n += 10;
+  if (!name) {
+    const base = type === 'asset' ? 'Bank' : 'Credit Card';
+    let k = S.accounts.filter(a => isBank(a) && a.type === type).length + 1;
+    while (S.accounts.some(a => a.name.toLowerCase() === `${base} ${k}`.toLowerCase())) k++;
+    name = `${base} ${k}`;
+  }
+  return api('POST', '/api/accounts', { code: `${pre}${n}`, name, type, subtype: 'bank' });
+}
 const firstBank = () => (S.accounts.find(a => isBank(a) && !a.archived && a.type === 'asset') || S.accounts.find(a => isBank(a) && !a.archived) || {}).id;
 function contactOptions(sel, kind, blank = 'Choose…') {
   const ok = c => (!c.archived || c.id == sel) && (!kind || c.kind === kind || c.kind === 'both');
@@ -386,10 +398,8 @@ async function setupPage(step) {
     };
     const add = async type => {
       try {
-        await saveAll();
-        const pre = type === 'asset' ? '1-11' : '2-11';
-        let n = 10; while (S.accounts.some(a => a.code === `${pre}${n}`)) n += 10;
-        await api('POST', '/api/accounts', { code: `${pre}${n}`, name: type === 'asset' ? 'New Bank Account' : 'New Credit Card', type, subtype: 'bank' });
+        await saveAll(); await refreshState();
+        await createBankAccount(type);
         await refreshState(); setupPage(2);
       } catch (e) { fail(e); }
     };
@@ -676,15 +686,66 @@ async function paymentView(id) {
 // ---------------------------------------------------------------- banking
 async function bankingHome() {
   const banks = S.accounts.filter(a => isBank(a) && !a.archived);
-  const sel = QS.get('account') || firstBank();
-  if (!sel) { page('Banking', '', '', '<div class="empty">No bank accounts. Add one in Chart of Accounts.</div>'); return; }
+  const want = QS.get('account');
+  const sel = want && banks.some(b => b.id == want) ? want : firstBank();
+  if (!sel) {
+    page('Banking', '', '<button class="primary" id="bk-manage">Manage accounts</button>',
+      '<div class="empty">No bank accounts yet. Use Manage accounts to add one.</div>');
+    $('#bk-manage').onclick = manageBankAccounts;
+    return;
+  }
   await registerView(sel, {
     title: 'Banking',
     picker: `<div class="tabs">${banks.map(b => `<a href="#/banking?account=${b.id}" class="${b.id == sel ? 'active' : ''}">${esc(b.name)}</a>`).join('')}</div>`,
-    actions: `<a class="btn" href="#/banking/transfer">Transfer</a><a class="btn" href="#/banking/receive">Receive money</a>
+    actions: `<button id="bk-manage">Manage accounts</button><a class="btn" href="#/banking/transfer">Transfer</a><a class="btn" href="#/banking/receive">Receive money</a>
       <a class="btn" href="#/banking/spend">Spend money</a><a class="btn primary" href="#/reconcile?account=${sel}">Reconcile</a>`,
     hashBase: `#/banking?account=${sel}`,
   });
+  $('#bk-manage').onclick = manageBankAccounts;
+}
+
+// Add, rename and remove bank accounts and credit cards.
+function manageBankAccounts() {
+  const draw = () => {
+    const banks = S.accounts.filter(a => isBank(a) && !a.archived);
+    modal(`<h2>Bank accounts</h2>
+      <p class="muted">Rename an account by editing its name. Accounts that have transactions can only be removed once their balance is zero; they're archived so history is kept.</p>
+      ${banks.length ? `<table><thead><tr><th>Name</th><th>Kind</th><th class="num">Balance</th><th></th></tr></thead><tbody>
+      ${banks.map(a => `<tr data-id="${a.id}"><td><input class="mb-name" value="${esc(a.name)}" aria-label="Account name"></td>
+        <td class="muted">${a.type === 'asset' ? 'Bank account' : 'Credit card'}</td><td class="num">${$fmt(a.balance)}</td>
+        <td><button class="small danger mb-del">Remove</button></td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty">No bank accounts</div>'}
+      <div class="actions" style="margin-top:10px"><button class="small" id="mb-add-bank">+ Bank account</button><button class="small" id="mb-add-cc">+ Credit card</button></div>
+      <div class="modal-foot"><button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
+      const saveNames = async () => {
+        for (const tr of el.querySelectorAll('tr[data-id]')) {
+          const a = acct(tr.dataset.id), name = tr.querySelector('.mb-name').value.trim();
+          if (!name) throw new Error('Every bank account needs a name');
+          if (name !== a.name) await api('PUT', `/api/accounts/${a.id}`, { name });
+        }
+      };
+      const add = async type => {
+        try { await saveNames(); await refreshState(); await createBankAccount(type); await refreshState(); draw(); } catch (e) { fail(e); }
+      };
+      el.querySelector('#mb-add-bank').onclick = () => add('asset');
+      el.querySelector('#mb-add-cc').onclick = () => add('liability');
+      el.querySelectorAll('.mb-del').forEach(b => b.onclick = async () => {
+        const a = acct(b.closest('tr').dataset.id);
+        try {
+          await saveNames(); await refreshState();
+          if (!await confirmBox(`Remove <b>${esc(a.name)}</b>?${a.used ? ' It has transactions, so it will be archived and its history kept.' : ''}`, 'Remove', true)) { draw(); return; }
+          if (a.used) await api('PUT', `/api/accounts/${a.id}`, { archived: true });
+          else await api('DELETE', `/api/accounts/${a.id}`);
+          await refreshState(); toast(`${a.name} removed`); draw();
+        } catch (e) { fail(e); draw(); }
+      });
+      el.querySelector('[data-x=no]').onclick = () => { closeModal(); router(); };
+      el.querySelector('[data-x=yes]').onclick = async () => {
+        try { await saveNames(); await refreshState(); closeModal(); toast('Bank accounts saved'); router(); } catch (e) { fail(e); }
+      };
+    });
+  };
+  draw();
 }
 async function registerPage(id) {
   await registerView(id, { title: null, actions: `<button onclick="history.back()">Back</button>`, hashBase: `#/register/${id}?` });

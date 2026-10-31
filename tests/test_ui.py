@@ -31,13 +31,16 @@ try:
         page.fill('#s-name', 'Jenkinson Consulting')
         page.fill('#s-conv', '2026-07-01')
         page.click('#s-next'); page.wait_for_selector('.b-name')
+        assert page.locator('.b-name').count() == 1 and page.locator('.b-name').first.input_value() == 'Bank 1'
+        page.click('#b-add-cc'); page.wait_for_selector('.b-name >> nth=1')
+        assert page.locator('.b-name').nth(1).input_value() == 'Credit Card 1'
         page.locator('.b-name').first.fill('Westpac Business One')
         page.click('#s-next'); page.wait_for_selector('.ob')
         # opening balances: bank 1 = 8000, AR = 2750, credit card 320, capital = rest
         def ob(code, v):
             aid = page.evaluate(f"S.accounts.find(a=>a.code=='{code}').id")
             page.fill(f'.ob[data-id="{aid}"]', v)
-        ob('1-1100', '8,000'); ob('1-1300', '2750'); ob('2-1100', '320'); ob('3-1000', '10430')
+        ob('1-1100', '8,000'); ob('1-1300', '2750'); ob('2-1110', '320'); ob('3-1000', '10430')
         page.locator('.ob').first.blur()
         assert page.inner_text('#ob-hist').strip() == '0.00', page.inner_text('#ob-hist')
         shot(page, '02-opening')
@@ -125,6 +128,18 @@ try:
         assert 'Ties to' in page.inner_text('main'), page.inner_text('main')
         shot(page, '12-aged')
         page.goto(URL + '#/banking'); page.wait_for_selector('.filters'); shot(page, '13-banking')
+        # manage bank accounts: add, rename, remove
+        page.click('#bk-manage'); page.wait_for_selector('.mb-name')
+        page.click('#mb-add-bank'); page.wait_for_selector('.mb-name >> nth=2')
+        assert page.locator('.mb-name').nth(2).input_value() == 'Bank 2'
+        page.locator('.mb-name').nth(2).fill('Term Deposit')
+        page.click('#modal [data-x=yes]'); page.wait_for_selector('.tabs >> text=Term Deposit')
+        page.click('#bk-manage'); page.wait_for_selector('.mb-name')
+        page.locator('tr', has=page.locator('input[value="Term Deposit"]')).locator('.mb-del').click()
+        page.click('#modal [data-x=yes]'); page.wait_for_timeout(500)
+        assert page.locator('input[value="Term Deposit"]').count() == 0
+        page.click('#modal [data-x=no]'); page.wait_for_timeout(300)
+        assert 'Term Deposit' not in page.inner_text('.tabs')
         page.goto(URL + '#/purchases/new'); page.wait_for_selector('#f-contact'); shot(page, '14-bill')
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
