@@ -393,8 +393,7 @@ async function setupPage(step) {
           The start of a month (or financial year) is easiest.</div></div>
         <div class="field"><label>Financial year starts in</label><select id="s-fy">${[...Array(12)].map((_, i) =>
           `<option value="${i + 1}" ${+S.settings.fy_start_month === i + 1 ? 'selected' : ''}>${new Date(2000, i, 1).toLocaleDateString('en-AU', { month: 'long' })}</option>`).join('')}</select></div>
-        <div class="field"><label>Next invoice number</label><input id="s-num" type="number" value="${esc(S.settings.next_invoice_number)}">
-          <div class="hint">Carry on from your MYOB numbering.</div></div>
+        <div class="field"><label>Next invoice number</label><input id="s-num" type="number" value="${esc(S.settings.next_invoice_number)}"></div>
       </div>
       <div class="modal-foot"><button class="primary" id="s-next">Continue</button></div></div></div>`;
     $('#s-next').onclick = async () => {
@@ -474,7 +473,7 @@ async function openingPage(inSetup = false, steps = '') {
       `<tr class="sub"><td>${esc(a.code)} ${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}</td>
        <td style="width:180px"><input class="num ob" data-id="${a.id}" value="${vals[a.id] ? fmt(vals[a.id]) : ''}" placeholder="0.00" ${locked ? 'disabled' : ''}></td></tr>`).join('')).join('');
   const body = `${locked ? `<div class="notice info">Opening balances are locked because you've reconciled a bank account since. Undo reconciliations to change them.</div>` : ''}
-    <div class="panel"><p class="muted" style="margin-top:0">Enter each balance as at close of business on <b>${dfmt(addDays(conv, -1))}</b>, taken from your MYOB balance sheet at that date.
+    <div class="panel"><p class="muted" style="margin-top:0">Enter each balance as at close of business on <b>${dfmt(addDays(conv, -1))}</b>, taken from your previous balance sheet at that date.
     Enter amounts as positive numbers in their normal direction (e.g. a credit card you owe $500 on is 500). A contra account like accumulated depreciation is entered as a negative.</p>
     <table><tbody>${rowsHtml}
       <tr class="sub"><td>3-9999 Historical Balancing <span class="muted">(automatic: should be zero once everything is entered)</span></td><td class="num" id="ob-hist"></td></tr>
