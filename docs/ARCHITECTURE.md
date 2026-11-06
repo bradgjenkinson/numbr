@@ -15,7 +15,7 @@ A single Python process serves the static frontend and a JSON API. All state is 
 |---|---|
 | `settings` | Key/value: `business_name`, `conversion_date` (start date), `fy_start_month`, `lock_date`, `next_invoice_number`, `setup_done`, `last_recurring_run` |
 | `accounts` | Chart of accounts. `type` ∈ asset, liability, equity, income, cos, expense. `subtype` ∈ bank, ar, ap, re, hist, other. `share_bp` = user's share of a shared bank account in basis points (10000 = 100%) |
-| `contacts` | Customers/suppliers, payment terms, default account |
+| `contacts` | Customers/suppliers, default account |
 | `journals` | One row per financial event: date, memo, reference, `source` (opening, sale, bill, receipt, payment, spend, receive, transfer, journal), `source_id`, `contact_id`, `recurring_id` |
 | `journal_lines` | Debit/credit lines. `amount` in cents (+debit/−credit), `role` (bank/control), `recon_id` |
 | `invoices` / `invoice_lines` | Sales invoices (`kind='sale'`) and supplier bills (`kind='bill'`). `status` open/void, `historical` flag, `journal_id` |

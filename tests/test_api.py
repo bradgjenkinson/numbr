@@ -1,6 +1,7 @@
 """Backend scenario test: runs the app against a temporary database and checks the books tie out.
 Run: python tests/test_api.py"""
-import json, os, subprocess, sys, time, urllib.request, tempfile, shutil
+import json, os, subprocess, sys, time, urllib.request, tempfile, shutil, calendar
+from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'app.py')
@@ -9,6 +10,19 @@ env = dict(os.environ, LEDGER_DATA=data, LEDGER_PORT='8799')
 p = subprocess.Popen([sys.executable, APP, '--no-browser'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 time.sleep(1.2)
 BASE = "http://127.0.0.1:8799"
+
+
+def monthly_dates(start, day):
+    """Dates a monthly schedule starting at `start` (YYYY-MM-DD) falls due up to today.
+    day=31 means month end. Keeps the recurring checks right whatever day the tests run."""
+    y, m = int(start[:4]), int(start[5:7])
+    today, out = date.today().isoformat(), []
+    while True:
+        d = f'{y:04d}-{m:02d}-{min(day, calendar.monthrange(y, m)[1]):02d}'
+        if d > today:
+            return out
+        out.append(d)
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
 
 
 def call(method, path, body=None, expect_ok=True):
@@ -51,8 +65,8 @@ try:
     check(st['settings']['lock_date'] == '2026-06-30', 'lock date defaults to day before start')
 
     # contacts
-    cust = call('POST', '/api/contacts', {'name': 'Acme Pty Ltd', 'kind': 'customer', 'terms_days': 14})['id']
-    sup = call('POST', '/api/contacts', {'name': 'Landlord', 'kind': 'supplier', 'terms_days': 7})['id']
+    cust = call('POST', '/api/contacts', {'name': 'Acme Pty Ltd', 'kind': 'customer'})['id']
+    sup = call('POST', '/api/contacts', {'name': 'Landlord', 'kind': 'supplier'})['id']
 
     # opening balances: bank 10,000; AR 1,500; AP 400; equipment 3,000; capital 13,000 -> hist diff 1100
     ob = call('PUT', '/api/opening', {'balances': {A['1-1100']: 1000000, A['1-1300']: 150000, A['2-1200']: 40000,
@@ -81,7 +95,7 @@ try:
     inv = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': cust, 'date': '2026-07-05',
                                          'lines': [{'account_id': A['4-1000'], 'description': 'July consulting', 'amount': 220000}]})
     ivd = call('GET', f"/api/invoices/{inv['id']}")
-    check(ivd['number'] == '1001' and ivd['due_date'] == '2026-07-19', f"auto number & due date {ivd['number']} {ivd['due_date']}")
+    check(ivd['number'] == '1001' and ivd['due_date'] == '2026-07-05', f"auto number & due date {ivd['number']} {ivd['due_date']}")
     pay = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': cust, 'date': '2026-07-10', 'bank_account_id': A['1-1100'],
                                          'allocations': [{'invoice_id': h['id'], 'amount': 150000}, {'invoice_id': inv['id'], 'amount': 100000}]})
     r = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': cust, 'date': '2026-07-10', 'bank_account_id': A['1-1100'],
@@ -106,13 +120,13 @@ try:
     check(rec['generated'] == [], 'no generation before setup done')
     call('PUT', '/api/settings', {'setup_done': True})
     g = call('POST', '/api/recurring/run')['generated']
-    # today 2026-10-31 -> Jul, Aug, Sep, Oct = 4
-    check(len([x for x in g if not x.get('skipped')]) == 4, f'4 rent bills generated ({len(g)})')
+    n_rent = len(monthly_dates('2026-07-01', 1))
+    check(len([x for x in g if not x.get('skipped')]) == n_rent, f'{n_rent} rent bills generated ({len(g)})')
     rec2 = call('POST', '/api/recurring', {'name': 'Eom sub', 'kind': 'spend', 'bank_account_id': A['1-1100'], 'frequency': 'monthly',
                                            'next_date': '2026-08-31', 'last_day_of_month': True,
                                            'lines': [{'account_id': A['6-1700'], 'description': 'Sub', 'amount': 2000}]})
     dates = [x['date'] for x in rec2['generated']]
-    check(dates == ['2026-08-31', '2026-09-30', '2026-10-31'], f'end-of-month anchor {dates}')
+    check(dates == monthly_dates('2026-08-31', 31), f'end-of-month anchor {dates}')
 
     # reconcile: statement 31 July
     rc = call('GET', f"/api/reconcile?account_id={A['1-1100']}")

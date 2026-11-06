@@ -2,6 +2,7 @@
 Walks setup, invoices, payments, recurring, CSV reconciliation and reports. Screenshots go to tests/screenshots/.
 Run: python tests/test_ui.py"""
 import os, subprocess, sys, time, tempfile, shutil
+from datetime import date
 from playwright.sync_api import sync_playwright
 
 SP = os.path.dirname(os.path.abspath(__file__))
@@ -69,7 +70,7 @@ try:
         cid = page.evaluate("S.contacts[0].id")
         page.select_option('#f-contact', str(cid))
         page.fill('#f-date', '2026-07-15')
-        assert page.input_value('#f-due') == '2026-07-29'
+        assert page.input_value('#f-due') == '2026-07-15'
         page.select_option('[data-f=account_id]', str(aid)); page.fill('[data-f=description]', 'July retainer'); page.fill('[data-f=amount]', '4400')
         page.click('.add-line'); page.locator('[data-f=description]').nth(1).fill('Workshop')
         page.locator('[data-f=account_id]').nth(1).select_option(str(aid)); page.locator('[data-f=amount]').nth(1).fill('600')
@@ -92,7 +93,10 @@ try:
         sw = page.evaluate("S.accounts.find(a=>a.code=='6-1700').id")
         page.select_option('[data-f=account_id]', str(sw)); page.fill('[data-f=description]', 'Adobe CC'); page.fill('[data-f=amount]', '89.99')
         page.click('#r-save'); page.wait_for_selector('text=Adobe subscription')
-        assert 'Saved and created 4' in toast_text(page), toast_text(page)
+        # monthly on the 5th from July 2026, up to today
+        t = date.today()
+        n_adobe = (t.year - 2026) * 12 + t.month - 7 + (1 if t.day >= 5 else 0)
+        assert f'Saved and created {n_adobe}' in toast_text(page), toast_text(page)
         shot(page, '07-recurring')
 
         # reconcile with CSV import (July statement)
@@ -131,8 +135,11 @@ try:
         # manage bank accounts: add, rename, remove
         page.click('#bk-manage'); page.wait_for_selector('.mb-name')
         page.click('#mb-add-bank'); page.wait_for_selector('.mb-name >> nth=2')
-        assert page.locator('.mb-name').nth(2).input_value() == 'Bank 2'
-        page.locator('.mb-name').nth(2).fill('Term Deposit')
+        # new bank accounts sit with the other banks, above credit cards, so find it by name
+        names = page.locator('.mb-name')
+        new_row = [i for i in range(names.count()) if names.nth(i).input_value() == 'Bank 2']
+        assert len(new_row) == 1, [names.nth(i).input_value() for i in range(names.count())]
+        names.nth(new_row[0]).fill('Term Deposit')
         page.click('#modal [data-x=yes]'); page.wait_for_selector('.tabs >> text=Term Deposit')
         page.click('#bk-manage'); page.wait_for_selector('.mb-name')
         page.locator('tr', has=page.locator('input[value="Term Deposit"]')).locator('.mb-del').click()

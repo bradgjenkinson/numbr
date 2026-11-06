@@ -202,13 +202,12 @@ function quickContact(kind) {
         <option value="customer" ${kind === 'customer' ? 'selected' : ''}>Customer</option>
         <option value="supplier" ${kind === 'supplier' ? 'selected' : ''}>Supplier</option>
         <option value="both">Both</option></select></div>
-      <div class="field"><label>Email</label><input id="qc-email"></div>
-      <div class="field"><label>Payment terms (days)</label><input id="qc-terms" type="number" min="0" value="${kind === 'supplier' ? 30 : 14}"></div></div>
+</div>
       <div class="modal-foot"><button data-x="no">Cancel</button><button class="primary" data-x="yes">Add contact</button></div>`, el => {
       el.querySelector('[data-x=no]').onclick = () => { closeModal(); resolve(null); };
       el.querySelector('[data-x=yes]').onclick = async () => {
         try {
-          const r = await api('POST', '/api/contacts', { name: val('#qc-name', el), kind: val('#qc-kind', el), email: val('#qc-email', el), terms_days: val('#qc-terms', el) });
+          const r = await api('POST', '/api/contacts', { name: val('#qc-name', el), kind: val('#qc-kind', el) });
           await refreshState(); closeModal(); resolve(r.id);
         } catch (e) { fail(e); }
       };
@@ -593,7 +592,7 @@ async function invoiceForm(kind, id) {
       <div class="field"><label>${K.who}</label><select id="f-contact"></select></div>
       <div class="field"><label>${kind === 'sale' ? 'Invoice number' : 'Supplier reference'}</label><input id="f-number" value="${esc(inv ? inv.number : '')}" placeholder="${kind === 'sale' ? `Auto (${esc(S.settings.next_invoice_number)})` : 'Optional'}"></div>
       <div class="field"><label>Date</label><input id="f-date" type="date" value="${defDate}"></div>
-      <div class="field"><label>Due date</label><input id="f-due" type="date" value="${inv ? inv.due_date : ''}"><div class="hint" id="f-terms"></div></div>
+      <div class="field"><label>Due date</label><input id="f-due" type="date" value="${inv ? inv.due_date : ''}"></div>
     </div>
     <div id="f-hist" class="notice info" hidden>Dated before your start date (${dfmt(conv)}): this is an opening item and won't post to the ledger.</div>
     <div id="f-lines"></div>
@@ -605,9 +604,8 @@ async function invoiceForm(kind, id) {
   sel.innerHTML = contactOptions(inv ? inv.contact_id : (QS.get('contact') || ''), K.ckind);
   let dueTouched = !!inv;
   const updDue = () => {
-    const c = contactById(sel.value); const d = val('#f-date');
-    $('#f-terms').textContent = c ? `${c.terms_days} day terms` : '';
-    if (c && d && !dueTouched) $('#f-due').value = addDays(d, c.terms_days);
+    const d = val('#f-date');
+    if (d && !dueTouched) $('#f-due').value = d;
     $('#f-hist').hidden = !(conv && d && d < conv);
   };
   wireContactSelect(sel, K.ckind, () => { const c = contactById(sel.value); if (c) ed.setDefaultAccount(c.default_account_id); updDue(); });
@@ -1399,8 +1397,8 @@ async function contactsList() {
   const list = S.contacts.filter(c => (f === 'all' || c.kind === f || c.kind === 'both') && (QS.get('archived') ? true : !c.archived));
   page('Contacts', '', `<a class="btn primary" href="#/contacts/new">New contact</a>`,
     `<div class="tabs">${[['all', 'All'], ['customer', 'Customers'], ['supplier', 'Suppliers']].map(([k, l]) => `<a href="#/contacts?kind=${k}" class="${k === f ? 'active' : ''}">${l}</a>`).join('')}</div>
-    <div class="panel flush">${list.length ? `<table><thead><tr><th>Name</th><th>Type</th><th>Email</th><th>Phone</th><th class="num">Owes you</th><th class="num">You owe</th></tr></thead><tbody>
-    ${list.map(c => `<tr class="click" data-href="#/contacts/${c.id}"><td>${esc(c.name)}${c.archived ? ' <span class="pill">archived</span>' : ''}</td><td>${c.kind[0].toUpperCase() + c.kind.slice(1)}</td><td>${esc(c.email || '')}</td><td>${esc(c.phone || '')}</td>
+    <div class="panel flush">${list.length ? `<table><thead><tr><th>Name</th><th>Type</th><th>Phone</th><th class="num">Owes you</th><th class="num">You owe</th></tr></thead><tbody>
+    ${list.map(c => `<tr class="click" data-href="#/contacts/${c.id}"><td>${esc(c.name)}${c.archived ? ' <span class="pill">archived</span>' : ''}</td><td>${c.kind[0].toUpperCase() + c.kind.slice(1)}</td><td>${esc(c.phone || '')}</td>
       <td class="num">${fmt(c.receivable, { blankZero: true })}</td><td class="num">${fmt(c.payable, { blankZero: true })}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No contacts yet</div>'}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
 }
@@ -1414,9 +1412,7 @@ async function contactForm(id) {
     `<div class="panel"><div class="form-grid">
       <div class="field"><label>Name</label><input id="c-name" value="${esc(c ? c.name : '')}"></div>
       <div class="field"><label>Type</label><select id="c-kind">${['customer', 'supplier', 'both'].map(k => `<option value="${k}" ${(c ? c.kind : (QS.get('kind') || 'customer')) === k ? 'selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select></div>
-      <div class="field"><label>Email</label><input id="c-email" value="${esc(c ? c.email || '' : '')}"></div>
       <div class="field"><label>Phone</label><input id="c-phone" value="${esc(c ? c.phone || '' : '')}"></div>
-      <div class="field"><label>Payment terms (days)</label><input type="number" min="0" id="c-terms" value="${c ? c.terms_days : 14}"></div>
       <div class="field"><label>Default account</label><select id="c-acct">${acctOptions(c ? c.default_account_id : '', a => postable(a) && !isBank(a), 'None')}</select><div class="hint">Pre-fills new invoices, bills and spends</div></div>
     </div>
     <div class="grid g2"><div class="field"><label>Address</label><textarea id="c-addr">${esc(c ? c.address || '' : '')}</textarea></div>
@@ -1427,7 +1423,7 @@ async function contactForm(id) {
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   $('#c-save').onclick = async () => {
     try {
-      const b = { name: val('#c-name'), kind: val('#c-kind'), email: val('#c-email'), phone: val('#c-phone'), terms_days: val('#c-terms'), default_account_id: val('#c-acct') || null,
+      const b = { name: val('#c-name'), kind: val('#c-kind'), phone: val('#c-phone'), default_account_id: val('#c-acct') || null,
         address: val('#c-addr'), notes: val('#c-notes'), archived: c ? $('#c-arch').checked : false };
       if (c) await api('PUT', `/api/contacts/${c.id}`, b); else await api('POST', '/api/contacts', b);
       await refreshState(); toast('Saved'); go('#/contacts');

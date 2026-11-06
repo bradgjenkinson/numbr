@@ -785,14 +785,10 @@ def contact_payload(db, body):
     kind = body.get('kind') or 'customer'
     if kind not in ('customer', 'supplier', 'both'):
         raise ApiError('Invalid contact type')
-    terms = as_int(body.get('terms_days', 14) or 0, 'Payment terms')
-    if terms < 0 or terms > 365:
-        raise ApiError('Payment terms must be between 0 and 365 days')
     da = body.get('default_account_id') or None
     if da:
         account(db, as_int(da))
-    return (name, kind, text(body.get('email')), text(body.get('phone')), text(body.get('address')),
-            terms, da, text(body.get('notes')), 1 if body.get('archived') else 0)
+    return (name, kind, text(body.get('phone')), text(body.get('address')), da, text(body.get('notes')), 1 if body.get('archived') else 0)
 
 
 @route('GET', '/api/contacts')
@@ -803,8 +799,8 @@ def api_contacts(db, q, body):
 @route('POST', '/api/contacts')
 def api_contact_create(db, q, body):
     p = contact_payload(db, body)
-    cur = db.execute('INSERT INTO contacts(name, kind, email, phone, address, terms_days, default_account_id, notes, archived) '
-                     'VALUES (?,?,?,?,?,?,?,?,?)', p)
+    cur = db.execute('INSERT INTO contacts(name, kind, phone, address, default_account_id, notes, archived) '
+                     'VALUES (?,?,?,?,?,?,?)', p)
     audit(db, 'contact_create', 'contact', cur.lastrowid, body)
     return {'id': cur.lastrowid}
 
@@ -813,7 +809,7 @@ def api_contact_create(db, q, body):
 def api_contact_update(db, q, body, cid):
     c = contact(db, cid)
     p = contact_payload(db, body)
-    db.execute('UPDATE contacts SET name=?, kind=?, email=?, phone=?, address=?, terms_days=?, default_account_id=?, '
+    db.execute('UPDATE contacts SET name=?, kind=?, phone=?, address=?, default_account_id=?, '
                'notes=?, archived=? WHERE id=?', p + (c['id'],))
     audit(db, 'contact_update', 'contact', c['id'], body)
     return {'id': c['id']}
@@ -859,10 +855,7 @@ def bump_invoice_number(db, number):
 def invoice_payload(db, body, kind):
     c = contact(db, req(body, 'contact_id', 'Contact'))
     date = as_date(req(body, 'date'))
-    if body.get('due_date'):
-        due = as_date(body['due_date'], 'Due date')
-    else:
-        due = (D(date) + dt.timedelta(days=c['terms_days'])).isoformat()
+    due = as_date(body['due_date'], 'Due date') if body.get('due_date') else date
     if due < date:
         raise ApiError('The due date is before the date')
     lines = parse_item_lines(db, body.get('lines'))
@@ -919,7 +912,7 @@ def create_invoice(db, body, kind, recurring_id=None):
 
 
 def get_invoice(db, iid):
-    inv = one(db.execute('SELECT i.*, c.name AS contact_name, c.email AS contact_email, c.address AS contact_address '
+    inv = one(db.execute('SELECT i.*, c.name AS contact_name, c.address AS contact_address '
                          'FROM invoices i JOIN contacts c ON c.id=i.contact_id WHERE i.id=?', (as_int(iid),)))
     if not inv:
         raise ApiError('Not found', 404)
