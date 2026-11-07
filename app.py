@@ -47,11 +47,14 @@ STARTED_STAMP = code_stamp()
 SIGN = {'asset': 1, 'cos': 1, 'expense': 1, 'liability': -1, 'equity': -1, 'income': -1}
 PL_TYPES = ('income', 'cos', 'expense')
 FREQS = ('weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')
-SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist')
+SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist', 'partner')
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
 SHARE_FULL = 10000          # share_bp of an account the user owns outright
 PARTNER = 0                 # pseudo account id for other owners' share of shared bank accounts
 PARTNER_NAME = "Other owners' share"
+# The 'partner' system account holds money other owners put into accounts the user tracks (e.g. a partner's
+# deposits into a joint account). Reports fold it into the PARTNER line, so it never touches the P&L.
+PARTNER_ACCOUNT = ('3-9990', 'Partner Contributions')
 
 
 class ApiError(Exception):
@@ -127,6 +130,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   journal_id INTEGER,
   recurring_id INTEGER,
   share_bp INTEGER NOT NULL DEFAULT 10000,  -- user's share of a shared invoice/bill in basis points (10000 = 100%)
+  partner INTEGER NOT NULL DEFAULT 0,       -- 1 = partner contribution (kind 'sale'): posts no journal, payments credit the partner account
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_lines (
@@ -168,6 +172,7 @@ CREATE TABLE IF NOT EXISTS recurring (
   lines TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
   share_bp INTEGER NOT NULL DEFAULT 10000,  -- sale/bill templates: user's share of each invoice/bill it creates
+  partner INTEGER NOT NULL DEFAULT 0,       -- 1 = creates partner contributions (kind 'sale')
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -364,13 +369,23 @@ def init_db():
     if 'share_bp' not in cols:
         db.execute('ALTER TABLE accounts ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
     for table in ('invoices', 'recurring'):
-        if 'share_bp' not in {r[1] for r in db.execute(f'PRAGMA table_info({table})')}:
+        tcols = {r[1] for r in db.execute(f'PRAGMA table_info({table})')}
+        if 'share_bp' not in tcols:
             db.execute(f'ALTER TABLE {table} ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
+        if 'partner' not in tcols:
+            db.execute(f'ALTER TABLE {table} ADD COLUMN partner INTEGER NOT NULL DEFAULT 0')
     db.execute('BEGIN')
     for k, v in DEFAULT_SETTINGS.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)', (k, v))
     if scalar(db, 'SELECT COUNT(*) FROM accounts') == 0:
         db.executemany('INSERT INTO accounts(code, name, type, subtype) VALUES (?,?,?,?)', DEFAULT_ACCOUNTS)
+    if not scalar(db, "SELECT COUNT(*) FROM accounts WHERE subtype='partner'"):
+        code, name = PARTNER_ACCOUNT
+        n = 0
+        while scalar(db, 'SELECT 1 FROM accounts WHERE code=?', (code,)):
+            n += 1
+            code = f'3-99{90 + n}' if n < 9 else f'3-P{n}'
+        db.execute("INSERT INTO accounts(code, name, type, subtype) VALUES (?,?,'equity','partner')", (code, name))
     db.execute('COMMIT')
     db.close()
 
@@ -561,13 +576,14 @@ def list_accounts(db):
 def list_contacts(db):
     cs = rows(db.execute('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'))
     outstanding = {}
-    for r in db.execute("""SELECT i.contact_id, i.kind,
+    for r in db.execute("""SELECT i.contact_id, CASE WHEN i.partner=1 THEN 'partner' ELSE i.kind END,
                                   SUM(i.total - COALESCE((SELECT SUM(amount) FROM allocations a WHERE a.invoice_id=i.id),0))
-                           FROM invoices i WHERE i.status='open' GROUP BY i.contact_id, i.kind"""):
+                           FROM invoices i WHERE i.status='open' GROUP BY 1, 2"""):
         outstanding[(r[0], r[1])] = r[2]
     for c in cs:
         c['receivable'] = outstanding.get((c['id'], 'sale'), 0) or 0
         c['payable'] = outstanding.get((c['id'], 'bill'), 0) or 0
+        c['contribution_due'] = outstanding.get((c['id'], 'partner'), 0) or 0
     return cs
 
 
@@ -640,7 +656,8 @@ def api_opening_get(db, q, body):
                 balances[str(l['account_id'])] = balances.get(str(l['account_id']), 0) + nat
     ar = system_account(db, 'ar')
     ap = system_account(db, 'ap')
-    hist_sales = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind='sale' AND historical=1 AND status='open'")
+    hist_sales = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind='sale' AND partner=0 AND historical=1 "
+                            "AND status='open'")
     hist_bills = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind='bill' AND historical=1 AND status='open'")
     locked = bool(scalar(db, "SELECT COUNT(*) FROM reconciliations WHERE note IS NOT 'opening'"))
     return {'conversion_date': conv, 'balances': balances, 'historical_balancing': hist,
@@ -862,19 +879,32 @@ def bump_invoice_number(db, number):
             set_setting(db, 'next_invoice_number', int(number) + 1)
 
 
-def invoice_payload(db, body, kind):
+def partner_amount(body):
+    """The amount of a partner contribution: body['amount'], or the total of body['lines'] (recurring templates)."""
+    if body.get('amount') not in (None, ''):
+        return as_cents(body['amount'])
+    return sum(as_cents(l.get('amount', 0)) for l in body.get('lines') or [])
+
+
+def invoice_payload(db, body, kind, partner=False):
     c = contact(db, req(body, 'contact_id', 'Contact'))
     date = as_date(req(body, 'date'))
     due = as_date(body['due_date'], 'Due date') if body.get('due_date') else date
     if due < date:
         raise ApiError('The due date is before the date')
-    lines = parse_item_lines(db, body.get('lines'))
-    total = sum(l['amount'] for l in lines)
+    if partner:
+        # A partner contribution has one line in the partner account. It's only a reminder until it's paid.
+        total = partner_amount(body)
+        lines = [{'account_id': system_account(db, 'partner')['id'], 'amount': total,
+                  'description': text(body.get('description')) or text(body.get('memo')) or 'Contribution'}]
+    else:
+        lines = parse_item_lines(db, body.get('lines'))
+        total = sum(l['amount'] for l in lines)
     if total <= 0:
         raise ApiError('The total must be more than zero')
     return {'kind': kind, 'contact_id': c['id'], 'contact_name': c['name'], 'number': text(body.get('number')),
             'date': date, 'due_date': due, 'memo': text(body.get('memo')), 'lines': lines, 'total': total,
-            'share_bp': share_from_body(body)}
+            'share_bp': SHARE_FULL if partner else share_from_body(body), 'partner': 1 if partner else 0}
 
 
 def invoice_journal_lines(db, p):
@@ -891,28 +921,37 @@ def invoice_journal_lines(db, p):
 
 
 def check_number_unique(db, p, exclude_id=0):
-    if p['kind'] == 'sale' and p['number']:
+    if p['kind'] == 'sale' and p['number'] and not p['partner']:
         if scalar(db, "SELECT 1 FROM invoices WHERE kind='sale' AND number=? AND id<>?", (p['number'], exclude_id)):
             raise ApiError(f'Invoice number {p["number"]} is already used')
 
 
 def create_invoice(db, body, kind, recurring_id=None):
-    p = invoice_payload(db, body, kind)
-    if kind == 'sale':
+    """kind is 'sale', 'bill' or 'partner' (a partner contribution, stored as a 'sale' with partner=1)."""
+    partner = kind == 'partner'
+    if partner:
+        kind = 'sale'
+    p = invoice_payload(db, body, kind, partner)
+    if partner:
+        check_lock(db, p['date'])
+    elif kind == 'sale':
         if p['number']:
             check_number_unique(db, p)
             bump_invoice_number(db, p['number'])
         else:
             p['number'] = next_invoice_number(db)
-    hist = is_historical(db, p['date'])
+    hist = is_historical(db, p['date']) and not partner
     cur = db.execute('INSERT INTO invoices(kind, contact_id, number, date, due_date, memo, total, historical, recurring_id, '
-                     'share_bp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                     'share_bp, partner, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                      (kind, p['contact_id'], p['number'], p['date'], p['due_date'], p['memo'], p['total'],
-                      1 if hist else 0, recurring_id, p['share_bp'], now()))
+                      1 if hist else 0, recurring_id, p['share_bp'], p['partner'], now()))
     iid = cur.lastrowid
     for l in p['lines']:
         db.execute('INSERT INTO invoice_lines(invoice_id, description, account_id, amount) VALUES (?,?,?,?)',
                    (iid, l['description'], l['account_id'], l['amount']))
+    if partner:
+        audit(db, 'partner_create', 'invoice', iid, {'number': p['number'], 'total': p['total']})
+        return iid
     if not hist:
         lines, label = invoice_journal_lines(db, p)
         jid = post_journal(db, p['date'], kind, lines, memo=label, reference=p['number'],
@@ -942,10 +981,10 @@ def get_invoice(db, iid):
 @route('GET', '/api/invoices')
 def api_invoices(db, q, body):
     kind = q.get('kind', 'sale')
-    args = [kind]
+    args = ['sale', 1] if kind == 'partner' else [kind, 0]
     sql = ('SELECT i.*, c.name AS contact_name, '
            'COALESCE((SELECT SUM(amount) FROM allocations a WHERE a.invoice_id=i.id),0) AS paid '
-           'FROM invoices i JOIN contacts c ON c.id=i.contact_id WHERE i.kind=?')
+           'FROM invoices i JOIN contacts c ON c.id=i.contact_id WHERE i.kind=? AND i.partner=?')
     if q.get('contact_id'):
         sql += ' AND i.contact_id=?'
         args.append(as_int(q['contact_id']))
@@ -973,7 +1012,7 @@ def api_invoice_get(db, q, body, iid):
 @route('POST', '/api/invoices')
 def api_invoice_create(db, q, body):
     kind = body.get('kind')
-    if kind not in ('sale', 'bill'):
+    if kind not in ('sale', 'bill', 'partner'):
         raise ApiError('Invalid kind')
     return {'id': create_invoice(db, body, kind)}
 
@@ -987,11 +1026,15 @@ def api_invoice_update(db, q, body, iid):
         raise ApiError('This has payments recorded against it. Delete the payments first to edit it.')
     if inv['journal_id']:
         delete_journal(db, inv['journal_id'])
-    p = invoice_payload(db, {'share_pct': inv['share_bp'] / 100, **body}, inv['kind'])
-    if inv['kind'] == 'sale':
+    partner = bool(inv['partner'])
+    p = invoice_payload(db, {'share_pct': inv['share_bp'] / 100, **body}, inv['kind'], partner)
+    if partner:
+        check_lock(db, inv['date'])
+        check_lock(db, p['date'])
+    elif inv['kind'] == 'sale':
         p['number'] = p['number'] or inv['number']
         check_number_unique(db, p, inv['id'])
-    hist = is_historical(db, p['date'])
+    hist = is_historical(db, p['date']) and not partner
     db.execute('UPDATE invoices SET contact_id=?, number=?, date=?, due_date=?, memo=?, total=?, historical=?, share_bp=?, '
                'journal_id=NULL WHERE id=?', (p['contact_id'], p['number'], p['date'], p['due_date'], p['memo'], p['total'],
                                               1 if hist else 0, p['share_bp'], inv['id']))
@@ -999,7 +1042,7 @@ def api_invoice_update(db, q, body, iid):
     for l in p['lines']:
         db.execute('INSERT INTO invoice_lines(invoice_id, description, account_id, amount) VALUES (?,?,?,?)',
                    (inv['id'], l['description'], l['account_id'], l['amount']))
-    if not hist:
+    if not hist and not partner:
         lines, label = invoice_journal_lines(db, p)
         jid = post_journal(db, p['date'], inv['kind'], lines, memo=label, reference=p['number'],
                            contact_id=p['contact_id'], source_id=inv['id'], recurring_id=inv['recurring_id'])
@@ -1017,10 +1060,60 @@ def api_invoice_void(db, q, body, iid):
         return {'id': inv['id']}
     if inv['payments']:
         raise ApiError('This has payments recorded against it. Delete the payments first.')
+    if inv['partner']:
+        check_lock(db, inv['date'])
     if inv['journal_id']:
         delete_journal(db, inv['journal_id'])
     db.execute("UPDATE invoices SET status='void', journal_id=NULL WHERE id=?", (inv['id'],))
     audit(db, f"{inv['kind']}_void", 'invoice', inv['id'], {'number': inv['number'], 'total': inv['total']})
+    return {'id': inv['id']}
+
+
+def convert_to_partner(db, inv):
+    """Turn a customer invoice into a partner contribution: remove the invoice's journal and move its payments'
+    Accounts Receivable lines to the partner account. Bank lines aren't touched, so reconciliations stay valid."""
+    if inv['kind'] != 'sale' or inv['partner']:
+        raise ApiError('Only customer invoices can be converted')
+    if inv['status'] != 'open':
+        raise ApiError('This invoice is void')
+    if inv['historical']:
+        raise ApiError('This is an opening item, so it is part of your opening Accounts Receivable balance and '
+                       "can't be converted. Record the partner's amount as a new partner contribution instead.")
+    check_lock(db, inv['date'])
+    pacct = system_account(db, 'partner')
+    for pay in inv['payments']:
+        if scalar(db, 'SELECT COUNT(*) FROM allocations WHERE payment_id=? AND invoice_id<>?',
+                  (pay['payment_id'], inv['id'])):
+            raise ApiError(f'The payment dated {pay["date"]} also pays other invoices. '
+                           'Delete it and record a separate payment for each invoice first.')
+        check_lock(db, pay['date'])
+    if inv['journal_id']:
+        # Invoice journals have no bank lines, so they are never reconciled.
+        delete_journal(db, inv['journal_id'])
+    memo = f'Contribution from {inv["contact_name"]}'
+    for pay in inv['payments']:
+        jid = scalar(db, 'SELECT journal_id FROM payments WHERE id=?', (pay['payment_id'],))
+        db.execute("UPDATE journal_lines SET account_id=?, description=? WHERE journal_id=? AND role='control'",
+                   (pacct['id'], memo, jid))
+        db.execute("UPDATE journal_lines SET description=? WHERE journal_id=? AND role='bank'", (memo, jid))
+        db.execute('UPDATE journals SET memo=? WHERE id=?', (memo, jid))
+    desc = ' / '.join(l['description'] for l in inv['lines'] if l['description']) or 'Contribution'
+    db.execute('DELETE FROM invoice_lines WHERE invoice_id=?', (inv['id'],))
+    db.execute('INSERT INTO invoice_lines(invoice_id, description, account_id, amount) VALUES (?,?,?,?)',
+               (inv['id'], desc, pacct['id'], inv['total']))
+    db.execute('UPDATE invoices SET partner=1, share_bp=?, historical=0, journal_id=NULL WHERE id=?',
+               (SHARE_FULL, inv['id']))
+    audit(db, 'sale_to_partner', 'invoice', inv['id'],
+          {'number': inv['number'], 'total': inv['total'], 'journal_id': inv['journal_id'],
+           'lines': [{k: l[k] for k in ('account_id', 'description', 'amount')} for l in inv['lines']],
+           'share_bp': inv['share_bp'],
+           'payments': [p['payment_id'] for p in inv['payments']]})
+
+
+@route('POST', '/api/invoices/:iid/to-partner')
+def api_invoice_to_partner(db, q, body, iid):
+    inv = get_invoice(db, iid)
+    convert_to_partner(db, inv)
     return {'id': inv['id']}
 
 
@@ -1034,9 +1127,15 @@ def api_payments(db, q, body):
            'EXISTS(SELECT 1 FROM journal_lines l WHERE l.journal_id=p.journal_id AND l.recon_id IS NOT NULL) AS reconciled '
            'FROM payments p JOIN contacts c ON c.id=p.contact_id JOIN accounts b ON b.id=p.bank_account_id WHERE 1=1')
     args = []
-    if q.get('kind'):
+    partner_sql = ('EXISTS(SELECT 1 FROM allocations a JOIN invoices i ON i.id=a.invoice_id '
+                   'WHERE a.payment_id=p.id AND i.partner=1)')
+    if q.get('kind') == 'contribution':
+        sql += f" AND p.kind='receipt' AND {partner_sql}"
+    elif q.get('kind'):
         sql += ' AND p.kind=?'
         args.append(q['kind'])
+        if q['kind'] == 'receipt':
+            sql += f' AND NOT {partner_sql}'
     sql += ' ORDER BY p.date DESC, p.id DESC LIMIT 500'
     return rows(db.execute(sql, args))
 
@@ -1052,6 +1151,8 @@ def api_payment_get(db, q, body, pid):
                                        'JOIN invoices i ON i.id=a.invoice_id WHERE a.payment_id=?', (p['id'],)))
     p['reconciled'] = bool(scalar(db, 'SELECT 1 FROM journal_lines WHERE journal_id=? AND recon_id IS NOT NULL',
                                   (p['journal_id'],)))
+    p['partner'] = bool(scalar(db, 'SELECT 1 FROM allocations a JOIN invoices i ON i.id=a.invoice_id '
+                                   'WHERE a.payment_id=? AND i.partner=1', (p['id'],)))
     return p
 
 
@@ -1065,6 +1166,7 @@ def create_payment(db, body):
     inv_kind = 'sale' if kind == 'receipt' else 'bill'
     total = 0
     clean = []
+    partner = set()
     for a in body.get('allocations') or []:
         amt = as_cents(a.get('amount', 0))
         if amt == 0:
@@ -1081,9 +1183,13 @@ def create_payment(db, body):
         if inv['date'] > date:
             raise ApiError(f'The payment date is before the date of {inv["number"] or "that bill"}')
         clean.append((inv['id'], amt))
+        partner.add(bool(inv['partner']))
         total += amt
     if total <= 0:
         raise ApiError('Enter an amount against at least one invoice')
+    if len(partner) > 1:
+        raise ApiError('Record partner contributions separately from customer invoice payments')
+    partner = True in partner
     ref = text(body.get('reference'))
     cur = db.execute('INSERT INTO payments(kind, contact_id, date, bank_account_id, amount, reference, created_at) '
                      'VALUES (?,?,?,?,?,?,?)', (kind, c['id'], date, bank['id'], total, ref, now()))
@@ -1091,8 +1197,8 @@ def create_payment(db, body):
     for iid, amt in clean:
         db.execute('INSERT INTO allocations(payment_id, invoice_id, amount) VALUES (?,?,?)', (pid, iid, amt))
     if kind == 'receipt':
-        ctl = system_account(db, 'ar')
-        memo = f'Payment from {c["name"]}'
+        ctl = system_account(db, 'partner' if partner else 'ar')
+        memo = f'{"Contribution" if partner else "Payment"} from {c["name"]}'
         lines = [{'account_id': bank['id'], 'amount': total, 'role': 'bank', 'description': memo},
                  {'account_id': ctl['id'], 'amount': -total, 'role': 'control', 'description': memo}]
     else:
@@ -1407,8 +1513,11 @@ def recurring_payload(db, body):
     if not name:
         raise ApiError('Give the recurring transaction a name')
     kind = body.get('kind')
-    if kind not in ('sale', 'bill', 'spend', 'receive'):
+    if kind not in ('sale', 'bill', 'spend', 'receive', 'partner'):
         raise ApiError('Choose what kind of transaction this is')
+    partner = kind == 'partner'
+    if partner:
+        kind = 'sale'
     freq = body.get('frequency')
     if freq not in FREQS:
         raise ApiError('Choose how often it repeats')
@@ -1422,16 +1531,19 @@ def recurring_payload(db, body):
         raise ApiError('Choose a customer or supplier')
     if kind in ('spend', 'receive'):
         bid = bank_account(db, req(body, 'bank_account_id', 'Bank account'))['id']
-    lines = parse_item_lines(db, body.get('lines'))
+    if partner:
+        lines = [{'account_id': system_account(db, 'partner')['id'], 'description': name, 'amount': partner_amount(body)}]
+    else:
+        lines = parse_item_lines(db, body.get('lines'))
     if sum(l['amount'] for l in lines) <= 0:
         raise ApiError('The total must be more than zero')
     terms = as_int(body.get('terms_days', 14) or 0, 'Payment terms')
     anchor = as_int(body.get('anchor_day') or D(nd).day)
     if body.get('last_day_of_month'):
         anchor = 31
-    share = share_from_body(body) if kind in ('sale', 'bill') else SHARE_FULL
+    share = share_from_body(body) if kind in ('sale', 'bill') and not partner else SHARE_FULL
     return (name, kind, cid, bid, freq, nd, anchor, ed, terms, text(body.get('memo')), json.dumps(lines),
-            1 if body.get('active', True) else 0, share)
+            1 if body.get('active', True) else 0, share, 1 if partner else 0)
 
 
 @route('GET', '/api/recurring')
@@ -1443,7 +1555,9 @@ def api_recurring(db, q, body):
         r['lines'] = json.loads(r['lines'])
         r['total'] = sum(l['amount'] for l in r['lines'])
         r['generated_count'] = scalar(db, 'SELECT COUNT(*) FROM journals WHERE recurring_id=?', (r['id'],)) + \
-            scalar(db, 'SELECT COUNT(*) FROM invoices WHERE recurring_id=? AND historical=1', (r['id'],))
+            scalar(db, 'SELECT COUNT(*) FROM invoices WHERE recurring_id=? AND (historical=1 OR partner=1)', (r['id'],))
+        if r['partner']:
+            r['kind'] = 'partner'
     return out
 
 
@@ -1453,6 +1567,8 @@ def api_recurring_get(db, q, body, rid):
     if not r:
         raise ApiError('Not found', 404)
     r['lines'] = json.loads(r['lines'])
+    if r['partner']:
+        r['kind'] = 'partner'
     return r
 
 
@@ -1460,7 +1576,8 @@ def api_recurring_get(db, q, body, rid):
 def api_recurring_create(db, q, body):
     p = recurring_payload(db, body)
     cur = db.execute('INSERT INTO recurring(name, kind, contact_id, bank_account_id, frequency, next_date, anchor_day, end_date, '
-                     'terms_days, memo, lines, active, share_bp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', p + (now(),))
+                     'terms_days, memo, lines, active, share_bp, partner, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     p + (now(),))
     audit(db, 'recurring_create', 'recurring', cur.lastrowid, body)
     generated = run_recurring(db) if get_setting(db, 'setup_done') == '1' else []
     return {'id': cur.lastrowid, 'generated': generated}
@@ -1471,7 +1588,7 @@ def api_recurring_update(db, q, body, rid):
     r = api_recurring_get(db, q, body, rid)
     p = recurring_payload(db, body)
     db.execute('UPDATE recurring SET name=?, kind=?, contact_id=?, bank_account_id=?, frequency=?, next_date=?, anchor_day=?, '
-               'end_date=?, terms_days=?, memo=?, lines=?, active=?, share_bp=? WHERE id=?', p + (r['id'],))
+               'end_date=?, terms_days=?, memo=?, lines=?, active=?, share_bp=?, partner=? WHERE id=?', p + (r['id'],))
     audit(db, 'recurring_update', 'recurring', r['id'], body)
     generated = run_recurring(db) if get_setting(db, 'setup_done') == '1' else []
     return {'id': r['id'], 'generated': generated}
@@ -1501,6 +1618,12 @@ def api_recurring_run(db, q, body):
 
 def generate_one(db, t, date):
     lines = json.loads(t['lines'])
+    if t['partner']:
+        due = (D(date) + dt.timedelta(days=t['terms_days'])).isoformat()
+        iid = create_invoice(db, {'contact_id': t['contact_id'], 'date': date, 'due_date': due, 'memo': t['memo'],
+                                  'description': lines[0]['description'] if lines else t['name'],
+                                  'amount': sum(l['amount'] for l in lines)}, 'partner', recurring_id=t['id'])
+        return {'type': 'partner', 'id': iid}
     if t['kind'] in ('sale', 'bill'):
         due = (D(date) + dt.timedelta(days=t['terms_days'])).isoformat()
         iid = create_invoice(db, {'contact_id': t['contact_id'], 'date': date, 'due_date': due, 'memo': t['memo'],
@@ -1556,6 +1679,8 @@ def run_recurring(db, upto=None):
 # of its journal except AR/AP, which stay full so the aged reports still tie.
 # Whatever no longer balances is the other owners' part and goes to the PARTNER pseudo account, shown
 # as a computed equity line, so every report still balances.
+# Lines in the 'partner' system account (partner contributions) are wholly the other owners' money: they
+# are never cut and are reported as part of the PARTNER line.
 
 def shared_accounts(db):
     return {r[0]: r[1] for r in db.execute("SELECT id, share_bp FROM accounts WHERE subtype='bank' AND share_bp<?",
@@ -1589,7 +1714,7 @@ def share_journal(lines, source, shared, doc_bp=SHARE_FULL):
     for aid, sub, amt in lines:
         if aid in shared:
             out.append(cut(amt, shared[aid]))
-        elif sub in ('bank', 'ar', 'ap'):
+        elif sub in ('bank', 'ar', 'ap', 'partner'):
             out.append(amt)
         else:
             out.append(cut(amt, rest))
@@ -1613,7 +1738,10 @@ def report_lines(db, to=None, frm=None):
         args.append(frm)
     if not shared and not docs:
         for r in db.execute(sql, args):
-            yield r[3], r[4], r[1], r[6]
+            if r[5] == 'partner':
+                yield PARTNER, 'equity', r[1], r[6]
+            else:
+                yield r[3], r[4], r[1], r[6]
         return
     sql += ' ORDER BY l.journal_id, l.id'
     for _, grp in itertools.groupby(db.execute(sql, args), key=lambda r: r[0]):
@@ -1621,7 +1749,10 @@ def report_lines(db, to=None, frm=None):
         amts, partner = share_journal([(r[3], r[5], r[6]) for r in grp], grp[0][2], shared,
                                       docs.get(grp[0][0], SHARE_FULL))
         for r, amt in zip(grp, amts):
-            yield r[3], r[4], r[1], amt
+            if r[5] == 'partner':
+                partner += amt
+            else:
+                yield r[3], r[4], r[1], amt
         if partner:
             yield PARTNER, 'equity', grp[0][1], partner
 
@@ -1723,7 +1854,8 @@ def api_report_aged(db, q, body):
     kind = 'bill' if q.get('kind') == 'bill' else 'sale'
     as_at = as_date(q.get('as_at') or today(), 'As at date')
     invs = rows(db.execute("SELECT i.*, c.name AS contact_name FROM invoices i JOIN contacts c ON c.id=i.contact_id "
-                           "WHERE i.kind=? AND i.status='open' AND i.date<=? ORDER BY c.name COLLATE NOCASE, i.due_date",
+                           "WHERE i.kind=? AND i.partner=0 AND i.status='open' AND i.date<=? "
+                           "ORDER BY c.name COLLATE NOCASE, i.due_date",
                            (kind, as_at)))
     buckets = ['current', 'd30', 'd60', 'd90', 'd90plus']
     groups = {}
@@ -1745,9 +1877,11 @@ def api_report_aged(db, q, body):
         totals['total'] += bal
     ctl = system_account(db, 'ar' if kind == 'sale' else 'ap')
     ctl_bal = SIGN[ctl['type']] * (balances_as_at(db, as_at).get(ctl['id']) or 0)
-    hist_open = scalar(db, 'SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind=? AND historical=1 AND status=\'open\'', (kind,))
+    hist_open = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind=? AND partner=0 AND historical=1 "
+                           "AND status='open'", (kind,))
     hist_paid = scalar(db, "SELECT COALESCE(SUM(a.amount),0) FROM allocations a JOIN invoices i ON i.id=a.invoice_id "
-                           "JOIN payments p ON p.id=a.payment_id WHERE i.kind=? AND i.historical=1 AND p.date<=?", (kind, as_at))
+                           "JOIN payments p ON p.id=a.payment_id WHERE i.kind=? AND i.partner=0 AND i.historical=1 "
+                           "AND p.date<=?", (kind, as_at))
     return {'kind': kind, 'as_at': as_at, 'groups': list(groups.values()), 'totals': totals,
             'control_balance': ctl_bal, 'control_name': ctl['name'],
             'historical_unposted': hist_open - hist_paid, 'business_name': get_setting(db, 'business_name')}
@@ -1786,10 +1920,10 @@ def api_dashboard(db, q, body):
                       'last_reconciled': last['statement_date'] if last else None,
                       'last_reconciled_balance': last['statement_balance'] if last else None, 'uncleared': unc})
 
-    def ar_ap(kind):
+    def ar_ap(kind, partner=0):
         tot = over = cnt = 0
         for r in db.execute("SELECT i.total - COALESCE((SELECT SUM(amount) FROM allocations a WHERE a.invoice_id=i.id),0), "
-                            "i.due_date FROM invoices i WHERE i.kind=? AND i.status='open'", (kind,)):
+                            "i.due_date FROM invoices i WHERE i.kind=? AND i.partner=? AND i.status='open'", (kind, partner)):
             if r[0] > 0:
                 tot += r[0]
                 cnt += 1
@@ -1819,7 +1953,7 @@ def api_dashboard(db, q, body):
                                "ORDER BY r.next_date LIMIT 8", ((D(t) + dt.timedelta(days=30)).isoformat(),)))
     for u in upcoming:
         u['total'] = sum(l['amount'] for l in json.loads(u.pop('lines')))
-    return {'banks': banks, 'receivable': ar_ap('sale'), 'payable': ar_ap('bill'),
+    return {'banks': banks, 'receivable': ar_ap('sale'), 'payable': ar_ap('bill'), 'contributions': ar_ap('sale', 1),
             'this_month': month_pl(this_m), 'last_month': month_pl(last_m),
             'recent_recurring': recent, 'upcoming_recurring': upcoming}
 

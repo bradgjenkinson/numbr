@@ -43,6 +43,12 @@ Changing the percentage changes all past reports for that account too, including
 
 For a bill or invoice you only partly own (e.g. rent split with someone else), set **Your share %** on the bill or invoice (or on its recurring template). Enter it at the full amount on the bill, and pay it in full. Your P&L shows only your share; the rest shows as *Other owners' share* under Equity (for a bill, that's what the other owners owe you back). Aged payables/receivables still show the full amount owed.
 
+## Partner contributions
+
+When a partner is due to put money into an account you track (e.g. their weekly share into the joint account), record it under **Partner** as a partner contribution, or set up a recurring one (Recurring → Creates a *Partner contribution*). A contribution is only a reminder: it isn't income, isn't money owed to you, and doesn't touch the P&L or balance sheet. When the money arrives, click **Mark paid** (or *Partner contribution* on an unmatched statement line when reconciling). The deposit then counts as the other owners' share: your share of the bank goes up, and *Other owners' share* under Equity goes up by the same amount, so your own net worth doesn't change.
+
+Don't record a partner's deposit as a customer invoice: that makes it income or a receivable. If you already have, open the invoice and click **Convert to partner contribution**. That works even when its payments are reconciled (only the non-bank side of each payment changes). It's refused for opening items, for invoices in a locked period, and when one payment covers several invoices.
+
 ## Fixing mistakes
 
 | Situation | Fix |

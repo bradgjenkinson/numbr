@@ -163,9 +163,31 @@ try:
         page.goto(URL + '#/recurring/new'); page.wait_for_selector('#r-name')
         page.select_option('#r-kind', 'spend'); assert page.locator('.r-share').is_hidden()
         page.select_option('#r-kind', 'bill'); assert not page.locator('.r-share').is_hidden()
+        page.select_option('#r-kind', 'partner')
+        assert page.locator('.r-share').is_hidden() and page.locator('#r-lines').is_hidden() and not page.locator('.r-amount').is_hidden()
+        # partner contribution: add one, then mark it paid
+        pid = page.evaluate("(async () => { const r = await api('POST', '/api/contacts', {name: 'Pat Partner', kind: 'customer'}); await refreshState(); return r.id; })()")
+        page.goto(URL + '#/partner/new'); page.wait_for_selector('#f-amount')
+        assert page.locator('#f-share').count() == 0 and page.locator('#f-lines .lines').count() == 0
+        page.select_option('#f-contact', str(pid)); page.fill('#f-amount', '1,075'); page.fill('#f-desc', 'Weekly shared expenses')
+        page.click('#f-save'); page.wait_for_selector('text=Balance due')
+        assert 'CONTRIBUTION' in page.inner_text('main') and '$1,075.00' in page.inner_text('main'), page.inner_text('main')
+        shot(page, '14c-contribution')
+        page.click('main a.btn.primary >> text=Mark paid'); page.wait_for_selector('.p-alloc')
+        assert page.input_value('.p-alloc') == '1,075.00', page.input_value('.p-alloc')
+        page.click('#p-save'); page.wait_for_selector('text=Applied to')
+        assert 'Partner contribution received' in page.inner_text('main')
+        page.goto(URL + '#/partner?status=paid'); page.wait_for_selector('.tabs')
+        assert 'Pat Partner' in page.inner_text('main')
+        # an old-style invoice to the partner can be converted from its page
+        sales = page.evaluate("S.accounts.find(a=>a.code=='4-1000').id")
+        oid = page.evaluate(f"(async () => (await api('POST', '/api/invoices', {{kind: 'sale', contact_id: {pid}, date: S.today, lines: [{{account_id: {sales}, amount: 5000}}]}})).id)()")
+        page.goto(URL + f'#/sales/{oid}'); page.wait_for_selector('#iv-partner')
+        page.click('#iv-partner'); page.click('#modal [data-x=yes]'); page.wait_for_url(f'**/#/partner/{oid}'); page.wait_for_selector('text=Balance due')
+        assert page.url.endswith(f'#/partner/{oid}'), page.url
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
-        for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/banking/transfer', '#/dashboard']:
+        for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/partner', '#/banking/transfer', '#/dashboard']:
             page.goto(URL + h); page.wait_for_timeout(350)
             assert 'notice bad' not in page.content() or h == '#/reports/bs', h
         shot(page, '16-dashboard-after')
