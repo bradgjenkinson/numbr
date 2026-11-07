@@ -35,9 +35,13 @@ For an account you share with someone (e.g. a joint account), open Banking → M
 
 - Spending and income in the shared account count at your share on the P&L.
 - The balance sheet shows your share of its balance.
-- Money you move in from your own account, or bills you pay from it, is split; the part that belongs to the other owners shows as *Other owners' share of shared accounts* under Equity.
+- Money you move in from your own account, or bills you pay from it, is split; the part that belongs to the other owners shows as *Other owners' share* under Equity.
 
 Changing the percentage changes all past reports for that account too, including locked months.
+
+## Shared invoices and bills
+
+For a bill or invoice you only partly own (e.g. rent split with someone else), set **Your share %** on the bill or invoice (or on its recurring template). Enter it at the full amount on the bill, and pay it in full. Your P&L shows only your share; the rest shows as *Other owners' share* under Equity (for a bill, that's what the other owners owe you back). Aged payables/receivables still show the full amount owed.
 
 ## Fixing mistakes
 

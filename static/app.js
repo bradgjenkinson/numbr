@@ -103,6 +103,8 @@ const parsePct = (v, name) => {
   if (isNaN(n) || n <= 0 || n > 100) throw new Error(`${name}: your share must be more than 0% and no more than 100%`);
   return n;
 };
+// cents * bp / 10000, rounded half away from zero (matches cut() in app.py)
+const cutBp = (c, bp) => Math.sign(c) * Math.round(Math.abs(c) * bp / 10000);
 const postable = a => !['ar', 'ap'].includes(a.subtype);
 
 function acctOptions(sel, filter = () => true, blank = 'Choose account…') {
@@ -529,7 +531,7 @@ async function invoiceList(kind) {
       <th>${kind === 'sale' ? 'Number' : 'Ref'}</th><th>Date</th><th>${K.who}</th><th>Due</th><th class="num">Total</th><th class="num">Balance</th><th>Status</th></tr></thead><tbody>
       ${list.map(i => `<tr class="click" data-href="${K.base}/${i.id}"><td>${esc(i.number || '—')}</td><td>${dfmt(i.date)}</td><td>${esc(i.contact_name)}</td>
         <td>${dfmt(i.due_date)}</td><td class="num">${fmt(i.total)}</td><td class="num">${fmt(i.balance)}</td>
-        <td><span class="pill ${i.state}">${i.state}</span>${i.historical ? ' <span class="pill" title="Dated before your start date">opening</span>' : ''}${i.recurring_id ? ' <span class="pill" title="Created by a recurring transaction">↻</span>' : ''}</td></tr>`).join('')}
+        <td><span class="pill ${i.state}">${i.state}</span>${i.historical ? ' <span class="pill" title="Dated before your start date">opening</span>' : ''}${i.recurring_id ? ' <span class="pill" title="Created by a recurring transaction">↻</span>' : ''}${i.share_bp < 10000 ? ` <span class="pill" title="Shared: your share">${pctText(i.share_bp)}</span>` : ''}</td></tr>`).join('')}
       <tr class="total"><td colspan="4">${list.length} item${list.length === 1 ? '' : 's'}</td><td class="num">${fmt(tot)}</td><td class="num">${fmt(totBal)}</td><td></td></tr>
       </tbody></table></div>` : `<div class="empty">No ${status === 'all' ? '' : status + ' '}${K.one.toLowerCase()}s</div>`}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
@@ -555,6 +557,7 @@ async function invoiceView(kind, id) {
     `<a class="btn" href="${K.base}">Back</a>${canEdit ? `<button class="danger" id="iv-void">Void</button><a class="btn" href="${K.base}/${inv.id}/edit">Edit</a>` : ''}
      <button onclick="window.print()">Print</button>${inv.balance > 0 ? `<a class="btn primary" href="${K.pay}?contact=${inv.contact_id}&inv=${inv.id}">${kind === 'sale' ? 'Receive payment' : 'Pay bill'}</a>` : ''}`,
     `${inv.historical ? `<div class="notice info no-print">This is dated before your start date, so it's an opening item: it doesn't post to the ledger (your opening balance already includes it).</div>` : ''}
+    ${inv.share_bp < 10000 ? `<div class="notice info no-print">Shared ${K.one.toLowerCase()}: ${pctText(inv.share_bp)} is yours, so your reports show ${$fmt(cutBp(inv.total, inv.share_bp))} of the ${$fmt(inv.total)}. The full amount is still ${kind === 'sale' ? 'owed to you' : 'owed by you'}.</div>` : ''}
     <div class="report">
       <div style="display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:22px">
         <div><div style="font-size:20px;font-weight:700">${esc(S.settings.business_name)}</div>
@@ -593,6 +596,8 @@ async function invoiceForm(kind, id) {
       <div class="field"><label>${kind === 'sale' ? 'Invoice number' : 'Supplier reference'}</label><input id="f-number" value="${esc(inv ? inv.number : '')}" placeholder="${kind === 'sale' ? `Auto (${esc(S.settings.next_invoice_number)})` : 'Optional'}"></div>
       <div class="field"><label>Date</label><input id="f-date" type="date" value="${defDate}"></div>
       <div class="field"><label>Due date</label><input id="f-due" type="date" value="${inv ? inv.due_date : ''}"></div>
+      <div class="field"><label>Your share %</label><input id="f-share" inputmode="decimal" value="${inv ? +(inv.share_bp / 100).toFixed(2) : 100}">
+        <div class="hint">Less than 100 if it's shared, e.g. 50 for rent split two ways. Reports show only your share.</div></div>
     </div>
     <div id="f-hist" class="notice info" hidden>Dated before your start date (${dfmt(conv)}): this is an opening item and won't post to the ledger.</div>
     <div id="f-lines"></div>
@@ -615,7 +620,8 @@ async function invoiceForm(kind, id) {
   if (!inv && !QS.get('contact')) sel.focus();
   $('#f-save').onclick = async () => {
     try {
-      const body = { kind, contact_id: sel.value, number: val('#f-number'), date: val('#f-date'), due_date: val('#f-due'), memo: val('#f-memo'), lines: ed.get() };
+      const body = { kind, contact_id: sel.value, number: val('#f-number'), date: val('#f-date'), due_date: val('#f-due'), memo: val('#f-memo'), lines: ed.get(),
+        share_pct: parsePct(val('#f-share'), K.one) };
       const r = inv ? await api('PUT', `/api/invoices/${inv.id}`, body) : await api('POST', '/api/invoices', body);
       await refreshState(); toast('Saved'); afterSave(`${K.base}/${r.id}`);
     } catch (e) { fail(e); }
@@ -1215,6 +1221,8 @@ async function recurringForm(id) {
       <div class="field"><label>Next date</label><input type="date" id="r-next" value="${r ? r.next_date : S.today}"></div>
       <div class="field"><label>End date (optional)</label><input type="date" id="r-end" value="${r && r.end_date ? r.end_date : ''}"></div>
       <div class="field r-terms"><label>Payment terms (days)</label><input type="number" min="0" id="r-terms" value="${r ? r.terms_days : 14}"></div>
+      <div class="field r-share"><label>Your share %</label><input id="r-share" inputmode="decimal" value="${r ? +(r.share_bp / 100).toFixed(2) : 100}">
+        <div class="hint">Less than 100 if it's shared. Reports show only your share.</div></div>
     </div>
     <div class="inline" style="gap:18px;margin-bottom:12px">
       <label class="check r-eom"><input type="checkbox" id="r-eom" ${r && r.anchor_day === 31 ? 'checked' : ''}> Always on the last day of the month</label>
@@ -1227,7 +1235,7 @@ async function recurringForm(id) {
   const upd = () => {
     const k = val('#r-kind');
     const inv = k === 'sale' || k === 'bill';
-    $('.r-bank').hidden = inv; $('.r-terms').hidden = !inv;
+    $('.r-bank').hidden = inv; $('.r-terms').hidden = !inv; $('.r-share').hidden = !inv;
     $('#r-clabel').textContent = k === 'sale' ? 'Customer' : k === 'bill' ? 'Supplier' : (k === 'spend' ? 'Paid to (optional)' : 'Received from (optional)');
     const cur = csel.value || (r ? r.contact_id : '');
     csel.innerHTML = contactOptions(cur, k === 'sale' || k === 'receive' ? 'customer' : 'supplier', inv ? 'Choose…' : 'None');
@@ -1237,6 +1245,7 @@ async function recurringForm(id) {
   $('#r-kind').onchange = upd; $('#r-freq').onchange = upd;
   upd();
   const payload = () => ({
+    share_pct: ['sale', 'bill'].includes(val('#r-kind')) ? parsePct(val('#r-share'), 'Your share') : null,
     name: val('#r-name'), kind: val('#r-kind'), contact_id: csel.value || null, bank_account_id: val('#r-bank'), frequency: val('#r-freq'),
     next_date: val('#r-next'), end_date: val('#r-end'), terms_days: val('#r-terms'), memo: val('#r-memo'), lines: ed.get(),
     last_day_of_month: $('#r-eom').checked && !['weekly', 'fortnightly'].includes(val('#r-freq')), active: $('#r-active').checked,
@@ -1326,7 +1335,7 @@ async function reportBS() {
   });
   rowsHtml += valsRow('Net assets', d.net_assets, 'grand');
   rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${E.title}</td></tr>`;
-  E.rows.forEach(r => { rowsHtml += valsRow(esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(money moved in or out of shared accounts that belongs to the other owners)</span>' : ''), r.values, 'sub', r.account_id ? `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : ''); });
+  E.rows.forEach(r => { rowsHtml += valsRow(esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : ''), r.values, 'sub', r.account_id ? `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : ''); });
   rowsHtml += valsRow('Total equity', E.totals, 'grand');
   const hist = E.rows.find(r => r.subtype === 'hist');
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,

@@ -266,6 +266,73 @@ try:
     call('PUT', f'/api/accounts/{joint}', {'share_pct': 60})
     check(call('GET', '/api/reports/bs?to=2027-07&count=1')['balanced'], 'BS balances after FY rollover with a shared account')
 
+    # shared invoices and bills: rent split 50/50, only the user's half reaches the P&L
+    r = call('POST', '/api/invoices', {'kind': 'bill', 'contact_id': sup, 'date': '2026-10-25', 'share_pct': 0,
+                                       'lines': [{'account_id': A['6-1600'], 'amount': 100000}]}, expect_ok=False)
+    check('more than 0%' in r.get('error', ''), 'bill share of 0% rejected')
+    def pl_oct():
+        return call('GET', '/api/reports/pl?from=2026-10&to=2026-10')['net_profit_total']
+    def partner_oct():
+        rows_ = [r for r in call('GET', '/api/reports/bs?to=2026-10&count=1')['sections'][2]['rows'] if r.get('partner')]
+        return rows_[0]['values'][0] if rows_ else 0
+    def all_balanced(label):
+        tb_ = call('GET', '/api/reports/tb?as_at=2026-10-31')
+        check(tb_['debit'] == tb_['credit'], f'TB still balances {label}')
+        check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], f'BS still balances {label}')
+        for k in ('sale', 'bill'):
+            ag = call('GET', f'/api/reports/aged?kind={k}&as_at=2026-10-31')
+            check(ag['control_balance'] == ag['totals']['total'], f'aged {k} still ties {label}')
+    pl0, pp0 = pl_oct(), partner_oct()
+    rent = call('POST', '/api/invoices', {'kind': 'bill', 'contact_id': sup, 'date': '2026-10-25', 'share_pct': 50,
+                                          'lines': [{'account_id': A['6-1600'], 'amount': 100000}]})['id']
+    check(call('GET', f'/api/invoices/{rent}')['share_bp'] == 5000, 'bill share stored as 5000 bp')
+    check(pl_oct() - pl0 == -50000, f'P&L shows half of a 50% shared bill {pl_oct() - pl0}')
+    check(partner_oct() - pp0 == -50000, f"other owners' share picks up the other half {partner_oct() - pp0}")
+    all_balanced('with a shared bill')
+    rinv = call('GET', f'/api/invoices/{rent}')
+    check(rinv['total'] == 100000 and rinv['balance'] == 100000, 'shared bill still owes the full amount')
+    reg = call('GET', f"/api/register?account_id={A['6-1600']}&from=2026-10-25&to=2026-10-25")
+    check(reg['shared'] and [l['share'] for l in reg['lines']] == [50000], f"register shows the share of a shared bill {reg.get('shared')}")
+    # editing without share_pct keeps the share; 100% puts it back in full
+    call('PUT', f'/api/invoices/{rent}', {'contact_id': sup, 'date': '2026-10-26',
+                                          'lines': [{'account_id': A['6-1600'], 'amount': 100000}]})
+    check(call('GET', f'/api/invoices/{rent}')['share_bp'] == 5000, 'editing a bill keeps its share')
+    call('PUT', f'/api/invoices/{rent}', {'contact_id': sup, 'date': '2026-10-26', 'share_pct': 100,
+                                          'lines': [{'account_id': A['6-1600'], 'amount': 100000}]})
+    check(pl_oct() - pl0 == -100000 and partner_oct() == pp0, 'bill at 100% shows in full')
+    call('PUT', f'/api/invoices/{rent}', {'contact_id': sup, 'date': '2026-10-26', 'share_pct': 50,
+                                          'lines': [{'account_id': A['6-1600'], 'amount': 100000}]})
+    # paying it from an unshared account clears AP in full and leaves the P&L alone
+    call('POST', '/api/payments', {'kind': 'payment', 'contact_id': sup, 'date': '2026-10-27', 'bank_account_id': A['1-1100'],
+                                   'allocations': [{'invoice_id': rent, 'amount': 100000}]})
+    check(pl_oct() - pl0 == -50000, 'paying a shared bill does not change the P&L')
+    all_balanced('after paying a shared bill')
+    # shared sales invoice, 25% of $400.03 = $100.01 (rounded half up)
+    pl1, pp1 = pl_oct(), partner_oct()
+    si = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': cust, 'date': '2026-10-28', 'share_pct': 25,
+                                        'lines': [{'account_id': A['4-1000'], 'amount': 40003}]})['id']
+    check(pl_oct() - pl1 == 10001, f'P&L shows 25% of a shared invoice {pl_oct() - pl1}')
+    check(partner_oct() - pp1 == 30002, f"other owners get the rest of a shared invoice {partner_oct() - pp1}")
+    all_balanced('with a shared invoice')
+    call('POST', f'/api/invoices/{si}/void')
+    check(pl_oct() == pl1 and partner_oct() == pp1, 'voiding a shared invoice removes it')
+    # recurring bill at 50%: each bill it creates is shared
+    pl2 = pl_oct()
+    rb = call('POST', '/api/recurring', {'name': 'Shared rent', 'kind': 'bill', 'contact_id': sup, 'frequency': 'monthly',
+                                         'next_date': '2026-10-30', 'end_date': '2026-10-31', 'share_pct': 50,
+                                         'lines': [{'account_id': A['6-1600'], 'amount': 30000}]})
+    check(call('GET', f"/api/recurring/{rb['id']}")['share_bp'] == 5000, 'recurring bill share stored')
+    made = [g for g in rb['generated'] if g.get('type') == 'bill']
+    check(len(made) == 1 and call('GET', f"/api/invoices/{made[0]['id']}")['share_bp'] == 5000,
+          f"recurring bill creates a shared bill {rb['generated']}")
+    check(pl_oct() - pl2 == -15000, f'P&L shows half of the recurring shared bill {pl_oct() - pl2}')
+    all_balanced('with a recurring shared bill')
+    rs = call('POST', '/api/recurring', {'name': 'Spend', 'kind': 'spend', 'bank_account_id': A['1-1100'], 'frequency': 'monthly',
+                                         'next_date': '2027-06-01', 'share_pct': 50,
+                                         'lines': [{'account_id': A['6-1200'], 'amount': 100}]})
+    check(call('GET', f"/api/recurring/{rs['id']}")['share_bp'] == 10000, 'share is ignored on spend templates')
+    call('DELETE', f"/api/recurring/{rs['id']}")
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')
