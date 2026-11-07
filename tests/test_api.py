@@ -333,6 +333,125 @@ try:
     check(call('GET', f"/api/recurring/{rs['id']}")['share_bp'] == 10000, 'share is ignored on spend templates')
     call('DELETE', f"/api/recurring/{rs['id']}")
 
+    # partner contributions: a partner's deposits into the joint account (user owns 60%) are the other owners' money
+    def bs_oct():
+        bs_ = call('GET', '/api/reports/bs?to=2026-10&count=1')
+        rows_ = {r['name']: r['values'][0] for sec in bs_['sections'] for r in sec['rows']}
+        return bs_['net_assets'][0], rows_
+    def mine_oct():
+        """Net assets less the other owners' share: what the user is worth."""
+        net, rows_ = bs_oct()
+        return net - rows_.get("Other owners' share", 0)
+    partner_acct = [a for a in call('GET', '/api/accounts') if a['subtype'] == 'partner']
+    check(len(partner_acct) == 1 and partner_acct[0]['system'], 'a Partner Contributions system account exists')
+    pacct = partner_acct[0]['id']
+    pal = call('POST', '/api/contacts', {'name': 'Pat Partner', 'kind': 'customer'})['id']
+    pl3, mine0, pp3 = pl_oct(), mine_oct(), partner_oct()
+    ar0 = call('GET', '/api/reports/aged?kind=sale&as_at=2026-10-31')['totals']['total']
+    c1 = call('POST', '/api/invoices', {'kind': 'partner', 'contact_id': pal, 'date': '2026-10-20', 'amount': 107500,
+                                        'description': 'Weekly shared expenses'})['id']
+    inv1 = call('GET', f'/api/invoices/{c1}')
+    check(inv1['partner'] == 1 and inv1['journal_id'] is None and inv1['balance'] == 107500, 'contribution posts no journal')
+    check(pl_oct() == pl3 and mine_oct() == mine0 and partner_oct() == pp3, 'unpaid contribution leaves P&L and BS alone')
+    check(call('GET', '/api/reports/aged?kind=sale&as_at=2026-10-31')['totals']['total'] == ar0,
+          'unpaid contribution is not in aged receivables')
+    check(c1 in [i['id'] for i in call('GET', '/api/invoices?kind=partner')] and
+          c1 not in [i['id'] for i in call('GET', '/api/invoices?kind=sale&status=all')], 'contributions list apart from invoices')
+    check(call('GET', '/api/dashboard')['contributions']['total'] == 107500, 'dashboard shows contributions due')
+    check([c for c in call('GET', '/api/contacts') if c['id'] == pal][0]['contribution_due'] == 107500,
+          'contact shows contribution due')
+    all_balanced('with an unpaid contribution')
+    # it can't be paid together with a customer invoice
+    cinv = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': pal, 'date': '2026-10-20',
+                                          'lines': [{'account_id': A['4-1000'], 'amount': 1000}]})['id']
+    r = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': pal, 'date': '2026-10-21', 'bank_account_id': joint,
+                                       'allocations': [{'invoice_id': c1, 'amount': 107500}, {'invoice_id': cinv, 'amount': 1000}]},
+             expect_ok=False)
+    check('separately' in r.get('error', ''), 'contribution and invoice paid together rejected')
+    call('POST', f'/api/invoices/{cinv}/void')
+    # paid into the joint account: user's share of the bank goes up 60% and the other owners' share takes all of it
+    pay1 = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': pal, 'date': '2026-10-21', 'bank_account_id': joint,
+                                          'allocations': [{'invoice_id': c1, 'amount': 107500}]})['id']
+    check(call('GET', f'/api/payments/{pay1}')['partner'], 'payment knows it is a contribution')
+    check(pl_oct() == pl3, 'paid contribution is not income')
+    check(mine_oct() == mine0, f'paid contribution leaves the user\'s net worth alone {mine_oct() - mine0}')
+    check(partner_oct() - pp3 == 64500, f"other owners' share goes up by the user's share of the deposit {partner_oct() - pp3}")
+    check(pacct not in [r_['account_id'] for sec in call('GET', '/api/reports/bs?to=2026-10&count=1')['sections'] for r_ in sec['rows']],
+          'partner account folds into the other owners\' share line')
+    check(pay1 in [x['id'] for x in call('GET', '/api/payments?kind=contribution')] and
+          pay1 not in [x['id'] for x in call('GET', '/api/payments?kind=receipt')], 'contribution payments listed apart')
+    all_balanced('with a paid contribution')
+    # paid into an account the user owns outright: the whole amount is held for the partner
+    c2 = call('POST', '/api/invoices', {'kind': 'partner', 'contact_id': pal, 'date': '2026-10-22', 'amount': 5000})['id']
+    pay2 = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': pal, 'date': '2026-10-22', 'bank_account_id': A['1-1100'],
+                                          'allocations': [{'invoice_id': c2, 'amount': 5000}]})['id']
+    check(mine_oct() == mine0 and partner_oct() - pp3 == 64500 + 5000, 'contribution into an unshared account is all partner')
+    call('DELETE', f'/api/payments/{pay2}')
+    call('POST', f'/api/invoices/{c2}/void')
+    check(mine_oct() == mine0 and partner_oct() - pp3 == 64500, 'deleting a contribution payment and voiding it undoes it')
+    # converting the old way of doing it: a 50% invoice to a "Partner Owes" asset, paid into the joint account and reconciled
+    owes = call('POST', '/api/accounts', {'code': '1-9100', 'name': 'Partner Owes', 'type': 'asset'})['id']
+    old = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': pal, 'date': '2026-10-23', 'share_pct': 50,
+                                         'lines': [{'account_id': owes, 'description': 'Weekly shared expenses', 'amount': 107500}]})['id']
+    payo = call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': pal, 'date': '2026-10-23', 'bank_account_id': joint,
+                                          'allocations': [{'invoice_id': old, 'amount': 107500}]})['id']
+    _, rows_ = bs_oct()
+    check(rows_.get('Partner Owes') == -53750, f"old way leaves a negative Partner Owes balance {rows_.get('Partner Owes')}")
+    rc = call('GET', f'/api/reconcile?account_id={joint}')
+    upto = [l for l in rc['lines'] if l['date'] <= '2026-10-23']
+    call('POST', '/api/reconcile', {'account_id': joint, 'statement_date': '2026-10-23',
+                                    'statement_balance': rc['cleared_balance'] + sum(l['amount'] for l in upto),
+                                    'line_ids': [l['id'] for l in upto]})
+    check(call('GET', f'/api/payments/{payo}')['reconciled'], 'old payment is reconciled')
+    call('POST', f'/api/invoices/{old}/to-partner')
+    oinv = call('GET', f'/api/invoices/{old}')
+    check(oinv['partner'] == 1 and oinv['journal_id'] is None and oinv['balance'] == 0 and oinv['share_bp'] == 10000,
+          'converted invoice is a paid contribution')
+    check(oinv['lines'][0]['account_id'] == pacct and oinv['lines'][0]['description'] == 'Weekly shared expenses',
+          'converted invoice keeps its description')
+    _, rows_ = bs_oct()
+    check(not rows_.get('Partner Owes'), 'converting clears the Partner Owes balance')
+    check(mine_oct() == mine0, f'after converting, the user\'s net worth is unchanged {mine_oct() - mine0}')
+    check(call('GET', f'/api/payments/{payo}')['reconciled'], 'converted payment stays reconciled')
+    pj = call('GET', f"/api/journals/{call('GET', f'/api/payments/{payo}')['journal_id']}")
+    check(sorted(l['account_id'] for l in pj['lines']) == sorted([joint, pacct]), 'converted payment now credits the partner account')
+    all_balanced('after converting an invoice')
+    r = call('POST', f'/api/invoices/{old}/to-partner', expect_ok=False)
+    check('Only customer invoices' in r.get('error', ''), 'a contribution cannot be converted twice')
+    r = call('POST', f"/api/invoices/{made[0]['id']}/to-partner", expect_ok=False)
+    check('Only customer invoices' in r.get('error', ''), 'a bill cannot be converted')
+    # a payment covering two invoices must be split first
+    i1 = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': pal, 'date': '2026-10-24',
+                                        'lines': [{'account_id': owes, 'amount': 100}]})['id']
+    i2 = call('POST', '/api/invoices', {'kind': 'sale', 'contact_id': pal, 'date': '2026-10-24',
+                                        'lines': [{'account_id': owes, 'amount': 200}]})['id']
+    call('POST', '/api/payments', {'kind': 'receipt', 'contact_id': pal, 'date': '2026-10-24', 'bank_account_id': A['1-1100'],
+                                   'allocations': [{'invoice_id': i1, 'amount': 100}, {'invoice_id': i2, 'amount': 200}]})
+    r = call('POST', f'/api/invoices/{i1}/to-partner', expect_ok=False)
+    check('also pays other invoices' in r.get('error', ''), 'converting an invoice with a shared payment is refused')
+    check(call('GET', f'/api/invoices/{i1}')['partner'] == 0, 'refused conversion changes nothing')
+    hist_inv = [i for i in call('GET', '/api/invoices?kind=sale&status=all') if i['historical']][0]
+    r = call('POST', f"/api/invoices/{hist_inv['id']}/to-partner", expect_ok=False)
+    check('opening item' in r.get('error', ''), 'converting an opening item is refused')
+    # recurring contributions
+    rp = call('POST', '/api/recurring', {'name': 'Pat weekly', 'kind': 'partner', 'contact_id': pal, 'frequency': 'weekly',
+                                         'next_date': '2026-10-26', 'end_date': '2026-10-31', 'amount': 107500, 'terms_days': 0})
+    tpl = call('GET', f"/api/recurring/{rp['id']}")
+    check(tpl['kind'] == 'partner' and tpl['lines'][0]['account_id'] == pacct, 'recurring contribution template stored')
+    madep = [g for g in rp['generated'] if g.get('type') == 'partner']
+    check(len(madep) == 1 and call('GET', f"/api/invoices/{madep[0]['id']}")['partner'] == 1,
+          f"recurring template creates a contribution {rp['generated']}")
+    check(mine_oct() == mine0 and pl_oct() == pl3, 'recurring contribution leaves the books alone until paid')
+    check([r_ for r_ in call('GET', '/api/recurring') if r_['id'] == rp['id']][0]['generated_count'] == 1,
+          'recurring list counts the contributions made')
+    all_balanced('with a recurring contribution')
+    # editing an unpaid contribution
+    call('PUT', f"/api/invoices/{madep[0]['id']}", {'contact_id': pal, 'date': '2026-10-26', 'amount': 100000})
+    e = call('GET', f"/api/invoices/{madep[0]['id']}")
+    check(e['total'] == 100000 and e['partner'] == 1 and e['journal_id'] is None, 'unpaid contribution can be edited')
+    r = call('POST', '/api/invoices', {'kind': 'partner', 'contact_id': pal, 'date': '2026-06-30', 'amount': 100}, expect_ok=False)
+    check('locked' in r.get('error', ''), 'contribution in a locked period rejected')
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')

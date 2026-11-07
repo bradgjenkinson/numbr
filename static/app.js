@@ -283,6 +283,11 @@ const ROUTES = [
   [/^#\/purchases\/new$/, () => invoiceForm('bill')],
   [/^#\/purchases\/(\d+)$/, m => invoiceView('bill', m[1])],
   [/^#\/purchases\/(\d+)\/edit$/, m => invoiceForm('bill', m[1])],
+  [/^#\/partner$/, () => invoiceList('partner')],
+  [/^#\/partner\/new$/, () => invoiceForm('partner')],
+  [/^#\/partner\/receive$/, () => paymentForm('contribution')],
+  [/^#\/partner\/(\d+)$/, m => invoiceView('partner', m[1])],
+  [/^#\/partner\/(\d+)\/edit$/, m => invoiceForm('partner', m[1])],
   [/^#\/receive$/, () => paymentForm('receipt')],
   [/^#\/pay$/, () => paymentForm('payment')],
   [/^#\/payment\/(\d+)$/, m => paymentView(m[1])],
@@ -367,6 +372,8 @@ async function dashboard() {
         <div class="note">${d.receivable.count} open invoice${d.receivable.count === 1 ? '' : 's'}${d.receivable.overdue ? ` · <span class="neg">${$fmt(d.receivable.overdue)} overdue</span>` : ''}</div></div>
       <div class="stat"><div class="label">You owe</div><a class="value" href="#/purchases">${$fmt(d.payable.total)}</a>
         <div class="note">${d.payable.count} open bill${d.payable.count === 1 ? '' : 's'}${d.payable.overdue ? ` · <span class="neg">${$fmt(d.payable.overdue)} overdue</span>` : ''}</div></div>
+      ${d.contributions.count ? `<div class="stat"><div class="label">Partner contributions due</div><a class="value" href="#/partner">${$fmt(d.contributions.total)}</a>
+        <div class="note">${d.contributions.count} open${d.contributions.overdue ? ` · <span class="neg">${$fmt(d.contributions.overdue)} overdue</span>` : ''}</div></div>` : ''}
       <div class="stat"><div class="label">Profit · ${monthLabel(tm.month)}</div><a class="value${tm.profit < 0 ? ' neg' : ''}" href="#/reports/pl">${$fmt(tm.profit)}</a>
         <div class="note">Income ${$fmt(tm.income)} · Expenses ${$fmt(tm.expenses)}</div></div>
       <div class="stat"><div class="label">Profit · ${monthLabel(lm.month)}</div><div class="value${lm.profit < 0 ? ' neg' : ''}">${$fmt(lm.profit)}</div>
@@ -517,7 +524,13 @@ async function openingPage(inSetup = false, steps = '') {
 const KIND = {
   sale: { base: '#/sales', title: 'Sales', one: 'Invoice', who: 'Customer', ckind: 'customer', pay: '#/receive', payLabel: 'Receive payment' },
   bill: { base: '#/purchases', title: 'Purchases', one: 'Bill', who: 'Supplier', ckind: 'supplier', pay: '#/pay', payLabel: 'Pay bills' },
+  // A partner contribution is money a partner is due to put into an account you track (e.g. a joint account).
+  // It's stored as a 'sale' with partner=1, posts nothing until paid, and is paid into "Other owners' share".
+  partner: { base: '#/partner', title: 'Partner contributions', one: 'Contribution', who: 'Partner', ckind: null, pay: '#/partner/receive', payLabel: 'Mark paid' },
 };
+const kindOf = inv => inv.partner ? 'partner' : inv.kind;
+const PAY_KIND = { sale: 'receipt', bill: 'payment', partner: 'contribution' };
+const PARTNER_NOTE = `A partner contribution is a reminder of money a partner is due to put in. It doesn't touch your Profit &amp; Loss or Balance Sheet until it's paid, and when it's paid the money counts as the other owners' share, not yours.`;
 
 async function invoiceList(kind) {
   const K = KIND[kind];
@@ -525,8 +538,8 @@ async function invoiceList(kind) {
   const list = await GET(`/api/invoices?kind=${kind}&status=${status}`);
   const tabs = ['open', 'overdue', 'paid', 'void', 'all'].map(s => `<a href="${K.base}?status=${s}" class="${s === status ? 'active' : ''}">${s[0].toUpperCase() + s.slice(1)}</a>`).join('');
   const totBal = list.reduce((s, i) => s + i.balance, 0), tot = list.reduce((s, i) => s + (i.status === 'void' ? 0 : i.total), 0);
-  page(K.title, kind === 'sale' ? 'Customer invoices and payments' : 'Supplier bills and payments',
-    `<a class="btn" href="#/payments?kind=${kind === 'sale' ? 'receipt' : 'payment'}" id="pay-hist">Payment history</a><a class="btn" href="${K.pay}">${K.payLabel}</a><a class="btn primary" href="${K.base}/new">New ${K.one.toLowerCase()}</a>`,
+  page(K.title, kind === 'sale' ? 'Customer invoices and payments' : kind === 'bill' ? 'Supplier bills and payments' : 'Money partners are due to put into shared accounts',
+    `<a class="btn" href="#/payments?kind=${PAY_KIND[kind]}" id="pay-hist">Payment history</a><a class="btn" href="${K.pay}">${K.payLabel}</a><a class="btn primary" href="${K.base}/new">New ${K.one.toLowerCase()}</a>`,
     `<div class="tabs">${tabs}</div><div class="panel flush">${list.length ? `<div class="table-wrap"><table><thead><tr>
       <th>${kind === 'sale' ? 'Number' : 'Ref'}</th><th>Date</th><th>${K.who}</th><th>Due</th><th class="num">Total</th><th class="num">Balance</th><th>Status</th></tr></thead><tbody>
       ${list.map(i => `<tr class="click" data-href="${K.base}/${i.id}"><td>${esc(i.number || '—')}</td><td>${dfmt(i.date)}</td><td>${esc(i.contact_name)}</td>
@@ -535,13 +548,13 @@ async function invoiceList(kind) {
       <tr class="total"><td colspan="4">${list.length} item${list.length === 1 ? '' : 's'}</td><td class="num">${fmt(tot)}</td><td class="num">${fmt(totBal)}</td><td></td></tr>
       </tbody></table></div>` : `<div class="empty">No ${status === 'all' ? '' : status + ' '}${K.one.toLowerCase()}s</div>`}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
-  $('#pay-hist').onclick = e => { e.preventDefault(); paymentHistory(kind === 'sale' ? 'receipt' : 'payment'); };
+  $('#pay-hist').onclick = e => { e.preventDefault(); paymentHistory(PAY_KIND[kind]); };
 }
 
 async function paymentHistory(pkind) {
   const list = await GET(`/api/payments?kind=${pkind}`);
-  const kind = pkind === 'receipt' ? 'sale' : 'bill';
-  page(pkind === 'receipt' ? 'Customer payments' : 'Supplier payments', '', `<a class="btn" href="${KIND[kind].base}">Back to ${KIND[kind].title.toLowerCase()}</a>`,
+  const kind = pkind === 'receipt' ? 'sale' : pkind === 'contribution' ? 'partner' : 'bill';
+  page(pkind === 'receipt' ? 'Customer payments' : pkind === 'contribution' ? 'Partner contributions received' : 'Supplier payments', '', `<a class="btn" href="${KIND[kind].base}">Back to ${KIND[kind].title.toLowerCase()}</a>`,
     `<div class="panel flush">${list.length ? `<table><thead><tr><th>Date</th><th>${KIND[kind].who}</th><th>Account</th><th>Reference</th><th class="num">Amount</th><th></th></tr></thead><tbody>
     ${list.map(p => `<tr class="click" data-href="#/payment/${p.id}"><td>${dfmt(p.date)}</td><td>${esc(p.contact_name)}</td><td>${esc(p.bank_name)}</td><td>${esc(p.reference || '')}</td>
       <td class="num">${fmt(p.amount)}</td><td>${p.reconciled ? '<span class="pill ok">Reconciled</span>' : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No payments yet</div>'}</div>`);
@@ -551,21 +564,24 @@ async function paymentHistory(pkind) {
 async function invoiceView(kind, id) {
   const K = KIND[kind];
   const inv = await GET(`/api/invoices/${id}`);
+  if (kindOf(inv) !== kind) { go(`${KIND[kindOf(inv)].base}/${inv.id}`); return; }
   const state = inv.status === 'void' ? 'void' : inv.balance === 0 ? 'paid' : inv.due_date < S.today ? 'overdue' : 'open';
   const canEdit = inv.status === 'open' && !inv.payments.length;
   page(`${K.one} ${esc(inv.number || '')}`, `${esc(inv.contact_name)} · <span class="pill ${state}">${state}</span>${inv.historical ? ' <span class="pill">opening item</span>' : ''}`,
     `<a class="btn" href="${K.base}">Back</a>${canEdit ? `<button class="danger" id="iv-void">Void</button><a class="btn" href="${K.base}/${inv.id}/edit">Edit</a>` : ''}
-     <button onclick="window.print()">Print</button>${inv.balance > 0 ? `<a class="btn primary" href="${K.pay}?contact=${inv.contact_id}&inv=${inv.id}">${kind === 'sale' ? 'Receive payment' : 'Pay bill'}</a>` : ''}`,
-    `${inv.historical ? `<div class="notice info no-print">This is dated before your start date, so it's an opening item: it doesn't post to the ledger (your opening balance already includes it).</div>` : ''}
+     ${kind === 'sale' && inv.status === 'open' && !inv.historical ? '<button id="iv-partner" title="Treat this as money a partner put into a shared account, not income">Convert to partner contribution</button>' : ''}
+     <button onclick="window.print()">Print</button>${inv.balance > 0 ? `<a class="btn primary" href="${K.pay}?contact=${inv.contact_id}&inv=${inv.id}">${kind === 'sale' ? 'Receive payment' : kind === 'partner' ? 'Mark paid' : 'Pay bill'}</a>` : ''}`,
+    `${kind === 'partner' ? `<div class="notice info no-print">${PARTNER_NOTE}</div>` : ''}
+    ${inv.historical ? `<div class="notice info no-print">This is dated before your start date, so it's an opening item: it doesn't post to the ledger (your opening balance already includes it).</div>` : ''}
     ${inv.share_bp < 10000 ? `<div class="notice info no-print">Shared ${K.one.toLowerCase()}: ${pctText(inv.share_bp)} is yours, so your reports show ${$fmt(cutBp(inv.total, inv.share_bp))} of the ${$fmt(inv.total)}. The full amount is still ${kind === 'sale' ? 'owed to you' : 'owed by you'}.</div>` : ''}
     <div class="report">
       <div style="display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:22px">
         <div><div style="font-size:20px;font-weight:700">${esc(S.settings.business_name)}</div>
-          <div style="font-size:26px;font-weight:300;margin-top:6px;letter-spacing:.04em">${kind === 'sale' ? 'INVOICE' : 'BILL'}</div></div>
-        <div style="text-align:right"><div><span class="muted">${kind === 'sale' ? 'Invoice no.' : 'Supplier ref'}</span> <b>${esc(inv.number || '—')}</b></div>
+          <div style="font-size:26px;font-weight:300;margin-top:6px;letter-spacing:.04em">${kind === 'sale' ? 'INVOICE' : kind === 'partner' ? 'CONTRIBUTION' : 'BILL'}</div></div>
+        <div style="text-align:right"><div><span class="muted">${kind === 'sale' ? 'Invoice no.' : kind === 'partner' ? 'Reference' : 'Supplier ref'}</span> <b>${esc(inv.number || '—')}</b></div>
           <div><span class="muted">Date</span> ${dfmt(inv.date)}</div><div><span class="muted">Due</span> ${dfmt(inv.due_date)}</div></div>
       </div>
-      <div style="margin-bottom:18px"><div class="muted" style="font-size:12px;text-transform:uppercase">${kind === 'sale' ? 'Bill to' : 'From'}</div>
+      <div style="margin-bottom:18px"><div class="muted" style="font-size:12px;text-transform:uppercase">${kind === 'sale' ? 'Bill to' : kind === 'partner' ? 'Partner' : 'From'}</div>
         <div style="font-weight:600">${esc(inv.contact_name)}</div><div style="white-space:pre-line">${esc(inv.contact_address || '')}</div></div>
       <table><thead><tr><th>Description</th><th class="no-print">Account</th><th class="num">Amount</th></tr></thead><tbody>
         ${inv.lines.map(l => `<tr><td>${esc(l.description || '')}</td><td class="no-print muted">${esc(l.account_code)} ${esc(l.account_name)}</td><td class="num">${fmt(l.amount)}</td></tr>`).join('')}
@@ -580,48 +596,61 @@ async function invoiceView(kind, id) {
     if (!await confirmBox(`Void ${K.one.toLowerCase()} ${esc(inv.number || '')}? It will be removed from your reports.`, 'Void', true)) return;
     try { await api('POST', `/api/invoices/${inv.id}/void`); await refreshState(); toast('Voided'); go(`${K.base}/${inv.id}`); } catch (e) { fail(e); }
   };
+  const cv = $('#iv-partner');
+  if (cv) cv.onclick = async () => {
+    if (!await confirmBox(`Convert invoice ${esc(inv.number || '')} to a partner contribution?<br><br>It will no longer be income or money owed to you. ` +
+      `${inv.payments.length ? 'Its payments will count as the other owners\' share of the bank account instead. ' : ''}Bank reconciliations aren't affected.`, 'Convert')) return;
+    try { await api('POST', `/api/invoices/${inv.id}/to-partner`); await refreshState(); toast('Converted to a partner contribution'); go(`#/partner/${inv.id}`); } catch (e) { fail(e); }
+  };
 }
 
 async function invoiceForm(kind, id) {
   const K = KIND[kind];
   const inv = id ? await GET(`/api/invoices/${id}`) : null;
-  if (inv && (inv.status !== 'open' || inv.payments.length)) { go(`${K.base}/${id}`); return; }
+  if (inv && (inv.status !== 'open' || inv.payments.length || kindOf(inv) !== kind)) { go(`${KIND[kindOf(inv)].base}/${id}`); return; }
   const conv = S.settings.conversion_date;
   const hist = QS.get('hist') === '1';
   const defDate = inv ? inv.date : (hist && conv ? addDays(conv, -1) : S.today);
-  page(inv ? `Edit ${K.one.toLowerCase()} ${esc(inv.number || '')}` : `New ${K.one.toLowerCase()}`, hist ? 'Unpaid at your start date (opening item)' : '',
+  const isP = kind === 'partner';
+  page(inv ? `Edit ${K.one.toLowerCase()} ${esc(inv.number || '')}` : `New ${isP ? 'partner contribution' : K.one.toLowerCase()}`, hist && !isP ? 'Unpaid at your start date (opening item)' : '',
     `<a class="btn" href="${inv ? `${K.base}/${inv.id}` : K.base}">Cancel</a><button class="primary" id="f-save">Save</button>`,
-    `<div class="panel"><div class="form-grid">
+    `<div class="panel">${isP ? `<div class="notice info">${PARTNER_NOTE}</div>` : ''}<div class="form-grid">
       <div class="field"><label>${K.who}</label><select id="f-contact"></select></div>
-      <div class="field"><label>${kind === 'sale' ? 'Invoice number' : 'Supplier reference'}</label><input id="f-number" value="${esc(inv ? inv.number : '')}" placeholder="${kind === 'sale' ? `Auto (${esc(S.settings.next_invoice_number)})` : 'Optional'}"></div>
+      <div class="field"><label>${kind === 'sale' ? 'Invoice number' : isP ? 'Reference' : 'Supplier reference'}</label><input id="f-number" value="${esc(inv ? inv.number : '')}" placeholder="${kind === 'sale' ? `Auto (${esc(S.settings.next_invoice_number)})` : 'Optional'}"></div>
       <div class="field"><label>Date</label><input id="f-date" type="date" value="${defDate}"></div>
       <div class="field"><label>Due date</label><input id="f-due" type="date" value="${inv ? inv.due_date : ''}"></div>
-      <div class="field"><label>Your share %</label><input id="f-share" inputmode="decimal" value="${inv ? +(inv.share_bp / 100).toFixed(2) : 100}">
-        <div class="hint">Less than 100 if it's shared, e.g. 50 for rent split two ways. Reports show only your share.</div></div>
+      ${isP ? `<div class="field"><label>Amount</label><input id="f-amount" class="num" inputmode="decimal" placeholder="0.00" value="${inv ? fmt(inv.total) : ''}"></div>
+      <div class="field"><label>Description</label><input id="f-desc" value="${esc(inv && inv.lines[0] ? inv.lines[0].description || '' : '')}" placeholder="e.g. Weekly shared expenses"></div>`
+      : `<div class="field"><label>Your share %</label><input id="f-share" inputmode="decimal" value="${inv ? +(inv.share_bp / 100).toFixed(2) : 100}">
+        <div class="hint">Less than 100 if it's shared, e.g. 50 for rent split two ways. Reports show only your share.</div></div>`}
     </div>
     <div id="f-hist" class="notice info" hidden>Dated before your start date (${dfmt(conv)}): this is an opening item and won't post to the ledger.</div>
     <div id="f-lines"></div>
     <div class="field" style="margin-top:14px"><label>Notes${kind === 'sale' ? ' (shown on the invoice)' : ''}</label><textarea id="f-memo">${esc(inv ? inv.memo : '')}</textarea></div>
     </div>`);
-  const filt = kind === 'sale' ? (a => postable(a) && !isBank(a)) : (a => postable(a) && !isBank(a));
-  const ed = lineEditor($('#f-lines'), { lines: inv ? inv.lines : [], filter: filt });
+  const filt = a => postable(a) && !isBank(a);
+  const ed = isP ? null : lineEditor($('#f-lines'), { lines: inv ? inv.lines : [], filter: filt });
   const sel = $('#f-contact');
   sel.innerHTML = contactOptions(inv ? inv.contact_id : (QS.get('contact') || ''), K.ckind);
   let dueTouched = !!inv;
   const updDue = () => {
     const d = val('#f-date');
     if (d && !dueTouched) $('#f-due').value = d;
-    $('#f-hist').hidden = !(conv && d && d < conv);
+    $('#f-hist').hidden = isP || !(conv && d && d < conv);
   };
-  wireContactSelect(sel, K.ckind, () => { const c = contactById(sel.value); if (c) ed.setDefaultAccount(c.default_account_id); updDue(); });
+  wireContactSelect(sel, K.ckind, () => { const c = contactById(sel.value); if (c && ed) ed.setDefaultAccount(c.default_account_id); updDue(); });
   $('#f-date').onchange = updDue;
   $('#f-due').onchange = () => { dueTouched = true; };
   updDue();
   if (!inv && !QS.get('contact')) sel.focus();
   $('#f-save').onclick = async () => {
     try {
-      const body = { kind, contact_id: sel.value, number: val('#f-number'), date: val('#f-date'), due_date: val('#f-due'), memo: val('#f-memo'), lines: ed.get(),
-        share_pct: parsePct(val('#f-share'), K.one) };
+      const body = { kind, contact_id: sel.value, number: val('#f-number'), date: val('#f-date'), due_date: val('#f-due'), memo: val('#f-memo') };
+      if (isP) {
+        const amt = parseMoney(val('#f-amount'));
+        if (isNaN(amt) || amt <= 0) throw new Error('Enter the amount the partner is due to pay');
+        Object.assign(body, { amount: amt, description: val('#f-desc') });
+      } else Object.assign(body, { lines: ed.get(), share_pct: parsePct(val('#f-share'), K.one) });
       const r = inv ? await api('PUT', `/api/invoices/${inv.id}`, body) : await api('POST', '/api/invoices', body);
       await refreshState(); toast('Saved'); afterSave(`${K.base}/${r.id}`);
     } catch (e) { fail(e); }
@@ -629,8 +658,10 @@ async function invoiceForm(kind, id) {
 }
 
 async function paymentForm(pkind) {
-  const kind = pkind === 'receipt' ? 'sale' : 'bill', K = KIND[kind];
-  page(pkind === 'receipt' ? 'Receive payment' : 'Pay bills', pkind === 'receipt' ? 'Record money received from a customer' : 'Record money paid to a supplier',
+  const kind = pkind === 'receipt' ? 'sale' : pkind === 'contribution' ? 'partner' : 'bill', K = KIND[kind];
+  if (pkind === 'contribution') pkind = 'receipt';
+  page(kind === 'partner' ? 'Partner contribution received' : pkind === 'receipt' ? 'Receive payment' : 'Pay bills',
+    kind === 'partner' ? 'Mark contributions paid when the money arrives in the bank' : pkind === 'receipt' ? 'Record money received from a customer' : 'Record money paid to a supplier',
     `<a class="btn" href="${K.base}">Cancel</a><button class="primary" id="p-save">Save payment</button>`,
     `<div class="panel"><div class="form-grid">
       <div class="field"><label>${K.who}</label><select id="p-contact"></select></div>
@@ -648,7 +679,7 @@ async function paymentForm(pkind) {
   const renderInvs = () => {
     if (!sel.value) { $('#p-invs').innerHTML = `<div class="empty">Choose a ${K.who.toLowerCase()} to see what's outstanding</div>`; return; }
     if (!invs.length) { $('#p-invs').innerHTML = `<div class="empty">Nothing outstanding for this ${K.who.toLowerCase()}</div>`; return; }
-    $('#p-invs').innerHTML = `<table><thead><tr><th>${kind === 'sale' ? 'Invoice' : 'Bill'}</th><th>Date</th><th>Due</th><th class="num">Total</th><th class="num">Balance</th><th class="num" style="width:160px">Payment</th></tr></thead><tbody>
+    $('#p-invs').innerHTML = `<table><thead><tr><th>${K.one}</th><th>Date</th><th>Due</th><th class="num">Total</th><th class="num">Balance</th><th class="num" style="width:160px">Payment</th></tr></thead><tbody>
       ${invs.map(i => `<tr><td><a href="${K.base}/${i.id}">${esc(i.number || '—')}</a></td><td>${dfmt(i.date)}</td><td>${dfmt(i.due_date)}${i.state === 'overdue' ? ' <span class="pill overdue">overdue</span>' : ''}</td>
         <td class="num">${fmt(i.total)}</td><td class="num">${fmt(i.balance)}</td>
         <td><div class="inline"><input class="num p-alloc" data-id="${i.id}" data-bal="${i.balance}" placeholder="0.00"><button class="small p-full" title="Pay in full">Full</button></div></td></tr>`).join('')}
@@ -691,8 +722,8 @@ async function paymentForm(pkind) {
 
 async function paymentView(id) {
   const p = await GET(`/api/payments/${id}`);
-  const kind = p.kind === 'receipt' ? 'sale' : 'bill', K = KIND[kind];
-  page(p.kind === 'receipt' ? 'Customer payment' : 'Supplier payment', `${esc(p.contact_name)} · ${dfmt(p.date)}`,
+  const kind = p.partner ? 'partner' : p.kind === 'receipt' ? 'sale' : 'bill', K = KIND[kind];
+  page(p.partner ? 'Partner contribution received' : p.kind === 'receipt' ? 'Customer payment' : 'Supplier payment', `${esc(p.contact_name)} · ${dfmt(p.date)}`,
     `<a class="btn" href="${K.base}">Back</a>${p.reconciled ? '<span class="pill ok">Reconciled</span>' : '<button class="danger" id="pv-del">Delete payment</button>'}`,
     `<div class="panel"><div class="grid g4">
       <div><label>Amount</label><div style="font-size:20px;font-weight:650">${$fmt(p.amount)}</div></div>
@@ -705,7 +736,7 @@ async function paymentView(id) {
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   const d = $('#pv-del');
   if (d) d.onclick = async () => {
-    if (!await confirmBox('Delete this payment? The invoices it paid will show as outstanding again.', 'Delete', true)) return;
+    if (!await confirmBox(`Delete this payment? The ${K.one.toLowerCase()}s it paid will show as outstanding again.`, 'Delete', true)) return;
     try { await api('DELETE', `/api/payments/${p.id}`); await refreshState(); toast('Payment deleted'); go(K.base); } catch (e) { fail(e); }
   };
 }
@@ -1040,7 +1071,7 @@ async function reconcilePage() {
       ${unmatched.length ? `<p class="muted" style="padding:0 18px">These statement lines have no matching transaction in numbr. Create one, or enter it properly (e.g. as a customer payment) and come back.</p>
       <table><thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody>
       ${unmatched.map(c => `<tr><td>${dfmt(c.date)}</td><td>${esc(c.description)}</td><td class="num${c.amount < 0 ? ' neg' : ''}">${fmt(c.amount)}</td>
-        <td class="actions" style="justify-content:flex-end">${c.amount > 0 ? `<button class="small" data-pay="receipt" data-i="${R.csv.indexOf(c)}">Customer payment</button>` : `<button class="small" data-pay="payment" data-i="${R.csv.indexOf(c)}">Bill payment</button>`}
+        <td class="actions" style="justify-content:flex-end">${c.amount > 0 ? `<button class="small" data-pay="receipt" data-i="${R.csv.indexOf(c)}">Customer payment</button><button class="small" data-pay="contribution" data-i="${R.csv.indexOf(c)}">Partner contribution</button>` : `<button class="small" data-pay="payment" data-i="${R.csv.indexOf(c)}">Bill payment</button>`}
         <button class="small primary" data-new="${R.csv.indexOf(c)}">${c.amount < 0 ? 'Spend money' : 'Receive money'}</button></td></tr>`).join('')}
       </tbody></table>` : '<div class="notice good" style="margin:12px 18px">Every statement line matches a transaction in numbr.</div>'}</div>`;
     $('#rc-csv-clear').onclick = () => { R.csv = null; drawCsv(); drawLines(); };
@@ -1052,7 +1083,7 @@ async function reconcilePage() {
       const c = R.csv[+b.dataset.i];
       PREFILL = { date: c.date, amount: Math.abs(c.amount), reference: c.description.slice(0, 40), bank_account_id: acc };
       RETURN_TO = `#/reconcile?account=${acc}`;
-      go(b.dataset.pay === 'receipt' ? '#/receive' : '#/pay');
+      go({ receipt: '#/receive', contribution: '#/partner/receive', payment: '#/pay' }[b.dataset.pay]);
     });
   };
   $('#rc-file').onchange = async e => {
@@ -1194,7 +1225,7 @@ function csvMapping(rows, isCard, onDone) {
 
 // ---------------------------------------------------------------- recurring
 const FREQ_LABEL = { weekly: 'Weekly', fortnightly: 'Fortnightly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly' };
-const RKIND = { sale: 'Sales invoice', bill: 'Supplier bill', spend: 'Spend money', receive: 'Receive money' };
+const RKIND = { sale: 'Sales invoice', bill: 'Supplier bill', spend: 'Spend money', receive: 'Receive money', partner: 'Partner contribution' };
 
 async function recurringList() {
   const list = await GET('/api/recurring');
@@ -1227,27 +1258,36 @@ async function recurringForm(id) {
     <div class="inline" style="gap:18px;margin-bottom:12px">
       <label class="check r-eom"><input type="checkbox" id="r-eom" ${r && r.anchor_day === 31 ? 'checked' : ''}> Always on the last day of the month</label>
       <label class="check"><input type="checkbox" id="r-active" ${!r || r.active ? 'checked' : ''}> Active</label></div>
+    <div class="field r-amount"><label>Amount</label><input id="r-amount" class="num" inputmode="decimal" placeholder="0.00" value="${r && r.kind === 'partner' ? fmt(r.total || r.lines.reduce((s, l) => s + l.amount, 0)) : ''}"></div>
     <div id="r-lines"></div>
     <div class="field" style="margin-top:12px"><label>Notes / memo</label><input id="r-memo" value="${esc(r ? r.memo || '' : '')}"></div>
     <div class="hint">If the next date is today or in the past, saving will create the due transaction(s) straight away.</div></div>`);
-  const ed = lineEditor($('#r-lines'), { lines: r ? r.lines : [], filter: a => postable(a) && !isBank(a) });
+  const ed = lineEditor($('#r-lines'), { lines: r && r.kind !== 'partner' ? r.lines : [], filter: a => postable(a) && !isBank(a) });
   const csel = $('#r-contact');
   const upd = () => {
     const k = val('#r-kind');
-    const inv = k === 'sale' || k === 'bill';
-    $('.r-bank').hidden = inv; $('.r-terms').hidden = !inv; $('.r-share').hidden = !inv;
-    $('#r-clabel').textContent = k === 'sale' ? 'Customer' : k === 'bill' ? 'Supplier' : (k === 'spend' ? 'Paid to (optional)' : 'Received from (optional)');
+    const isP = k === 'partner';
+    const inv = k === 'sale' || k === 'bill' || isP;
+    $('.r-bank').hidden = inv; $('.r-terms').hidden = !inv; $('.r-share').hidden = !inv || isP;
+    $('#r-lines').hidden = isP; $('.r-amount').hidden = !isP;
+    $('#r-clabel').textContent = k === 'sale' ? 'Customer' : k === 'bill' ? 'Supplier' : isP ? 'Partner' : (k === 'spend' ? 'Paid to (optional)' : 'Received from (optional)');
     const cur = csel.value || (r ? r.contact_id : '');
-    csel.innerHTML = contactOptions(cur, k === 'sale' || k === 'receive' ? 'customer' : 'supplier', inv ? 'Choose…' : 'None');
+    csel.innerHTML = contactOptions(cur, isP ? null : k === 'sale' || k === 'receive' ? 'customer' : 'supplier', inv ? 'Choose…' : 'None');
     $('.r-eom').hidden = ['weekly', 'fortnightly'].includes(val('#r-freq'));
   };
   wireContactSelect(csel, 'customer', () => { const c = contactById(csel.value); if (c) ed.setDefaultAccount(c.default_account_id); });
   $('#r-kind').onchange = upd; $('#r-freq').onchange = upd;
   upd();
+  const partnerAmount = () => {
+    const amt = parseMoney(val('#r-amount'));
+    if (isNaN(amt) || amt <= 0) throw new Error('Enter the amount the partner is due to pay');
+    return amt;
+  };
   const payload = () => ({
     share_pct: ['sale', 'bill'].includes(val('#r-kind')) ? parsePct(val('#r-share'), 'Your share') : null,
     name: val('#r-name'), kind: val('#r-kind'), contact_id: csel.value || null, bank_account_id: val('#r-bank'), frequency: val('#r-freq'),
-    next_date: val('#r-next'), end_date: val('#r-end'), terms_days: val('#r-terms'), memo: val('#r-memo'), lines: ed.get(),
+    next_date: val('#r-next'), end_date: val('#r-end'), terms_days: val('#r-terms'), memo: val('#r-memo'),
+    ...(val('#r-kind') === 'partner' ? { amount: partnerAmount() } : { lines: ed.get() }),
     last_day_of_month: $('#r-eom').checked && !['weekly', 'fortnightly'].includes(val('#r-freq')), active: $('#r-active').checked,
   });
   $('#r-save').onclick = async () => {
@@ -1406,17 +1446,17 @@ async function contactsList() {
   const list = S.contacts.filter(c => (f === 'all' || c.kind === f || c.kind === 'both') && (QS.get('archived') ? true : !c.archived));
   page('Contacts', '', `<a class="btn primary" href="#/contacts/new">New contact</a>`,
     `<div class="tabs">${[['all', 'All'], ['customer', 'Customers'], ['supplier', 'Suppliers']].map(([k, l]) => `<a href="#/contacts?kind=${k}" class="${k === f ? 'active' : ''}">${l}</a>`).join('')}</div>
-    <div class="panel flush">${list.length ? `<table><thead><tr><th>Name</th><th>Type</th><th>Phone</th><th class="num">Owes you</th><th class="num">You owe</th></tr></thead><tbody>
+    <div class="panel flush">${list.length ? `<table><thead><tr><th>Name</th><th>Type</th><th>Phone</th><th class="num">Owes you</th><th class="num">You owe</th><th class="num">Contribution due</th></tr></thead><tbody>
     ${list.map(c => `<tr class="click" data-href="#/contacts/${c.id}"><td>${esc(c.name)}${c.archived ? ' <span class="pill">archived</span>' : ''}</td><td>${c.kind[0].toUpperCase() + c.kind.slice(1)}</td><td>${esc(c.phone || '')}</td>
-      <td class="num">${fmt(c.receivable, { blankZero: true })}</td><td class="num">${fmt(c.payable, { blankZero: true })}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No contacts yet</div>'}</div>`);
+      <td class="num">${fmt(c.receivable, { blankZero: true })}</td><td class="num">${fmt(c.payable, { blankZero: true })}</td><td class="num">${fmt(c.contribution_due, { blankZero: true })}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">No contacts yet</div>'}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
 }
 
 async function contactForm(id) {
   const c = id ? contactById(id) : null;
   if (id && !c) throw new Error('Contact not found');
-  const [sales, bills] = c ? await Promise.all([GET(`/api/invoices?kind=sale&status=all&contact_id=${c.id}`), GET(`/api/invoices?kind=bill&status=all&contact_id=${c.id}`)]) : [[], []];
-  const items = [...sales, ...bills].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 30);
+  const [sales, bills, contribs] = c ? await Promise.all(['sale', 'bill', 'partner'].map(k => GET(`/api/invoices?kind=${k}&status=all&contact_id=${c.id}`))) : [[], [], []];
+  const items = [...sales, ...bills, ...contribs].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 30);
   page(c ? esc(c.name) : 'New contact', '', `<a class="btn" href="#/contacts">Cancel</a>${c ? '<button class="danger" id="c-del">Delete</button>' : ''}<button class="primary" id="c-save">Save</button>`,
     `<div class="panel"><div class="form-grid">
       <div class="field"><label>Name</label><input id="c-name" value="${esc(c ? c.name : '')}"></div>
@@ -1427,8 +1467,8 @@ async function contactForm(id) {
     <div class="grid g2"><div class="field"><label>Address</label><textarea id="c-addr">${esc(c ? c.address || '' : '')}</textarea></div>
     <div class="field"><label>Notes</label><textarea id="c-notes">${esc(c ? c.notes || '' : '')}</textarea></div></div>
     ${c ? `<label class="check"><input type="checkbox" id="c-arch" ${c.archived ? 'checked' : ''}> Archived (hidden from lists)</label>` : ''}</div>
-    ${c ? `<div class="panel flush"><h2>Recent invoices &amp; bills</h2>${items.length ? `<table><tbody>${items.map(i => `<tr class="click" data-href="${KIND[i.kind].base}/${i.id}">
-      <td>${KIND[i.kind].one} ${esc(i.number || '')}</td><td>${dfmt(i.date)}</td><td class="num">${fmt(i.total)}</td><td class="num">${i.balance ? fmt(i.balance) + ' owing' : ''}</td><td><span class="pill ${i.state}">${i.state}</span></td></tr>`).join('')}</tbody></table>` : '<div class="empty">None yet</div>'}</div>` : ''}`);
+    ${c ? `<div class="panel flush"><h2>Recent invoices &amp; bills</h2>${items.length ? `<table><tbody>${items.map(i => `<tr class="click" data-href="${KIND[kindOf(i)].base}/${i.id}">
+      <td>${KIND[kindOf(i)].one} ${esc(i.number || '')}</td><td>${dfmt(i.date)}</td><td class="num">${fmt(i.total)}</td><td class="num">${i.balance ? fmt(i.balance) + ' owing' : ''}</td><td><span class="pill ${i.state}">${i.state}</span></td></tr>`).join('')}</tbody></table>` : '<div class="empty">None yet</div>'}</div>` : ''}`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   $('#c-save').onclick = async () => {
     try {

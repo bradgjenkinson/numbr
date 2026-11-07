@@ -14,14 +14,14 @@ A single Python process serves the static frontend and a JSON API. All state is 
 | Table | Purpose |
 |---|---|
 | `settings` | Key/value: `business_name`, `conversion_date` (start date), `fy_start_month`, `lock_date`, `next_invoice_number`, `setup_done`, `last_recurring_run` |
-| `accounts` | Chart of accounts. `type` ∈ asset, liability, equity, income, cos, expense. `subtype` ∈ bank, ar, ap, re, hist, other. `share_bp` = user's share of a shared bank account in basis points (10000 = 100%) |
+| `accounts` | Chart of accounts. `type` ∈ asset, liability, equity, income, cos, expense. `subtype` ∈ bank, ar, ap, re, hist, partner, other. `share_bp` = user's share of a shared bank account in basis points (10000 = 100%) |
 | `contacts` | Customers/suppliers, default account |
 | `journals` | One row per financial event: date, memo, reference, `source` (opening, sale, bill, receipt, payment, spend, receive, transfer, journal), `source_id`, `contact_id`, `recurring_id` |
 | `journal_lines` | Debit/credit lines. `amount` in cents (+debit/−credit), `role` (bank/control), `recon_id` |
-| `invoices` / `invoice_lines` | Sales invoices (`kind='sale'`) and supplier bills (`kind='bill'`). `status` open/void, `historical` flag, `journal_id`, `share_bp` = user's share of a shared invoice/bill (10000 = 100%) |
+| `invoices` / `invoice_lines` | Sales invoices (`kind='sale'`) and supplier bills (`kind='bill'`). `status` open/void, `historical` flag, `journal_id`, `share_bp` = user's share of a shared invoice/bill (10000 = 100%), `partner` = 1 for a partner contribution |
 | `payments` / `allocations` | Customer receipts and supplier payments, and how each is split across invoices |
 | `reconciliations` | Statement date and closing balance per bank account. `note='opening'` for the opening-balance pseudo-reconciliation |
-| `recurring` | Templates: kind (sale, bill, spend, receive), frequency, `next_date`, `anchor_day`, `end_date`, lines as JSON, `share_bp` copied to each invoice/bill it creates |
+| `recurring` | Templates: kind (sale, bill, spend, receive; `partner`=1 makes contributions), frequency, `next_date`, `anchor_day`, `end_date`, lines as JSON, `share_bp` copied to each invoice/bill it creates |
 | `audit_log` | Append-only change history |
 
 ### How documents post to the ledger
@@ -60,6 +60,12 @@ A bank account or credit card can be shared (e.g. a joint account), with `accoun
 An invoice or bill can also be shared (e.g. rent split with someone else): `invoices.share_bp` < 10000. Its journal still posts the full amount, and AR/AP stay full (the whole amount is owed), but `report_lines()` cuts its income/expense lines to the user's share (`shared_documents()` supplies the share per journal). Payments against it are normal payments. A recurring sale/bill template carries its own `share_bp`, which each generated invoice/bill copies. The API takes the share as `share_pct` (e.g. 50) on `POST/PUT /invoices` and `/recurring`; leaving it out of a `PUT /invoices` keeps the current share.
 
 Each line is rounded to the cent on its own. Whatever no longer balances belongs to the other owners and is posted to a pseudo account (`PARTNER`, id 0), shown as the computed equity line "Other owners' share" on the balance sheet and trial balance, so both still balance. Changing the share re-states all history, including locked periods.
+
+### Partner contributions
+
+Money a partner is due to put into an account the user tracks (e.g. a joint account) is a *partner contribution*: an `invoices` row with `kind='sale'` and `partner=1`. It posts **no journal**, so it never touches the P&L, balance sheet or aged receivables (all of those filter `partner=0`). It has one `invoice_lines` row in the `partner` system account (equity, "Partner Contributions", created by `init_db()`). Paying it is a normal receipt (`POST /payments`), but the payment credits the partner account instead of AR; a payment can't mix contributions and invoices. `report_lines()` never cuts partner-account lines and reports them as `PARTNER`, so a deposit into a 50% joint account shows as +half on the bank and +half on "Other owners' share". In the API, `kind=partner` is accepted by `GET /invoices`, `POST /invoices` (with `amount` and optional `description` instead of `lines`) and `POST/PUT /recurring` (stored as `kind='sale'`, `partner=1`; read back as `kind='partner'`). `GET /payments?kind=contribution` lists contribution receipts.
+
+`POST /invoices/:id/to-partner` converts an existing customer invoice: it deletes the invoice's journal, replaces its lines with one partner-account line, and moves each payment's `role='control'` line from AR to the partner account. Bank lines aren't touched, so it works on reconciled payments. It refuses opening items (they're inside the opening AR balance), locked dates, and payments allocated to more than one invoice.
 
 ## API reference
 
