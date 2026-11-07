@@ -18,10 +18,10 @@ A single Python process serves the static frontend and a JSON API. All state is 
 | `contacts` | Customers/suppliers, default account |
 | `journals` | One row per financial event: date, memo, reference, `source` (opening, sale, bill, receipt, payment, spend, receive, transfer, journal), `source_id`, `contact_id`, `recurring_id` |
 | `journal_lines` | Debit/credit lines. `amount` in cents (+debit/−credit), `role` (bank/control), `recon_id` |
-| `invoices` / `invoice_lines` | Sales invoices (`kind='sale'`) and supplier bills (`kind='bill'`). `status` open/void, `historical` flag, `journal_id` |
+| `invoices` / `invoice_lines` | Sales invoices (`kind='sale'`) and supplier bills (`kind='bill'`). `status` open/void, `historical` flag, `journal_id`, `share_bp` = user's share of a shared invoice/bill (10000 = 100%) |
 | `payments` / `allocations` | Customer receipts and supplier payments, and how each is split across invoices |
 | `reconciliations` | Statement date and closing balance per bank account. `note='opening'` for the opening-balance pseudo-reconciliation |
-| `recurring` | Templates: kind (sale, bill, spend, receive), frequency, `next_date`, `anchor_day`, `end_date`, lines as JSON |
+| `recurring` | Templates: kind (sale, bill, spend, receive), frequency, `next_date`, `anchor_day`, `end_date`, lines as JSON, `share_bp` copied to each invoice/bill it creates |
 | `audit_log` | Append-only change history |
 
 ### How documents post to the ledger
@@ -49,7 +49,7 @@ All computed on request from `journal_lines` joined to `journals` and `accounts`
 - **Aged AR/AP:** open invoices, balance = total − allocations from payments dated on or before the as-at date, bucketed by days past due. The report also returns the control account balance so the UI can show whether they tie
 - **Trial balance:** debit/credit per account
 
-### Shared bank accounts
+### Shared bank accounts and shared invoices/bills
 
 A bank account or credit card can be shared (e.g. a joint account), with `accounts.share_bp` < 10000 giving the user's share. The ledger always stores full amounts, so the account still reconciles to the real statement. All reports (P&L, balance sheet, trial balance, dashboard profit, and the "Your share" column in registers) read lines through `report_lines()`, which cuts them to the user's share per journal (`share_journal()`):
 
@@ -57,7 +57,9 @@ A bank account or credit card can be shared (e.g. a joint account), with `accoun
 - if every bank line in the journal is in one shared account and the journal isn't the opening balances (a spend, receive, payment or journal from that account), its other lines are cut by the same share, except AR/AP, which stay full so the aged reports tie;
 - every other line stays full (e.g. the other side of a transfer from an unshared account).
 
-Each line is rounded to the cent on its own. Whatever no longer balances belongs to the other owners and is posted to a pseudo account (`PARTNER`, id 0), shown as the computed equity line "Other owners' share of shared accounts" on the balance sheet and trial balance, so both still balance. Changing the share re-states all history, including locked periods.
+An invoice or bill can also be shared (e.g. rent split with someone else): `invoices.share_bp` < 10000. Its journal still posts the full amount, and AR/AP stay full (the whole amount is owed), but `report_lines()` cuts its income/expense lines to the user's share (`shared_documents()` supplies the share per journal). Payments against it are normal payments. A recurring sale/bill template carries its own `share_bp`, which each generated invoice/bill copies. The API takes the share as `share_pct` (e.g. 50) on `POST/PUT /invoices` and `/recurring`; leaving it out of a `PUT /invoices` keeps the current share.
+
+Each line is rounded to the cent on its own. Whatever no longer balances belongs to the other owners and is posted to a pseudo account (`PARTNER`, id 0), shown as the computed equity line "Other owners' share" on the balance sheet and trial balance, so both still balance. Changing the share re-states all history, including locked periods.
 
 ## API reference
 

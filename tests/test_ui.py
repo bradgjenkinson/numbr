@@ -148,6 +148,21 @@ try:
         page.click('#modal [data-x=no]'); page.wait_for_timeout(300)
         assert 'Term Deposit' not in page.inner_text('.tabs')
         page.goto(URL + '#/purchases/new'); page.wait_for_selector('#f-contact'); shot(page, '14-bill')
+        # shared bill: 50% of the rent is the user's
+        sid = page.evaluate("(async () => { const r = await api('POST', '/api/contacts', {name: 'Shared landlord', kind: 'supplier'}); await refreshState(); return r.id; })()")
+        page.goto(URL + '#/purchases'); page.wait_for_selector('#pay-hist')
+        page.goto(URL + '#/purchases/new'); page.wait_for_selector('#f-share')
+        assert page.input_value('#f-share') == '100'
+        page.select_option('#f-contact', str(sid))
+        rent = page.evaluate("S.accounts.find(a=>a.code=='6-1600').id")
+        page.select_option('[data-f=account_id]', str(rent)); page.fill('[data-f=description]', 'Rent'); page.fill('[data-f=amount]', '2000')
+        page.fill('#f-share', '50')
+        page.click('#f-save'); page.wait_for_selector('text=Balance due')
+        assert '50% is yours' in page.inner_text('main') and '$1,000.00 of the $2,000.00' in page.inner_text('main'), page.inner_text('main')
+        shot(page, '14b-shared-bill')
+        page.goto(URL + '#/recurring/new'); page.wait_for_selector('#r-name')
+        page.select_option('#r-kind', 'spend'); assert page.locator('.r-share').is_hidden()
+        page.select_option('#r-kind', 'bill'); assert not page.locator('.r-share').is_hidden()
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
         for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/banking/transfer', '#/dashboard']:

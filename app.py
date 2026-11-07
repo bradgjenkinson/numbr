@@ -51,7 +51,7 @@ SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist')
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
 SHARE_FULL = 10000          # share_bp of an account the user owns outright
 PARTNER = 0                 # pseudo account id for other owners' share of shared bank accounts
-PARTNER_NAME = "Other owners' share of shared accounts"
+PARTNER_NAME = "Other owners' share"
 
 
 class ApiError(Exception):
@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   historical INTEGER NOT NULL DEFAULT 0,
   journal_id INTEGER,
   recurring_id INTEGER,
+  share_bp INTEGER NOT NULL DEFAULT 10000,  -- user's share of a shared invoice/bill in basis points (10000 = 100%)
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_lines (
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS recurring (
   memo TEXT,
   lines TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
+  share_bp INTEGER NOT NULL DEFAULT 10000,  -- sale/bill templates: user's share of each invoice/bill it creates
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -361,6 +363,9 @@ def init_db():
     cols = {r[1] for r in db.execute('PRAGMA table_info(accounts)')}
     if 'share_bp' not in cols:
         db.execute('ALTER TABLE accounts ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
+    for table in ('invoices', 'recurring'):
+        if 'share_bp' not in {r[1] for r in db.execute(f'PRAGMA table_info({table})')}:
+            db.execute(f'ALTER TABLE {table} ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
     db.execute('BEGIN')
     for k, v in DEFAULT_SETTINGS.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)', (k, v))
@@ -690,6 +695,19 @@ def api_accounts(db, q, body):
     return list_accounts(db)
 
 
+def share_from_body(body, default=SHARE_FULL):
+    """Read body['share_pct'] (the user's share as a percentage) and return it in basis points."""
+    if body.get('share_pct') in (None, ''):
+        return default
+    try:
+        pct = float(body['share_pct'])
+    except (TypeError, ValueError):
+        raise ApiError('Your share must be a percentage, e.g. 50')
+    if not 0 < pct <= 100:
+        raise ApiError('Your share must be more than 0% and no more than 100%')
+    return int(round(pct * 100))
+
+
 def account_payload(db, body, existing=None):
     code = text(body.get('code', existing and existing['code']))
     name = text(body.get('name', existing and existing['name']))
@@ -712,15 +730,7 @@ def account_payload(db, body, existing=None):
         raise ApiError(f'Account code {code} is already used')
     share = SHARE_FULL
     if sub == 'bank':
-        share = existing['share_bp'] if existing else SHARE_FULL
-        if body.get('share_pct') not in (None, ''):
-            try:
-                pct = float(body['share_pct'])
-            except (TypeError, ValueError):
-                raise ApiError('Your share must be a percentage, e.g. 50')
-            if not 0 < pct <= 100:
-                raise ApiError('Your share must be more than 0% and no more than 100%')
-            share = int(round(pct * 100))
+        share = share_from_body(body, existing['share_bp'] if existing else SHARE_FULL)
     return code, name, typ, sub, share
 
 
@@ -863,7 +873,8 @@ def invoice_payload(db, body, kind):
     if total <= 0:
         raise ApiError('The total must be more than zero')
     return {'kind': kind, 'contact_id': c['id'], 'contact_name': c['name'], 'number': text(body.get('number')),
-            'date': date, 'due_date': due, 'memo': text(body.get('memo')), 'lines': lines, 'total': total}
+            'date': date, 'due_date': due, 'memo': text(body.get('memo')), 'lines': lines, 'total': total,
+            'share_bp': share_from_body(body)}
 
 
 def invoice_journal_lines(db, p):
@@ -894,10 +905,10 @@ def create_invoice(db, body, kind, recurring_id=None):
         else:
             p['number'] = next_invoice_number(db)
     hist = is_historical(db, p['date'])
-    cur = db.execute('INSERT INTO invoices(kind, contact_id, number, date, due_date, memo, total, historical, recurring_id, created_at) '
-                     'VALUES (?,?,?,?,?,?,?,?,?,?)',
+    cur = db.execute('INSERT INTO invoices(kind, contact_id, number, date, due_date, memo, total, historical, recurring_id, '
+                     'share_bp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                      (kind, p['contact_id'], p['number'], p['date'], p['due_date'], p['memo'], p['total'],
-                      1 if hist else 0, recurring_id, now()))
+                      1 if hist else 0, recurring_id, p['share_bp'], now()))
     iid = cur.lastrowid
     for l in p['lines']:
         db.execute('INSERT INTO invoice_lines(invoice_id, description, account_id, amount) VALUES (?,?,?,?)',
@@ -907,7 +918,8 @@ def create_invoice(db, body, kind, recurring_id=None):
         jid = post_journal(db, p['date'], kind, lines, memo=label, reference=p['number'],
                            contact_id=p['contact_id'], source_id=iid, recurring_id=recurring_id)
         db.execute('UPDATE invoices SET journal_id=? WHERE id=?', (jid, iid))
-    audit(db, f'{kind}_create', 'invoice', iid, {'number': p['number'], 'total': p['total'], 'historical': hist})
+    audit(db, f'{kind}_create', 'invoice', iid, {'number': p['number'], 'total': p['total'], 'historical': hist,
+                                                  'share_bp': p['share_bp']})
     return iid
 
 
@@ -975,14 +987,14 @@ def api_invoice_update(db, q, body, iid):
         raise ApiError('This has payments recorded against it. Delete the payments first to edit it.')
     if inv['journal_id']:
         delete_journal(db, inv['journal_id'])
-    p = invoice_payload(db, body, inv['kind'])
+    p = invoice_payload(db, {'share_pct': inv['share_bp'] / 100, **body}, inv['kind'])
     if inv['kind'] == 'sale':
         p['number'] = p['number'] or inv['number']
         check_number_unique(db, p, inv['id'])
     hist = is_historical(db, p['date'])
-    db.execute('UPDATE invoices SET contact_id=?, number=?, date=?, due_date=?, memo=?, total=?, historical=?, journal_id=NULL '
-               'WHERE id=?', (p['contact_id'], p['number'], p['date'], p['due_date'], p['memo'], p['total'],
-                              1 if hist else 0, inv['id']))
+    db.execute('UPDATE invoices SET contact_id=?, number=?, date=?, due_date=?, memo=?, total=?, historical=?, share_bp=?, '
+               'journal_id=NULL WHERE id=?', (p['contact_id'], p['number'], p['date'], p['due_date'], p['memo'], p['total'],
+                                              1 if hist else 0, p['share_bp'], inv['id']))
     db.execute('DELETE FROM invoice_lines WHERE invoice_id=?', (inv['id'],))
     for l in p['lines']:
         db.execute('INSERT INTO invoice_lines(invoice_id, description, account_id, amount) VALUES (?,?,?,?)',
@@ -993,7 +1005,8 @@ def api_invoice_update(db, q, body, iid):
                            contact_id=p['contact_id'], source_id=inv['id'], recurring_id=inv['recurring_id'])
         db.execute('UPDATE invoices SET journal_id=? WHERE id=?', (jid, inv['id']))
     audit(db, f"{inv['kind']}_update", 'invoice', inv['id'], {'before': {k: inv[k] for k in ('number', 'date', 'total')},
-                                                              'after': {'number': p['number'], 'date': p['date'], 'total': p['total']}})
+                                                              'after': {'number': p['number'], 'date': p['date'], 'total': p['total'],
+                                                                        'share_bp': p['share_bp']}})
     return {'id': inv['id']}
 
 
@@ -1291,14 +1304,15 @@ def api_register(db, q, body):
         r['balance'] = bal
     res = {'account': a, 'opening': opening, 'closing': bal, 'lines': out, 'shared': False}
     shared = shared_accounts(db)
-    if shared:
+    docs = shared_documents(db)
+    if shared or docs:
         # The user's share of each line, as the reports see it (see report_lines). Shown only when it differs.
         share = {}
         for jid in {r['journal_id'] for r in out}:
             jl = db.execute('SELECT l.id, l.account_id, a.subtype, l.amount, j.source FROM journal_lines l '
                             'JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id '
                             'WHERE l.journal_id=? ORDER BY l.id', (jid,)).fetchall()
-            amts, _ = share_journal([(x[1], x[2], x[3]) for x in jl], jl[0][4], shared)
+            amts, _ = share_journal([(x[1], x[2], x[3]) for x in jl], jl[0][4], shared, docs.get(jid, SHARE_FULL))
             share.update({x[0]: amt for x, amt in zip(jl, amts)})
         sopen = 0
         if frm:
@@ -1415,8 +1429,9 @@ def recurring_payload(db, body):
     anchor = as_int(body.get('anchor_day') or D(nd).day)
     if body.get('last_day_of_month'):
         anchor = 31
+    share = share_from_body(body) if kind in ('sale', 'bill') else SHARE_FULL
     return (name, kind, cid, bid, freq, nd, anchor, ed, terms, text(body.get('memo')), json.dumps(lines),
-            1 if body.get('active', True) else 0)
+            1 if body.get('active', True) else 0, share)
 
 
 @route('GET', '/api/recurring')
@@ -1445,7 +1460,7 @@ def api_recurring_get(db, q, body, rid):
 def api_recurring_create(db, q, body):
     p = recurring_payload(db, body)
     cur = db.execute('INSERT INTO recurring(name, kind, contact_id, bank_account_id, frequency, next_date, anchor_day, end_date, '
-                     'terms_days, memo, lines, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', p + (now(),))
+                     'terms_days, memo, lines, active, share_bp, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', p + (now(),))
     audit(db, 'recurring_create', 'recurring', cur.lastrowid, body)
     generated = run_recurring(db) if get_setting(db, 'setup_done') == '1' else []
     return {'id': cur.lastrowid, 'generated': generated}
@@ -1456,7 +1471,7 @@ def api_recurring_update(db, q, body, rid):
     r = api_recurring_get(db, q, body, rid)
     p = recurring_payload(db, body)
     db.execute('UPDATE recurring SET name=?, kind=?, contact_id=?, bank_account_id=?, frequency=?, next_date=?, anchor_day=?, '
-               'end_date=?, terms_days=?, memo=?, lines=?, active=? WHERE id=?', p + (r['id'],))
+               'end_date=?, terms_days=?, memo=?, lines=?, active=?, share_bp=? WHERE id=?', p + (r['id'],))
     audit(db, 'recurring_update', 'recurring', r['id'], body)
     generated = run_recurring(db) if get_setting(db, 'setup_done') == '1' else []
     return {'id': r['id'], 'generated': generated}
@@ -1489,7 +1504,7 @@ def generate_one(db, t, date):
     if t['kind'] in ('sale', 'bill'):
         due = (D(date) + dt.timedelta(days=t['terms_days'])).isoformat()
         iid = create_invoice(db, {'contact_id': t['contact_id'], 'date': date, 'due_date': due, 'memo': t['memo'],
-                                  'lines': lines}, t['kind'], recurring_id=t['id'])
+                                  'lines': lines, 'share_pct': t['share_bp'] / 100}, t['kind'], recurring_id=t['id'])
         return {'type': t['kind'], 'id': iid}
     jid = create_txn(db, t['kind'], {'bank_account_id': t['bank_account_id'], 'date': date, 'contact_id': t['contact_id'],
                                      'memo': t['memo'] or t['name'], 'reference': '', 'lines': lines}, recurring_id=t['id'])
@@ -1529,7 +1544,7 @@ def run_recurring(db, upto=None):
 # Reports
 # ----------------------------------------------------------------------------
 
-# Shared bank accounts
+# Shared bank accounts and shared invoices/bills
 # A bank account can be shared with other people (e.g. a joint account). Its share_bp says how much of it
 # belongs to the user. The ledger always stores the full amounts (so the account reconciles to the real
 # statement); reports show only the user's share:
@@ -1537,6 +1552,8 @@ def run_recurring(db, upto=None):
 #   * in a journal whose bank lines are all in one shared account (a spend, receive or journal from it),
 #     the other lines are cut by the same share, except AR/AP, which stay full so aged reports tie;
 #   * everything else (transfers to/from unshared accounts, opening balances) stays full.
+# An invoice or bill can also be shared (e.g. rent split with someone else). Its share_bp cuts every line
+# of its journal except AR/AP, which stay full so the aged reports still tie.
 # Whatever no longer balances is the other owners' part and goes to the PARTNER pseudo account, shown
 # as a computed equity line, so every report still balances.
 
@@ -1552,12 +1569,22 @@ def cut(amount, bp):
     return v if amount >= 0 else -v
 
 
-def share_journal(lines, source, shared):
-    """lines: [(account_id, subtype, amount)]. Returns (user's share of each line, PARTNER amount)."""
-    if not any(l[0] in shared for l in lines):
+def shared_documents(db):
+    """{journal_id: share_bp} for posted invoices and bills the user only partly owns."""
+    return {r[0]: r[1] for r in db.execute('SELECT journal_id, share_bp FROM invoices WHERE journal_id IS NOT NULL '
+                                           'AND share_bp<?', (SHARE_FULL,))}
+
+
+def share_journal(lines, source, shared, doc_bp=SHARE_FULL):
+    """lines: [(account_id, subtype, amount)]. doc_bp is the share of a shared invoice/bill.
+    Returns (user's share of each line, PARTNER amount)."""
+    if doc_bp >= SHARE_FULL and not any(l[0] in shared for l in lines):
         return [l[2] for l in lines], 0
     banks = {shared.get(aid, SHARE_FULL) for aid, sub, _ in lines if sub == 'bank'}
-    rest = banks.pop() if len(banks) == 1 and source != 'opening' else SHARE_FULL
+    if doc_bp < SHARE_FULL:
+        rest = doc_bp
+    else:
+        rest = banks.pop() if len(banks) == 1 and source != 'opening' else SHARE_FULL
     out = []
     for aid, sub, amt in lines:
         if aid in shared:
@@ -1570,9 +1597,11 @@ def share_journal(lines, source, shared):
 
 
 def report_lines(db, to=None, frm=None):
-    """Yield (account_id, type, date, amount) for frm <= date <= to, with shared accounts cut to the user's share.
+    """Yield (account_id, type, date, amount) for frm <= date <= to, with shared accounts and shared
+    invoices/bills cut to the user's share.
     Rows with account_id PARTNER (type 'equity') carry the other owners' part so each journal still balances."""
     shared = shared_accounts(db)
+    docs = shared_documents(db)
     sql = ('SELECT l.journal_id, j.date, j.source, l.account_id, a.type, a.subtype, l.amount FROM journal_lines l '
            'JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id WHERE 1=1')
     args = []
@@ -1582,14 +1611,15 @@ def report_lines(db, to=None, frm=None):
     if frm:
         sql += ' AND j.date>=?'
         args.append(frm)
-    if not shared:
+    if not shared and not docs:
         for r in db.execute(sql, args):
             yield r[3], r[4], r[1], r[6]
         return
     sql += ' ORDER BY l.journal_id, l.id'
     for _, grp in itertools.groupby(db.execute(sql, args), key=lambda r: r[0]):
         grp = list(grp)
-        amts, partner = share_journal([(r[3], r[5], r[6]) for r in grp], grp[0][2], shared)
+        amts, partner = share_journal([(r[3], r[5], r[6]) for r in grp], grp[0][2], shared,
+                                      docs.get(grp[0][0], SHARE_FULL))
         for r, amt in zip(grp, amts):
             yield r[3], r[4], r[1], amt
         if partner:
