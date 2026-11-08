@@ -35,6 +35,19 @@ How the books are run day to day with numbr. For installing it, see `README.md`.
 
 Nothing needs closing. Retained earnings roll over automatically on 1 July. Give your accountant the P&L for the year, the balance sheet at 30 June, the aged reports and the trial balance.
 
+## Budgets
+
+**Budgets → Build a budget** walks you through it: pick the financial year, then for each income and expense account choose how to budget it. Each account starts with a suggestion: the method you used last year, otherwise its monthly average if it has history.
+
+- **Monthly average** or **Last month**: from your last 12 full months of actuals.
+- **My own amounts**: amounts that repeat, e.g. $100 a month from July to October, then $110 a month from November; or $50 a week starting on a given date (weeks and fortnights land in the month they fall in); or a total for the year spread evenly across the months.
+- **Type each month**: all 12 months by hand.
+- **Don't budget**.
+
+Once built, change any figure on the budget page by typing over it and **Save changes**. Those edits don't change how next year's builder starts: it reuses the choices you made when building (moved forward a year). To change the choices themselves, delete the budget and build it again.
+
+Near the end of each financial year, build next year's budget: each account starts the way you did it this year (marked "as last year"), so just adjust anything that's changed.
+
 ## Shared bank accounts
 
 For an account you share with someone (e.g. a joint account), open Banking → Manage accounts and set **Your share %** (e.g. 50). Enter and reconcile its transactions at their full amounts, exactly as they appear on the statement. Reports then show only your share:

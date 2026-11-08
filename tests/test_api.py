@@ -745,6 +745,165 @@ try:
     check(tb_['debit'] == tb_['credit'], 'TB still balances after account changes')
     check(call('GET', '/api/reports/bs?to=2026-11&count=1')['balanced'], 'BS still balances after account changes')
 
+    # ---- budgets: built from choices per account, then plain monthly figures edited by hand
+    def ym_add(ym, n):
+        y, m = int(ym[:4]), int(ym[5:7]) - 1 + n
+        return f'{y + m // 12:04d}-{m % 12 + 1:02d}'
+
+    def half_away(a, n):
+        q, r = divmod(abs(a), n)
+        v = q + (1 if 2 * r >= n else 0)
+        return v if a >= 0 else -v
+
+    td = date.today()
+    fy = f'{td.year if td.month >= 7 else td.year - 1}-07'
+    fy_months = [ym_add(fy, i) for i in range(12)]
+    fy_end = f'{fy_months[-1]}-{calendar.monthrange(int(fy_months[-1][:4]), int(fy_months[-1][5:7]))[1]:02d}'
+    h_to = ym_add(td.isoformat()[:7], -1)
+    h_from = max(ym_add(h_to, -11), '2026-07')
+    in_budget = call('POST', '/api/accounts', {'name': 'Budget only expense', 'type': 'expense'})['id']
+    not_budgeted = call('POST', '/api/accounts', {'name': 'Never budgeted', 'type': 'expense'})['id']
+
+    bld = call('GET', '/api/budgets/builder')
+    check(bld['fy'] == fy and bld['months'] == fy_months, f"builder defaults to this financial year {bld['fy']}")
+    check(bld['history'] and bld['history']['from'] == h_from and bld['history']['to'] == h_to,
+          f"history is the last 12 full months since the books started {bld['history']}")
+    check(bld['prior'] is None, 'first budget has no earlier choices')
+    hm = [h_from]
+    while hm[-1] < h_to:
+        hm.append(ym_add(hm[-1], 1))
+    pl_h = call('GET', f'/api/reports/pl?from={h_from}&to={h_to}')
+    actual = {r['account_id']: r['values'] for s in pl_h['sections'] for r in s['rows']}
+    ba = {a['account_id']: a for a in bld['accounts']}
+    ok_hist = True
+    for aid, vals in actual.items():
+        if aid not in ba:
+            continue
+        exp_last = next((v for v in reversed(vals) if v), 0)
+        a = ba[aid]
+        if a['average'] != half_away(sum(vals), len(hm)) or a['last'] != exp_last or a['method'] != 'average':
+            ok_hist = False
+            print('  history mismatch', a, vals)
+    check(ok_hist and actual, 'builder average and last month match the P&L for the history window (shared cut included)')
+    check(all(a['method'] == 'none' for a in bld['accounts'] if not a['has_history']), 'accounts with no history default to not budgeted')
+    check(all(a['type'] in ('income', 'cos', 'expense') for a in bld['accounts']), 'builder only offers P&L accounts')
+
+    def occurrences(first, step):
+        d, out = date.fromisoformat(first), {}
+        while d.isoformat() <= fy_end:
+            out[d.isoformat()[:7]] = out.get(d.isoformat()[:7], 0) + 1
+            d = date.fromordinal(d.toordinal() + step)
+        return [out.get(m, 0) for m in fy_months]
+
+    wk_first, fn_first = f'{fy[:4]}-07-03', f'{fy[:4]}-07-10'
+    rent_cfg = [{'freq': 'monthly', 'amount': 10000, 'from': fy_months[0], 'to': fy_months[3]},
+                {'freq': 'monthly', 'amount': 11000, 'from': fy_months[4]}]
+    manual = [100 * (i + 1) for i in range(12)]
+    choose = [
+        {'account_id': A['4-1000'], 'method': 'average'},
+        {'account_id': A['4-2000'], 'method': 'last'},
+        {'account_id': A['6-1600'], 'method': 'schedule', 'config': rent_cfg},
+        {'account_id': A['6-1300'], 'method': 'schedule', 'config': [{'freq': 'weekly', 'amount': 2500, 'first': wk_first}]},
+        {'account_id': A['6-1200'], 'method': 'schedule', 'config': [{'freq': 'fortnightly', 'amount': 5000, 'first': fn_first}]},
+        {'account_id': A['6-1100'], 'method': 'manual', 'config': {'amounts': manual}},
+        {'account_id': in_budget, 'method': 'manual', 'config': {'amounts': [500] * 12}},
+        {'account_id': not_budgeted, 'method': 'none'},
+        {'account_id': A['6-1700'], 'method': 'schedule', 'config': [
+            {'freq': 'yearly', 'amount': 100000},
+            {'freq': 'yearly', 'amount': -1000, 'from': fy_months[0], 'to': fy_months[2]}]},
+    ]
+    pv = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': choose})
+    pa = {a['account_id']: a for a in pv['accounts']}
+    check(pa[A['4-1000']]['values'] == [ba[A['4-1000']]['average']] * 12, 'average puts the monthly average in every month')
+    check(pa[A['4-2000']]['values'] == [ba[A['4-2000']]['last']] * 12, 'last month repeats the last month of actuals')
+    check(pa[A['6-1600']]['values'] == [10000] * 4 + [11000] * 8, 'monthly amounts can change part way through the year')
+    wk = occurrences(wk_first, 7)
+    check(pa[A['6-1300']]['values'] == [2500 * n for n in wk] and sum(wk) in (52, 53) and set(wk) == {4, 5},
+          f'weekly amounts land in the month they happen ({wk})')
+    fn = occurrences(fn_first, 14)
+    check(pa[A['6-1200']]['values'] == [5000 * n for n in fn] and sum(fn) in (26, 27), f'fortnightly amounts ({fn})')
+    check(pa[A['6-1100']]['values'] == manual, 'typed monthly amounts are used as entered')
+    check(pa[not_budgeted]['values'] == [0] * 12, 'not budgeted is all zeros')
+    check(pa[A['6-1700']]['values'] == [8000, 8001, 8001, 8334] + [8333] * 8 and pa[A['6-1700']]['total'] == 99000,
+          f"a yearly total is spread evenly over its months and adds up exactly ({pa[A['6-1700']]['values']})")
+    exp_np = [sum(pa[a]['values'][i] * (1 if pa[a]['type'] == 'income' else -1) for a in pa) for i in range(12)]
+    check(pv['totals']['net_profit'] == exp_np, 'preview totals add up')
+    bad = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': [
+        {'account_id': A['6-1600'], 'method': 'schedule', 'config': [{'freq': 'monthly', 'amount': 1, 'from': fy_months[5], 'to': fy_months[2]}]},
+        {'account_id': A['6-1300'], 'method': 'schedule', 'config': [{'freq': 'weekly', 'amount': 1}]}]})
+    check(all(a.get('error') for a in bad['accounts']), 'preview reports a problem per account without failing')
+    r = call('POST', '/api/budgets', {'fy': fy, 'accounts': [{'account_id': A['6-1300'], 'method': 'schedule',
+                                                              'config': [{'freq': 'weekly', 'amount': 1}]}]}, expect_ok=False)
+    check('first date' in r.get('error', '') and 'Insurance' in r.get('error', ''), 'saving refuses a bad setup and names the account')
+    r = call('POST', '/api/budgets', {'fy': fy, 'accounts': [{'account_id': A['1-2000'], 'method': 'average'}]}, expect_ok=False)
+    check('income' in r.get('error', ''), 'balance sheet accounts cannot be budgeted')
+    r = call('POST', '/api/budgets', {'fy': ym_add(fy, 1), 'accounts': choose}, expect_ok=False)
+    check('start of a financial year' in r.get('error', ''), 'a budget must start at the start of a financial year')
+
+    bid = call('POST', '/api/budgets', {'fy': fy, 'accounts': choose})['id']
+    r = call('POST', '/api/budgets', {'fy': fy, 'accounts': choose}, expect_ok=False)
+    check('already a budget' in r.get('error', ''), 'only one budget per financial year')
+    r = call('GET', f'/api/budgets/builder?fy={fy}', expect_ok=False)
+    check('already a budget' in r.get('error', ''), 'builder refuses a year that already has a budget')
+    bud = call('GET', f'/api/budgets/{bid}')
+    rows_ = {r['account_id']: r for s in bud['sections'] for r in s['rows']}
+    check(rows_[A['6-1600']]['values'] == [10000] * 4 + [11000] * 8 and rows_[A['6-1600']]['method'] == 'schedule',
+          'built budget holds the monthly figures and the method used')
+    check(not_budgeted not in rows_, 'not budgeted accounts are left off the budget')
+    check(bud['net_profit'] == exp_np, 'built budget matches the preview')
+    lst = call('GET', '/api/budgets')
+    check(len(lst) == 1 and lst[0]['net_profit'] == sum(exp_np), 'budget list shows the yearly net profit')
+
+    # hand edits change the figures only, never the stored choices
+    upd = call('PUT', f'/api/budgets/{bid}', {'amounts': [
+        {'account_id': A['6-1600'], 'month': fy_months[0], 'amount': 99999},
+        {'account_id': A['6-1100'], 'month': fy_months[1], 'amount': 0},
+        {'account_id': A['6-1900'], 'month': fy_months[2], 'amount': 4200}]})
+    urows = {r['account_id']: r for s in upd['sections'] for r in s['rows']}
+    check(urows[A['6-1600']]['values'][0] == 99999 and urows[A['6-1100']]['values'][1] == 0,
+          'budget figures can be edited by hand')
+    check(urows[A['6-1900']]['values'][2] == 4200, 'an account can be added to a built budget by hand')
+    r = call('PUT', f'/api/budgets/{bid}', {'amounts': [{'account_id': A['6-1600'], 'month': ym_add(fy, 12), 'amount': 1}]}, expect_ok=False)
+    check('not in this budget' in r.get('error', ''), 'edits must be inside the budget year')
+    call('PUT', f'/api/budgets/{bid}', {'name': 'My first budget'})
+    check(call('GET', f'/api/budgets/{bid}')['name'] == 'My first budget', 'budget can be renamed')
+
+    # next year's builder starts from this year's choices, moved forward a year
+    nfy = ym_add(fy, 12)
+    nb = call('GET', f'/api/budgets/builder?fy={nfy}')
+    na_ = {a['account_id']: a for a in nb['accounts']}
+    check(nb['prior'] and nb['prior']['id'] == bid, 'next year knows the earlier budget')
+    check(na_[A['4-2000']]['method'] == 'last' and na_[A['4-1000']]['method'] == 'average', 'average / last month choices carry forward')
+    check(na_[A['6-1600']]['config'] == [{'freq': 'monthly', 'amount': 10000, 'from': nfy, 'to': ym_add(nfy, 3)},
+                                         {'freq': 'monthly', 'amount': 11000, 'from': ym_add(nfy, 4), 'to': ym_add(nfy, 11)}],
+          f"monthly amounts move forward a year, not the hand edits ({na_[A['6-1600']]['config']})")
+    check(na_[A['6-1700']]['config'][1] == {'freq': 'yearly', 'amount': -1000, 'from': nfy, 'to': ym_add(nfy, 2)},
+          'yearly totals move forward a year')
+    wk2 = date.fromisoformat(na_[A['6-1300']]['config'][0]['first'])
+    wk_target = date(int(wk_first[:4]) + 1, 7, 3)
+    check(wk2.weekday() == date.fromisoformat(wk_first).weekday() and 0 <= (wk2 - wk_target).days < 7,
+          f'weekly amounts keep their weekday next year ({wk2})')
+    check(na_[A['6-1100']]['method'] == 'manual' and na_[A['6-1100']]['config']['amounts'] == manual,
+          'typed amounts carry forward as typed, not as edited')
+    check(na_[not_budgeted]['method'] == 'none' and na_[not_budgeted]['from_prior'], 'not budgeted carries forward')
+    check(all(a['from_prior'] for a in nb['accounts'] if a['account_id'] in pa), 'carried choices are flagged')
+
+    # accounts in a budget can't be deleted; one only marked "not budgeted" can
+    r = call('DELETE', f'/api/accounts/{in_budget}', expect_ok=False)
+    check('budget' in r.get('error', ''), 'an account in a budget cannot be deleted')
+    call('DELETE', f'/api/accounts/{not_budgeted}')
+    check(not_budgeted not in [a['id'] for a in call('GET', '/api/accounts')], 'an unused account marked not budgeted can be deleted')
+
+    tb_ = call('GET', '/api/reports/tb')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances with a budget')
+    check(call('GET', f'/api/reports/bs?to={td.isoformat()[:7]}&count=1')['balanced'], 'BS still balances with a budget')
+    acts = [a['action'] for a in call('GET', '/api/audit')]
+    check(all(x in acts for x in ('budget_create', 'budget_update')), 'budget changes are audited')
+    call('DELETE', f'/api/budgets/{bid}')
+    check(call('GET', '/api/budgets') == [] and call('GET', f'/api/budgets/builder?fy={nfy}')['prior'] is None,
+          'deleting a budget removes it and its choices')
+    check('budget_delete' in [a['action'] for a in call('GET', '/api/audit')], 'budget delete is audited')
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')

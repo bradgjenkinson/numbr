@@ -424,6 +424,9 @@ const ROUTES = [
   [/^#\/reports\/aged-ar$/, () => reportAged('sale')],
   [/^#\/reports\/aged-ap$/, () => reportAged('bill')],
   [/^#\/reports\/tb$/, reportTB],
+  [/^#\/budgets$/, budgetList],
+  [/^#\/budgets\/new$/, budgetBuilder],
+  [/^#\/budgets\/(\d+)$/, m => budgetView(m[1])],
   [/^#\/contacts$/, contactsList],
   [/^#\/contacts\/new$/, () => contactForm()],
   [/^#\/contacts\/(\d+)$/, m => contactForm(m[1])],
@@ -1975,6 +1978,401 @@ async function reportTB() {
   $('#x-csv').onclick = () => download(`Trial-Balance-${d.as_at}.csv`, [['Account', 'Type', 'Debit', 'Credit'], ...d.rows.map(r => [r.name, TYPE_LABEL[r.type], c2d(r.debit), c2d(r.credit)]), ['Total', '', c2d(d.debit), c2d(d.credit)]]);
 }
 
+// ---------------------------------------------------------------- budgets
+// The builder asks, per P&L account, how to make its budget. The server does all the maths (preview) and
+// keeps those choices only to set up next year's builder. A built budget is plain monthly figures that
+// are edited by hand on the budget page.
+const BUDGET_METHOD = { average: 'Monthly average', last: 'Last month', schedule: 'My own amounts', manual: 'Type each month', none: "Don't budget" };
+const BUDGET_SECTIONS = [['income', 'Income'], ['cos', 'Cost of Sales'], ['expense', 'Expenses']];
+const SCHED_FREQ = { monthly: 'Every month', yearly: 'Total for the year', weekly: 'Every week', fortnightly: 'Every fortnight' };
+const BY_MONTH = f => f === 'monthly' || f === 'yearly';  // segments with from/to months rather than dates
+const SCHED_PER = { monthly: 'a month', weekly: 'a week', fortnightly: 'a fortnight' };
+const BUDGET_METHOD_SHORT = { average: 'average', last: 'last month', schedule: 'own amounts', manual: 'typed' };
+const PL_TYPE_SET = new Set(['income', 'cos', 'expense']);
+const sumC = v => v.reduce((a, b) => a + b, 0);
+// Twelve months as a compact grid: each cell is a month label over a value (or an input).
+const monthGrid = (months, cell) => `<div class="mgrid">${months.map((m, i) => `<div><span>${monthLabel(m)}</span>${cell(i, m)}</div>`).join('')}</div>`;
+
+async function budgetList() {
+  const list = await GET('/api/budgets');
+  page('Budgets', 'What you expect to earn and spend each month of a financial year', `<a class="btn primary" href="#/budgets/new">Build a budget</a>`,
+    `<div class="panel flush">${list.length ? `<div class="table-wrap"><table><thead><tr><th>Budget</th><th>Year</th><th class="num">Income</th><th class="num">Expenses</th><th class="num">Net profit</th></tr></thead><tbody>
+    ${list.map(b => `<tr class="click" data-href="#/budgets/${b.id}"><td>${esc(b.name)}</td><td>${esc(b.label)}</td>${numCell(b.income)}${numCell(b.expenses)}${numCell(b.net_profit)}</tr>`).join('')}
+    </tbody></table></div>` : `<div class="empty">No budgets yet.<br>A budget is your plan for the year: how much you expect to earn and spend each month.
+      The builder walks you through it one account at a time.</div>`}</div>`);
+  $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
+}
+
+// Builder state: d = what the server sent, choice = {account_id: {method, config}}, preview = last server preview.
+let BB = null;
+async function budgetBuilder() {
+  await refreshState();
+  const fy = QS.get('fy');
+  const d = await GET('/api/budgets/builder' + (fy ? `?fy=${encodeURIComponent(fy)}` : ''));
+  // Each account starts with the server's suggestion: last year's choice where there is one,
+  // else the monthly average when it has history, else not budgeted.
+  BB = { d, step: 1, preview: null, name: d.name,
+    choice: Object.fromEntries(d.accounts.map(a => [a.account_id, { method: a.method, config: a.config }])) };
+  drawBuilder();
+}
+const builderChoices = () => BB.d.accounts.map(a => ({ account_id: a.account_id, ...BB.choice[a.account_id] }));
+async function builderPreview() {
+  BB.preview = await api('POST', '/api/budgets/preview', { fy: BB.d.fy, accounts: builderChoices() });
+  BB.prev = Object.fromEntries(BB.preview.accounts.map(a => [a.account_id, a]));
+}
+function scheduleSummary(cfg, months) {
+  if (!cfg || !cfg.length) return '';
+  return cfg.map(s => {
+    const amt = `${$fmt(s.amount)} ${SCHED_PER[s.freq]}`;
+    if (s.freq === 'yearly') {
+      const n = months.indexOf(s.to) - months.indexOf(s.from) + 1;
+      return `${$fmt(s.amount)} spread evenly over ${n === 12 ? 'the year' : `${monthLabel(s.from)} – ${monthLabel(s.to)}`}`;
+    }
+    if (s.freq === 'monthly') return s.from === months[0] && s.to === months[11] ? amt : `${amt}, ${monthLabel(s.from)} – ${monthLabel(s.to)}`;
+    return `${amt} from ${dfmt(s.first)}${s.to ? ` to ${dfmt(s.to)}` : ''}`;
+  }).join('; then ');
+}
+
+function drawBuilder() {
+  const d = BB.d, st = BB.step;
+  const steps = `<div class="steps">${[1, 2, 3].map(i => `<span class="${i <= st ? 'on' : ''}"></span>`).join('')}</div>`;
+  const head = (t, sub) => page(`Build a budget`, `${esc(d.label)} · step ${st} of 3`, `<a class="btn" href="#/budgets">Cancel</a>`, `<div class="${st < 2 ? 'setup' : ''}">${steps}<div class="panel" id="bb">${t ? `<h2>${t}</h2>` : ''}${sub ? `<p class="muted">${sub}</p>` : ''}<div id="bb-body"></div></div></div>`);
+  const foot = (back, next, nextLabel = 'Continue') => `<div class="modal-foot">${back ? '<button id="bb-back">Back</button>' : ''}<button class="primary" id="bb-next">${nextLabel}</button></div>`;
+  const wire = (onNext) => {
+    const b = $('#bb-back'); if (b) b.onclick = () => { BB.step--; drawBuilder(); };
+    $('#bb-next').onclick = onNext;
+  };
+  if (st === 1) {
+    head('Which year is this budget for?', 'A budget is your plan for the year: what you expect to earn and spend each month. Later you can compare it with what really happens.');
+    const opts = d.years.map(y => `<option value="${y.fy}" ${y.fy === d.fy ? 'selected' : ''} ${y.budget_id ? 'disabled' : ''}>${esc(y.label)} (${monthLabel(y.fy)} – ${monthLabel(addMonthsYM(y.fy, 11))})${y.budget_id ? ' – already has a budget' : ''}</option>`).join('');
+    $('#bb-body').innerHTML = `<div class="field"><label>Financial year</label><select id="bb-fy">${opts}</select></div>${foot(false, true)}`;
+    $('#bb-fy').onchange = () => go(`#/budgets/new?fy=${val('#bb-fy')}`);
+    wire(async () => { try { await builderPreview(); BB.step = 2; drawBuilder(); } catch (e) { fail(e); } });
+  } else if (st === 2) {
+    head('Choose how to budget each account', d.history
+      ? `Each account starts with a suggestion: ${d.prior ? `the method you used for ${esc(d.prior.label)}, or ` : ''}its monthly average from ${monthLong(d.history.from)} to ${monthLong(d.history.to)}. Change any of them; the yearly total updates as you go.`
+      : 'Pick a method for each account. Choose "My own amounts" for amounts that repeat (monthly, weekly or fortnightly) or a total for the year, or "Type each month" to enter all 12 months.');
+    drawBuilderAccounts();
+  } else {
+    head('Check your budget', 'This is your budget month by month. Once it is built you can still change any figure by hand.');
+    const p = BB.preview;
+    const rowsFor = type => d.accounts.filter(a => a.type === type && BB.choice[a.account_id].method !== 'none')
+      .map(a => ({ account_id: a.account_id, name: a.name, group_id: a.group_id, values: BB.prev[a.account_id].values, total: BB.prev[a.account_id].total }));
+    const t = p.totals, gp = t.income.map((v, i) => v - t.cos[i]);
+    $('#bb-body').innerHTML = `<div class="field" style="max-width:360px"><label>Budget name</label><input id="bb-name" value="${esc(BB.name)}"></div>
+      <div class="report">${budgetTable(p.months, BUDGET_SECTIONS.map(([type, title]) => ({ type, title, rows: rowsFor(type), totals: t[type] })), gp, t.net_profit)}</div>
+      ${foot(true, true, 'Build budget')}`;
+    $('#bb-name').oninput = () => { BB.name = val('#bb-name'); };
+    wire(async () => {
+      try {
+        const res = await api('POST', '/api/budgets', { fy: d.fy, name: BB.name, accounts: builderChoices() });
+        toast('Budget built'); BB = null; go(`#/budgets/${res.id}`);
+      } catch (e) { fail(e); }
+    });
+  }
+}
+
+function drawBuilderAccounts() {
+  const d = BB.d, h = d.history, p = BB.prev;
+  const opt = (a, k) => {
+    const c = BB.choice[a.account_id];
+    const extra = k === 'average' ? ` (${$fmt(a.average)})` : k === 'last' ? ` (${$fmt(a.last)})` : '';
+    return `<option value="${k}" ${c.method === k ? 'selected' : ''}>${BUDGET_METHOD[k]}${extra}</option>`;
+  };
+  const methods = h ? Object.keys(BUDGET_METHOD) : ['schedule', 'manual', 'none'];
+  const cols = h ? 4 : 2;  // columns after the account name
+  let body = '';
+  BUDGET_SECTIONS.forEach(([type, title]) => {
+    const rs = d.accounts.filter(a => a.type === type).map(a => ({ ...a, values: [p[a.account_id].total], total: p[a.account_id].total }));
+    if (!rs.length) return;
+    body += repLabelRow(title, cols, 'sechead');
+    treeLines(groupTree(type, rs)).forEach(l => {
+      if (l.kind === 'head') { body += `<tr class="sub ${headClass(l)}"><td ${treeCell(l, 28)}>${esc(l.group.name)}</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(l.total)}</tr>`; return; }
+      const a = l.row, c = BB.choice[a.account_id], pr = p[a.account_id];
+      const own = c.method === 'schedule' || c.method === 'manual';
+      const note = own && !c.config ? '<div class="hint neg">Click Set up… to enter the amounts</div>'
+        : pr.error ? `<div class="hint neg">${esc(pr.error)}</div>` : c.method === 'schedule' ? `<div class="hint">${esc(scheduleSummary(c.config, d.months))}</div>` : '';
+      body += `<tr class="sub" data-a="${a.account_id}"><td ${treeCell(l, 28)}>${esc(a.name)}${a.from_prior ? ' <span class="pill" title="Same choice as last year">as last year</span>' : ''}</td>
+        ${h ? `<td class="num muted">${a.has_history ? fmt(a.average) : '–'}</td><td class="num muted" title="${a.last_month ? monthLong(a.last_month) : ''}">${a.last_month ? `${fmt(a.last)} <span class="small-note">${monthLabel(a.last_month)}</span>` : '–'}</td>` : ''}
+        <td><div class="inline"><select class="bb-method" style="width:auto">${methods.map(k => opt(a, k)).join('')}</select>${own ? `<button class="small bb-setup">${c.config ? 'Change…' : 'Set up…'}</button>` : ''}</div>${note}</td>
+        ${numCell(pr.total)}</tr>`;
+    });
+  });
+  const t = BB.preview.totals;
+  const yr = k => sumC(t[k]);
+  body += `<tr class="total"><td>Total income</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('income'))}</tr>
+    <tr class="total"><td>Total costs and expenses</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('cos') + yr('expense'))}</tr>
+    <tr class="grand"><td>Net profit</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(sumC(t.net_profit))}</tr>`;
+  const errors = BB.preview.accounts.filter(a => a.error).length;
+  $('#bb-body').innerHTML = `<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
+      ${h ? '<option value="average">Monthly average</option><option value="last">Last month</option>' : ''}<option value="none">Don't budget</option></select></div>
+      <div class="hint" style="margin:0 0 8px">Tip: "My own amounts" handles things like "$100 a month until October, then $110", a weekly amount from a start date, or a total for the year spread evenly.</div></div>
+    <div class="table-wrap"><table class="bb-table"><thead><tr><th>Account</th>${h ? '<th class="num">Average a month</th><th class="num">Last month</th>' : ''}<th>How to budget</th><th class="num">Year total</th></tr></thead>
+    <tbody>${body}</tbody></table></div>
+    ${errors ? `<div class="notice warn" style="margin-top:12px">${errors} account${errors > 1 ? 's need' : ' needs'} attention (see the red notes above) before you can continue.</div>` : ''}
+    <div class="modal-foot"><button id="bb-back">Back</button><button class="primary" id="bb-next" ${errors ? 'disabled' : ''}>Continue</button></div>`;
+  const refresh = async () => { try { await builderPreview(); drawBuilderAccounts(); } catch (e) { fail(e); } };
+  $('#bb-back').onclick = () => { BB.step = 1; drawBuilder(); };
+  $('#bb-next').onclick = () => { BB.step = 3; drawBuilder(); };
+  $('#bb-all').onchange = () => {
+    const m = val('#bb-all'); if (!m) return;
+    d.accounts.forEach(a => { BB.choice[a.account_id] = { method: m, config: null }; });
+    refresh();
+  };
+  $$('tr[data-a]').forEach(tr => {
+    const aid = +tr.dataset.a, a = d.accounts.find(x => x.account_id === aid);
+    tr.querySelector('.bb-method').onchange = e => {
+      const m = e.target.value, c = BB.choice[aid];
+      const keep = m === c.method || (m === 'schedule' && Array.isArray(c.config)) || (m === 'manual' && c.config && c.config.amounts);
+      BB.choice[aid] = { method: m, config: keep ? c.config : null };
+      refresh().then(() => { if ((m === 'schedule' || m === 'manual') && !BB.choice[aid].config) ownAmountsModal(a, refresh); });
+    };
+    const b = tr.querySelector('.bb-setup');
+    if (b) b.onclick = () => ownAmountsModal(a, refresh);
+  });
+}
+
+// Modal for "My own amounts" (a list of repeating amounts) or "Type each month" (12 inputs).
+function ownAmountsModal(a, done) {
+  const d = BB.d, months = d.months, c = BB.choice[a.account_id], manual = c.method === 'manual';
+  let segs = !manual && Array.isArray(c.config) ? c.config.map(s => ({ ...s })) : [];
+  let amounts = manual && c.config ? [...c.config.amounts] : (BB.prev[a.account_id] ? [...BB.prev[a.account_id].values] : Array(12).fill(0));
+  if (!manual && !segs.length) segs = [{ freq: 'monthly', amount: null, from: months[0], to: months[11] }];
+  const monthSel = (cls, v) => `<select class="${cls}">${months.map(m => `<option value="${m}" ${m === v ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>`;
+  const segRow = (s, i) => `<div class="seg" data-i="${i}">
+      <div class="field"><label>How often</label><select class="s-freq">${Object.entries(SCHED_FREQ).map(([k, v]) => `<option value="${k}" ${s.freq === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+      <div class="field"><label>${s.freq === 'yearly' ? 'Total amount' : 'Amount'}</label><input class="s-amt num" inputmode="decimal" placeholder="0.00" value="${s.amount === null || s.amount === undefined ? '' : fmt(s.amount)}"></div>
+      ${BY_MONTH(s.freq)
+        ? `<div class="field"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
+        : `<div class="field"><label>First date</label><input type="date" class="s-first" value="${s.first || ''}"></div><div class="field"><label>Until (optional)</label><input type="date" class="s-until" value="${s.to || ''}"></div>`}
+      <div class="field"><label>&nbsp;</label><button class="small danger s-del" title="Remove this amount" ${segs.length < 2 ? 'disabled' : ''}>Remove</button></div></div>`;
+  // Read the form back into segs/amounts. strict: throw on anything unfinished (when saving).
+  const read = (el, strict) => {
+    if (manual) {
+      amounts = [...el.querySelectorAll('.m-amt')].map((inp, i) => {
+        const v = parseMoney(inp.value);
+        if (isNaN(v)) { if (strict) throw new Error(`${monthLong(months[i])}: enter an amount like 120.50`); return 0; }
+        return v;
+      });
+      return { amounts };
+    }
+    segs = [...el.querySelectorAll('.seg')].map((row, i) => {
+      const q = s => row.querySelector(s), freq = q('.s-freq').value, raw = q('.s-amt').value;
+      const amount = raw.trim() === '' ? null : parseMoney(raw);
+      if (strict && (amount === null || isNaN(amount))) throw new Error(`Amount ${i + 1}: enter an amount like 120.50`);
+      return BY_MONTH(freq) ? { freq, amount: isNaN(amount) ? null : amount, from: q('.s-from') ? q('.s-from').value : months[0], to: q('.s-to') ? q('.s-to').value : months[11] }
+        : { freq, amount: isNaN(amount) ? null : amount, first: q('.s-first') ? q('.s-first').value : '', ...(q('.s-until') && q('.s-until').value ? { to: q('.s-until').value } : {}) };
+    });
+    return segs.map(s => ({ ...s, amount: s.amount || 0 }));
+  };
+  const title = manual ? 'Type each month' : 'My own amounts';
+  modal(`<h2>${esc(a.name)}: ${title}</h2>
+    ${manual ? `<p class="hint">Enter what you expect for each month of ${esc(d.label)}.</p><div id="oa-body"></div>
+        <div class="actions" style="margin-top:8px"><button class="small" id="oa-copy">Copy ${monthLabel(months[0])} to every month</button></div>`
+      : `<p class="hint">Add each amount and how often it happens. For example: $100 every month from July to October, then another line for $110 every month from November. "Total for the year" splits an amount evenly across the months you choose (e.g. $1,200 becomes $100 a month). Weekly and fortnightly amounts start on the first date you give and land in the month they fall in.</p>
+        <div id="oa-body"></div><button class="small" id="oa-add">+ Add another amount</button>`}
+    ${manual ? '<div class="hint" style="margin-top:10px">Year total: <b id="oa-total"></b></div>'
+      : '<h2 style="margin-top:16px;font-size:14px">What this gives you</h2><div id="oa-prev" class="muted">…</div>'}
+    <div class="modal-foot"><button id="oa-cancel">Cancel</button><button class="primary" id="oa-ok">Use these amounts</button></div>`, el => {
+    const body = el.querySelector('#oa-body');
+    let timer;
+    const preview = () => {
+      // Typed months need no preview (it would repeat what was typed): just keep the year total current.
+      if (manual) { el.querySelector('#oa-total').textContent = $fmt(sumC(read(el, false).amounts)); return; }
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const cfg = read(el, false);
+          const res = await api('POST', '/api/budgets/preview', { fy: d.fy, accounts: [{ account_id: a.account_id, method: manual ? 'manual' : 'schedule', config: cfg }] });
+          const r = res.accounts[0];
+          el.querySelector('#oa-prev').innerHTML = r.error ? `<div class="notice warn">${esc(r.error)}</div>`
+            : `${monthGrid(months, i => `<b class="${r.values[i] < 0 ? 'neg' : ''}">${fmt(r.values[i])}</b>`)}<div class="hint">Year total: <b>${$fmt(r.total)}</b></div>`;
+        } catch (e) { el.querySelector('#oa-prev').innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
+      }, 250);
+    };
+    const draw = () => {
+      body.innerHTML = manual ? monthGrid(months, i => `<input class="m-amt num" inputmode="decimal" value="${amounts[i] ? fmt(amounts[i]) : ''}" placeholder="0.00">`)
+        : segs.map(segRow).join('');
+      body.querySelectorAll('input, select').forEach(x => { x.oninput = preview; x.onchange = preview; });
+      body.querySelectorAll('.s-freq').forEach(x => x.onchange = () => {
+        read(el, false);
+        const s = segs[+x.closest('.seg').dataset.i];
+        s.freq = x.value;
+        if (!BY_MONTH(s.freq) && !s.first) s.first = `${months[0]}-01`;
+        draw(); preview();
+      });
+      body.querySelectorAll('.s-del').forEach(x => x.onclick = () => { read(el, false); segs.splice(+x.closest('.seg').dataset.i, 1); draw(); preview(); });
+    };
+    draw(); preview();
+    const add = el.querySelector('#oa-add');
+    if (add) add.onclick = () => {
+      read(el, false);
+      const last = segs[segs.length - 1];
+      const from = last && BY_MONTH(last.freq) && last.to < months[11] ? addMonthsYM(last.to, 1) : months[0];
+      segs.push({ freq: 'monthly', amount: null, from, to: months[11] });
+      draw(); preview();
+      const inps = body.querySelectorAll('.s-amt'); inps[inps.length - 1].focus();
+    };
+    const copy = el.querySelector('#oa-copy');
+    if (copy) copy.onclick = () => { const inps = body.querySelectorAll('.m-amt'); inps.forEach(x => { x.value = inps[0].value; }); preview(); };
+    el.querySelector('#oa-cancel').onclick = () => { closeModal(); done(); };
+    el.querySelector('#oa-ok').onclick = async () => {
+      try {
+        const method = manual ? 'manual' : 'schedule', config = read(el, true);
+        const res = await api('POST', '/api/budgets/preview', { fy: d.fy, accounts: [{ account_id: a.account_id, method, config }] });
+        if (res.accounts[0].error) throw new Error(res.accounts[0].error);
+        BB.choice[a.account_id] = { method, config }; closeModal(); done();
+      } catch (e) { fail(e); }
+    };
+  });
+}
+
+// Budget figures laid out like the P&L. Sections: [{type, title, rows: [{account_id, name, group_id, values, total}], totals}].
+// cell(row, i) draws an account's month cell (read-only by default); keys let the budget page update totals in place.
+function budgetTable(months, sections, gp, np, cell = (r, i) => repCell(r.values[i]), nameExtra = () => '') {
+  const n = months.length + 1;
+  const vc = (key, vals) => vals.map((v, i) => `<td class="num${v < 0 ? ' neg' : ''}" data-k="${key}:${i}">${fmt(v, { paren: true, dashZero: true })}</td>`).join('') +
+    `<td class="num" data-k="${key}:12">${fmt(sumC(vals), { paren: true, dashZero: true })}</td>`;
+  let h = '';
+  sections.forEach(s => {
+    if (!s.rows.length && s.type === 'cos') return;
+    h += repLabelRow(s.title, n, 'sechead');
+    treeLines(groupTree(s.type, s.rows)).forEach(l => {
+      if (l.kind === 'head') h += `<tr class="sub ${headClass(l)}"><td ${treeCell(l, 28)}>${esc(l.group.name)}</td>${vc(`g${l.group.id}`, l.values)}</tr>`;
+      else h += `<tr class="sub" data-a="${l.row.account_id}"><td ${treeCell(l, 28)}>${esc(l.row.name)}${nameExtra(l.row)}</td>${months.map((_, i) => cell(l.row, i)).join('')}<td class="num" data-k="a${l.row.account_id}:12">${fmt(l.row.total, { paren: true, dashZero: true })}</td></tr>`;
+    });
+    if (!s.rows.length) h += repLabelRow('None', n, 'sub', 'muted');
+    h += `<tr class="total"><td>Total ${s.title.toLowerCase()}</td>${vc(`s${s.type}`, s.totals)}</tr>`;
+    if (s.type === 'cos' && s.rows.length) h += `<tr class="total"><td>Gross profit</td>${vc('gp', gp)}</tr>`;
+  });
+  h += `<tr class="grand"><td>Net profit</td>${vc('np', np)}</tr>`;
+  return repTable(`<tr><th></th>${months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('')}<th class="num">Total</th></tr>`, h);
+}
+
+async function budgetView(id) {
+  await refreshState();
+  const b = await GET(`/api/budgets/${id}`);
+  // Model: account rows per section with their 12 values; edits change it and mark the cell dirty.
+  const rowsOf = {}, dirty = new Map();
+  b.sections.forEach(s => { rowsOf[s.type] = s.rows.map(r => ({ ...r, values: [...r.values] })); });
+  const allRows = () => Object.values(rowsOf).flat();
+  const sections = () => BUDGET_SECTIONS.map(([type, title]) => {
+    const rows = rowsOf[type].map(r => ({ ...r, total: sumC(r.values) }));
+    return { type, title, rows, totals: b.months.map((_, i) => sumC(rows.map(r => r.values[i]))) };
+  });
+  const profit = secs => {
+    const t = Object.fromEntries(secs.map(s => [s.type, s.totals]));
+    const gp = t.income.map((v, i) => v - t.cos[i]);
+    return [gp, gp.map((v, i) => v - t.expense[i])];
+  };
+  const inBudget = () => new Set(allRows().map(r => r.account_id));
+  const draw = () => {
+    const secs = sections(), [gp, np] = profit(secs);
+    page(esc(b.name), `${esc(b.label)} · ${monthLong(b.months[0])} to ${monthLong(b.months[11])}`,
+      `<a class="btn" href="#/budgets">All budgets</a><button id="bv-rename">Rename</button><button id="bv-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button><button class="danger" id="bv-del">Delete</button><button class="primary" id="bv-save" disabled>Save changes</button>`,
+      `<div class="notice info no-print">Change any figure by typing over it, then <b>Save changes</b>. Use <b>⇉</b> next to an account to copy its first month to every month.
+        Changes here don't affect how next year's builder starts: that uses the choices you made when you built this budget${b.created_at ? ` on ${dfmt(b.created_at.slice(0, 10))}` : ''}.</div>
+      <div class="filters no-print"><div class="field"><label>Add an account to this budget</label><select class="acct-pick" id="bv-acct">${acctOptions('', a => PL_TYPE_SET.has(a.type) && !inBudget().has(a.id) && !a.archived, 'Choose account…')}</select></div>
+        <button id="bv-add">Add</button></div>
+      <div class="report">${reportHead(esc(b.name), `${monthLong(b.months[0])} to ${monthLong(b.months[11])}`)}
+      ${budgetTable(b.months, secs, gp, np,
+        (r, i) => `<td class="num bcell"><input class="num" data-a="${r.account_id}" data-i="${i}" value="${r.values[i] ? fmt(r.values[i]) : ''}" placeholder="–" aria-label="${esc(r.name)} ${monthLabel(b.months[i])}"><span class="print-only">${fmt(r.values[i], { paren: true, dashZero: true })}</span></td>`,
+        r => ` <button class="link small no-print bv-fill" data-a="${r.account_id}" title="Copy the first month to every month">⇉</button>${r.method && r.method !== 'none' ? ` <span class="small-note no-print" title="How it was built">${BUDGET_METHOD_SHORT[r.method] || ''}</span>` : ''}`)}</div>`);
+    wire();
+  };
+  const recalc = () => {
+    const secs = sections(), [gp, np] = profit(secs), set = (k, v) => { const td = $(`[data-k="${k}"]`); if (td) { td.textContent = fmt(v, { paren: true, dashZero: true }); td.classList.toggle('neg', v < 0); } };
+    const put = (key, vals) => { vals.forEach((v, i) => set(`${key}:${i}`, v)); set(`${key}:12`, sumC(vals)); };
+    secs.forEach(s => {
+      put(`s${s.type}`, s.totals);
+      s.rows.forEach(r => set(`a${r.account_id}:12`, r.total));
+      treeLines(groupTree(s.type, s.rows)).forEach(l => { if (l.kind === 'head') put(`g${l.group.id}`, l.values); });
+    });
+    put('gp', gp); put('np', np);
+    $('#bv-save').disabled = !dirty.size;
+  };
+  // Draw the page again from the model, keeping unsaved edits marked.
+  const redraw = () => {
+    draw();
+    dirty.forEach((_, k) => { const [aid, i] = k.split(':'); const inp = $(`.bcell input[data-a="${aid}"][data-i="${i}"]`); if (inp) inp.classList.add('changed'); });
+    recalc();
+  };
+  const rowById = aid => allRows().find(r => r.account_id === aid);
+  const setCell = (inp, cents) => {
+    const r = rowById(+inp.dataset.a), i = +inp.dataset.i;
+    r.values[i] = cents;
+    dirty.set(`${r.account_id}:${i}`, { account_id: r.account_id, month: b.months[i], amount: cents });
+    inp.classList.add('changed');
+  };
+  const wire = () => {
+    $$('.bcell input').forEach(inp => {
+      inp.onchange = () => {
+        const v = parseMoney(inp.value);
+        if (isNaN(v)) { inp.classList.add('bad'); toast('Enter an amount like 120.50', true); return; }
+        inp.classList.remove('bad');
+        setCell(inp, v);
+        inp.value = v ? fmt(v) : '';
+        recalc();
+      };
+      inp.onfocus = () => inp.select();
+      inp.onkeydown = e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const all = $$(`.bcell input[data-i="${inp.dataset.i}"]`), k = all.indexOf(inp) + (e.shiftKey ? -1 : 1);
+        if (all[k]) all[k].focus();
+      };
+    });
+    $$('.bv-fill').forEach(btn => btn.onclick = () => {
+      const ins = $$(`.bcell input[data-a="${btn.dataset.a}"]`);
+      const v = parseMoney(ins[0].value);
+      if (isNaN(v)) return toast('Fix the first month first', true);
+      ins.forEach(inp => { inp.value = v ? fmt(v) : ''; inp.classList.remove('bad'); setCell(inp, v); });
+      recalc();
+    });
+    $('#bv-add').onclick = () => {
+      const a = acct(val('#bv-acct'));
+      if (!a) return toast('Choose an account to add', true);
+      rowsOf[a.type].push({ account_id: a.id, name: a.name, group_id: a.group_id, values: Array(12).fill(0), method: null });
+      redraw();
+      const first = $(`.bcell input[data-a="${a.id}"]`); if (first) first.focus();
+    };
+    $('#bv-save').onclick = async () => {
+      if ($('.bcell input.bad')) return toast('Some amounts are not valid (shown in red)', true);
+      try {
+        await api('PUT', `/api/budgets/${b.id}`, { amounts: [...dirty.values()] });
+        toast('Budget saved'); budgetView(b.id);
+      } catch (e) { fail(e); }
+    };
+    $('#bv-rename').onclick = () => modal(`<h2>Rename budget</h2><div class="field"><label>Name</label><input id="bv-name" value="${esc(b.name)}"></div>
+      <div class="modal-foot"><button onclick="closeModal()">Cancel</button><button class="primary" id="bv-name-ok">Save</button></div>`, el => {
+      el.querySelector('#bv-name-ok').onclick = async () => {
+        try {
+          const name = el.querySelector('#bv-name').value;
+          await api('PUT', `/api/budgets/${b.id}`, { name });
+          b.name = name.trim(); closeModal(); toast('Renamed'); redraw();
+        } catch (e) { fail(e); }
+      };
+    });
+    $('#bv-csv').onclick = () => {
+      const secs = sections(), [gp, np] = profit(secs);
+      const out = [[S.settings.business_name], [b.name], [], ['Account', ...b.months, 'Total']];
+      secs.forEach(s => {
+        if (!s.rows.length && s.type === 'cos') return;
+        out.push([s.title]);
+        csvTreeLines(treeLines(groupTree(s.type, s.rows)), x => x.name).forEach(([label, vals, total]) => out.push([label, ...vals.map(c2d), c2d(total)]));
+        out.push([`Total ${s.title}`, ...s.totals.map(c2d), c2d(sumC(s.totals))]);
+        if (s.type === 'cos' && s.rows.length) out.push(['Gross profit', ...gp.map(c2d), c2d(sumC(gp))]);
+      });
+      out.push(['Net profit', ...np.map(c2d), c2d(sumC(np))]);
+      download(`${b.name.replace(/[^\w -]+/g, '')}.csv`, out);
+    };
+    $('#bv-del').onclick = async () => {
+      if (!await confirmBox(`Delete <b>${esc(b.name)}</b>? Its figures and the choices you made when building it are removed. You can then build ${esc(b.label)} again from the start.`, 'Delete budget', true)) return;
+      try { await api('DELETE', `/api/budgets/${b.id}`); toast('Budget deleted'); go('#/budgets'); } catch (e) { fail(e); }
+    };
+  };
+  draw();
+}
 // ---------------------------------------------------------------- contacts
 async function contactsList() {
   await refreshState();

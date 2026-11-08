@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import re
+import socketserver
 import sqlite3
 import sys
 import threading
@@ -211,6 +212,34 @@ CREATE TABLE IF NOT EXISTS bank_rules (
   active INTEGER NOT NULL DEFAULT 1,
   archived INTEGER NOT NULL DEFAULT 0,      -- deleted rules that created transactions are archived so history keeps the name
   created_at TEXT NOT NULL
+);
+-- Budgets are planning data only: they never touch journals, balances or the lock date.
+-- One budget per financial year (12 months from fy_start).
+CREATE TABLE IF NOT EXISTS budgets (
+  id INTEGER PRIMARY KEY,
+  fy_start TEXT NOT NULL UNIQUE,            -- 'YYYY-MM', first month of the financial year
+  name TEXT NOT NULL,
+  history_from TEXT,                        -- 'YYYY-MM' months of actuals the builder used (NULL = no history)
+  history_to TEXT,
+  created_at TEXT NOT NULL
+);
+-- How the user chose to build each account's budget. Only used to set up next year's builder;
+-- it is never re-applied to a budget that has been built.
+CREATE TABLE IF NOT EXISTS budget_methods (
+  id INTEGER PRIMARY KEY,
+  budget_id INTEGER NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  method TEXT NOT NULL CHECK (method IN ('average','last','schedule','manual','none')),
+  config TEXT,                              -- JSON: schedule segments, or {"amounts": [12 cents]} for manual
+  UNIQUE (budget_id, account_id)
+);
+-- The budget itself: natural-sign cents per account per month (zero months aren't stored). Edited by hand.
+CREATE TABLE IF NOT EXISTS budget_amounts (
+  budget_id INTEGER NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  month TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  PRIMARY KEY (budget_id, account_id, month)
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
@@ -901,6 +930,10 @@ def api_account_delete(db, q, body, aid):
     for r in db.execute('SELECT lines FROM recurring'):
         if any(int(l['account_id']) == a['id'] for l in json.loads(r[0])):
             raise ApiError('This account is used by a recurring transaction')
+    if (scalar(db, 'SELECT COUNT(*) FROM budget_amounts WHERE account_id=?', (a['id'],)) or
+            scalar(db, "SELECT COUNT(*) FROM budget_methods WHERE account_id=? AND method<>'none'", (a['id'],))):
+        raise ApiError('This account is in a budget. Archive it instead.')
+    db.execute('DELETE FROM budget_methods WHERE account_id=?', (a['id'],))
     db.execute('UPDATE contacts SET default_account_id=NULL WHERE default_account_id=?', (a['id'],))
     db.execute('DELETE FROM accounts WHERE id=?', (a['id'],))
     audit(db, 'account_delete', 'account', a['id'], a)
@@ -2536,6 +2569,415 @@ def api_report_tb(db, q, body):
             'business_name': get_setting(db, 'business_name')}
 
 
+# ----------------------------------------------------------------------------
+# Budgets
+# ----------------------------------------------------------------------------
+# A budget covers one financial year of P&L accounts. The builder asks, per account, how to make it
+# (average or last month of recent actuals, a schedule of amounts, or each month typed in). Those
+# choices go in budget_methods, only to set up next year's builder. The built budget is plain monthly
+# figures in budget_amounts, changed by hand from then on and never recalculated from the choices.
+
+BUDGET_METHODS = ('average', 'last', 'schedule', 'manual', 'none')
+BUDGET_METHOD_LABEL = {'average': 'Monthly average', 'last': 'Last month', 'schedule': 'Own amounts',
+                       'manual': 'Typed each month', 'none': 'Not budgeted'}
+STEP_DAYS = {'weekly': 7, 'fortnightly': 14}
+
+
+def ym_add(ym, n):
+    return add_months(month_start(ym), n, 1).strftime('%Y-%m')
+
+
+def ym_diff(a, b):
+    """Months from a to b."""
+    return (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7])
+
+
+def as_ym(v, label='Month'):
+    s = text(v)
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', s):
+        raise ApiError(f'{label} is not a valid month')
+    return s
+
+
+def budget_fy(db, v):
+    fy = as_ym(v, 'Financial year')
+    if int(fy[5:7]) != as_int(get_setting(db, 'fy_start_month', '7')):
+        raise ApiError('That month is not the start of a financial year')
+    return fy
+
+
+def budget_months(fy):
+    return [ym_add(fy, i) for i in range(12)]
+
+
+def fy_label(fy):
+    end = ym_add(fy, 11)
+    return f'FY {fy[:4]}' if fy[:4] == end[:4] else f'FY {fy[:4]}-{end[2:4]}'
+
+
+def round_div(a, n):
+    """a / n in whole cents, rounding half away from zero, without floats."""
+    q, r = divmod(abs(a), n)
+    v = q + (1 if 2 * r >= n else 0)
+    return v if a >= 0 else -v
+
+
+def history_window(db):
+    """(from, to) months of actuals the builder uses: the last 12 complete months, starting no earlier
+    than the books do. None when there is no complete month yet."""
+    to = ym_add(today()[:7], -1)
+    frm = ym_add(to, -11)
+    conv = get_setting(db, 'conversion_date')
+    first = conv[:7] if conv else scalar(db, "SELECT MIN(date) FROM journals WHERE source<>'opening'")
+    if first:
+        frm = max(frm, first[:7])
+    else:
+        return None
+    return (frm, to) if frm <= to else None
+
+
+def actuals_by_month(db, frm, to):
+    """{account_id: {month: natural cents}} for P&L accounts, months frm..to, cut to the user's share."""
+    out = {}
+    for aid, typ, date, amt in report_lines(db, to=month_end(to).isoformat(), frm=month_start(frm).isoformat()):
+        if typ in PL_TYPES:
+            m = out.setdefault(aid, {})
+            m[date[:7]] = m.get(date[:7], 0) + SIGN[typ] * amt
+    return out
+
+
+def history_figures(hist, window):
+    """(average per month, last month's value, that month) for one account's actuals."""
+    if not window:
+        return 0, 0, None
+    months = months_between(*window)
+    avg = round_div(sum(hist.get(m, 0) for m in months), len(months))
+    for m in reversed(months):
+        if hist.get(m):
+            return avg, hist[m], m
+    return avg, 0, None
+
+
+def budget_config(method, raw, months):
+    """Check and tidy the builder's settings for one account. Returns the config to store (or None)."""
+    if method not in BUDGET_METHODS:
+        raise ApiError('Choose how to budget this account')
+    if method == 'manual':
+        amts = (raw or {}).get('amounts') if isinstance(raw, dict) else None
+        if not isinstance(amts, list) or len(amts) != 12:
+            raise ApiError('Enter an amount for each of the 12 months')
+        return {'amounts': [as_cents(a or 0) for a in amts]}
+    if method != 'schedule':
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ApiError('Add at least one amount')
+    if len(raw) > 50:
+        raise ApiError('That is too many amounts for one account')
+    fy_first, fy_last = months[0], months[-1]
+    out = []
+    for i, s in enumerate(raw, 1):
+        if not isinstance(s, dict):
+            raise ApiError('Amount details are not valid')
+        freq = s.get('freq')
+        amount = as_cents(s.get('amount') or 0, f'Amount {i}')
+        if freq in ('monthly', 'yearly'):
+            frm = as_ym(s.get('from') or fy_first, f'Amount {i} "from" month')
+            to = as_ym(s.get('to') or fy_last, f'Amount {i} "to" month')
+            if to < frm:
+                raise ApiError(f'Amount {i}: the "to" month is before the "from" month')
+            if frm > fy_last or to < fy_first:
+                raise ApiError(f'Amount {i}: those months are outside this financial year')
+            out.append({'freq': freq, 'amount': amount, 'from': frm, 'to': to})
+        elif freq in STEP_DAYS:
+            if not s.get('first'):
+                raise ApiError(f'Amount {i}: enter the first date it happens')
+            first = as_date(s.get('first'), f'Amount {i} first date')
+            if first > month_end(fy_last).isoformat():
+                raise ApiError(f'Amount {i}: the first date is after the end of this financial year')
+            seg = {'freq': freq, 'amount': amount, 'first': first}
+            if s.get('to'):
+                seg['to'] = as_date(s['to'], f'Amount {i} end date')
+                if seg['to'] < first:
+                    raise ApiError(f'Amount {i}: the end date is before the first date')
+            out.append(seg)
+        else:
+            raise ApiError(f'Amount {i}: choose how often it happens')
+    return out
+
+
+def schedule_amounts(segs, months):
+    idx = {m: i for i, m in enumerate(months)}
+    vals = [0] * 12
+    start, end = month_start(months[0]), month_end(months[-1])
+    for s in segs:
+        if s['freq'] == 'monthly':
+            for m in months:
+                if s['from'] <= m <= s['to']:
+                    vals[idx[m]] += s['amount']
+            continue
+        if s['freq'] == 'yearly':
+            # A total spread evenly over its months; leftover cents go to the first months so it adds up exactly.
+            span = [m for m in months if s['from'] <= m <= s['to']]
+            q, r = divmod(abs(s['amount']), len(span))
+            sign = -1 if s['amount'] < 0 else 1
+            for k, m in enumerate(span):
+                vals[idx[m]] += sign * (q + (1 if k < r else 0))
+            continue
+        step = STEP_DAYS[s['freq']]
+        d, stop = D(s['first']), min(end, D(s['to'])) if s.get('to') else end
+        if d < start:
+            d += dt.timedelta(days=-(-(start - d).days // step) * step)
+        while d <= stop:
+            vals[idx[d.strftime('%Y-%m')]] += s['amount']
+            d += dt.timedelta(days=step)
+    return vals
+
+
+def method_amounts(method, config, months, figures):
+    avg, last, _ = figures
+    if method == 'average':
+        return [avg] * 12
+    if method == 'last':
+        return [last] * 12
+    if method == 'manual':
+        return list(config['amounts'])
+    if method == 'schedule':
+        return schedule_amounts(config, months)
+    return [0] * 12
+
+
+def roll_config(method, config, shift):
+    """A previous budget's choice moved forward `shift` months to suit a later year."""
+    if method == 'manual':
+        return config
+    if method != 'schedule':
+        return None
+    out = []
+    for s in config:
+        s = dict(s)
+        if s['freq'] in ('monthly', 'yearly'):
+            s['from'], s['to'] = ym_add(s['from'], shift), ym_add(s['to'], shift)
+        else:
+            # Keep the same weekday rhythm: the first date in the original series on or after the same
+            # date `shift` months later.
+            step, first = STEP_DAYS[s['freq']], D(s['first'])
+            target = add_months(first, shift, first.day)
+            s['first'] = (first + dt.timedelta(days=-(-(target - first).days // step) * step)).isoformat()
+            if s.get('to'):
+                to = D(s['to'])
+                s['to'] = add_months(to, shift, to.day).isoformat()
+        out.append(s)
+    return out
+
+
+def budget_accounts(db, include_archived=False):
+    sql = "SELECT * FROM accounts WHERE type IN ('income','cos','expense')"
+    if not include_archived:
+        sql += ' AND archived=0'
+    return rows(db.execute(sql + ' ORDER BY ' + TYPE_ORDER_SQL + ', name COLLATE NOCASE'))
+
+
+def get_budget(db, bid):
+    b = one(db.execute('SELECT * FROM budgets WHERE id=?', (as_int(bid),)))
+    if not b:
+        raise ApiError('Budget not found', 404)
+    return b
+
+
+def budget_rows(db, b):
+    """The built budget laid out like the P&L: sections of account rows with 12 monthly values."""
+    months = budget_months(b['fy_start'])
+    idx = {m: i for i, m in enumerate(months)}
+    vals = {}
+    for r in db.execute('SELECT account_id, month, amount FROM budget_amounts WHERE budget_id=?', (b['id'],)):
+        if r[1] in idx:
+            vals.setdefault(r[0], [0] * 12)[idx[r[1]]] = r[2]
+    methods = {r[0]: r[1] for r in db.execute('SELECT account_id, method FROM budget_methods WHERE budget_id=?', (b['id'],))}
+    show = set(vals) | {aid for aid, m in methods.items() if m != 'none'}
+    sections = []
+    for typ, title in (('income', 'Income'), ('cos', 'Cost of Sales'), ('expense', 'Expenses')):
+        rs = []
+        for a in rows(db.execute('SELECT * FROM accounts WHERE type=? ORDER BY name COLLATE NOCASE', (typ,))):
+            if a['id'] in show:
+                v = vals.get(a['id'], [0] * 12)
+                rs.append({'account_id': a['id'], 'name': a['name'], 'group_id': a['group_id'], 'values': v,
+                           'total': sum(v), 'method': methods.get(a['id']), 'archived': a['archived']})
+        tot = [sum(r['values'][i] for r in rs) for i in range(12)]
+        sections.append({'type': typ, 'title': title, 'rows': rs, 'totals': tot, 'total': sum(tot)})
+    inc, cos, exp = (s['totals'] for s in sections)
+    gp = [inc[i] - cos[i] for i in range(12)]
+    np_ = [gp[i] - exp[i] for i in range(12)]
+    return {**b, 'label': fy_label(b['fy_start']), 'months': months, 'sections': sections,
+            'gross_profit': gp, 'gross_profit_total': sum(gp), 'net_profit': np_, 'net_profit_total': sum(np_)}
+
+
+def compute_budget(db, body, months, window, strict):
+    """Work out 12 monthly amounts for each account the builder sent.
+    strict: raise on the first bad account (saving); otherwise report errors per account (preview)."""
+    items = body.get('accounts')
+    if not isinstance(items, list):
+        raise ApiError('No accounts were sent')
+    accts = {a['id']: a for a in budget_accounts(db, include_archived=True)}
+    hist = actuals_by_month(db, *window) if window else {}
+    out, seen = [], set()
+    for it in items:
+        aid = as_int(it.get('account_id'), 'Account')
+        a = accts.get(aid)
+        if not a:
+            raise ApiError('Budgets can only include income, cost of sales and expense accounts')
+        if aid in seen:
+            raise ApiError(f'{a["name"]} is in the budget twice')
+        seen.add(aid)
+        method = it.get('method') or 'none'
+        try:
+            config = budget_config(method, it.get('config'), months)
+            vals = method_amounts(method, config, months, history_figures(hist.get(aid, {}), window))
+            out.append({'account_id': aid, 'type': a['type'], 'method': method, 'config': config,
+                        'values': vals, 'total': sum(vals)})
+        except ApiError as e:
+            if strict:
+                raise ApiError(f'{a["name"]}: {e}')
+            out.append({'account_id': aid, 'type': a['type'], 'method': method, 'error': str(e),
+                        'values': [0] * 12, 'total': 0})
+    return out
+
+
+def budget_totals(items):
+    tot = {t: [0] * 12 for t in PL_TYPES}
+    for it in items:
+        for i, v in enumerate(it['values']):
+            tot[it['type']][i] += v
+    np_ = [tot['income'][i] - tot['cos'][i] - tot['expense'][i] for i in range(12)]
+    return {'income': tot['income'], 'cos': tot['cos'], 'expense': tot['expense'], 'net_profit': np_}
+
+
+@route('GET', '/api/budgets')
+def api_budgets(db, q, body):
+    out = []
+    for b in rows(db.execute('SELECT * FROM budgets ORDER BY fy_start DESC')):
+        t = {typ: 0 for typ in PL_TYPES}
+        for r in db.execute('SELECT a.type, SUM(b.amount) FROM budget_amounts b JOIN accounts a ON a.id=b.account_id '
+                            'WHERE b.budget_id=? GROUP BY a.type', (b['id'],)):
+            t[r[0]] = r[1]
+        out.append({**b, 'label': fy_label(b['fy_start']), 'income': t['income'],
+                    'expenses': t['cos'] + t['expense'], 'net_profit': t['income'] - t['cos'] - t['expense']})
+    return out
+
+
+@route('GET', '/api/budgets/builder')
+def api_budget_builder(db, q, body):
+    cur = fy_start(db, today())[:7]
+    years = []
+    for n in (-1, 0, 1, 2):
+        fy = ym_add(cur, 12 * n)
+        years.append({'fy': fy, 'label': fy_label(fy),
+                      'budget_id': scalar(db, 'SELECT id FROM budgets WHERE fy_start=?', (fy,))})
+    if q.get('fy'):
+        fy = budget_fy(db, q['fy'])
+    else:
+        fy = next((y['fy'] for y in years[1:] if not y['budget_id']), ym_add(cur, 36))
+    if scalar(db, 'SELECT 1 FROM budgets WHERE fy_start=?', (fy,)):
+        raise ApiError(f'There is already a budget for {fy_label(fy)}. Open it from Budgets, '
+                       'or delete it there to start again.')
+    months = budget_months(fy)
+    window = history_window(db)
+    hist = actuals_by_month(db, *window) if window else {}
+    prior = one(db.execute('SELECT * FROM budgets WHERE fy_start<? ORDER BY fy_start DESC LIMIT 1', (fy,)))
+    choices = {}
+    if prior:
+        shift = ym_diff(prior['fy_start'], fy)
+        for r in db.execute('SELECT account_id, method, config FROM budget_methods WHERE budget_id=?', (prior['id'],)):
+            cfg = json.loads(r[2]) if r[2] else None
+            choices[r[0]] = (r[1], roll_config(r[1], cfg, shift))
+    accts = []
+    for a in budget_accounts(db):
+        avg, last, last_m = history_figures(hist.get(a['id'], {}), window)
+        has = any(hist.get(a['id'], {}).values())
+        method, config = choices.get(a['id'], ('average' if has else 'none', None))
+        accts.append({'account_id': a['id'], 'name': a['name'], 'type': a['type'], 'group_id': a['group_id'],
+                      'average': avg, 'last': last, 'last_month': last_m, 'has_history': has,
+                      'method': method, 'config': config, 'from_prior': a['id'] in choices})
+    return {'fy': fy, 'label': fy_label(fy), 'name': f'Budget {fy_label(fy)[3:]}', 'months': months, 'years': years,
+            'history': {'from': window[0], 'to': window[1], 'count': len(months_between(*window))} if window else None,
+            'prior': {'id': prior['id'], 'name': prior['name'], 'label': fy_label(prior['fy_start'])} if prior else None,
+            'accounts': accts}
+
+
+@route('POST', '/api/budgets/preview')
+def api_budget_preview(db, q, body):
+    months = budget_months(budget_fy(db, req(body, 'fy', 'Financial year')))
+    items = compute_budget(db, body, months, history_window(db), strict=False)
+    return {'months': months, 'accounts': items, 'totals': budget_totals(items)}
+
+
+@route('POST', '/api/budgets')
+def api_budget_create(db, q, body):
+    fy = budget_fy(db, req(body, 'fy', 'Financial year'))
+    if scalar(db, 'SELECT 1 FROM budgets WHERE fy_start=?', (fy,)):
+        raise ApiError(f'There is already a budget for {fy_label(fy)}')
+    months = budget_months(fy)
+    window = history_window(db)
+    items = compute_budget(db, body, months, window, strict=True)
+    name = text(body.get('name')) or f'Budget {fy_label(fy)[3:]}'
+    bid = db.execute('INSERT INTO budgets(fy_start, name, history_from, history_to, created_at) VALUES (?,?,?,?,?)',
+                     (fy, name, window[0] if window else None, window[1] if window else None, now())).lastrowid
+    for it in items:
+        db.execute('INSERT INTO budget_methods(budget_id, account_id, method, config) VALUES (?,?,?,?)',
+                   (bid, it['account_id'], it['method'], json.dumps(it['config']) if it['config'] is not None else None))
+        db.executemany('INSERT INTO budget_amounts(budget_id, account_id, month, amount) VALUES (?,?,?,?)',
+                       [(bid, it['account_id'], m, v) for m, v in zip(months, it['values']) if v])
+    audit(db, 'budget_create', 'budget', bid, {'fy_start': fy, 'name': name,
+                                                'methods': {it['account_id']: it['method'] for it in items}})
+    return {'id': bid}
+
+
+@route('GET', '/api/budgets/:bid')
+def api_budget_get(db, q, body, bid):
+    return budget_rows(db, get_budget(db, bid))
+
+
+@route('PUT', '/api/budgets/:bid')
+def api_budget_update(db, q, body, bid):
+    """Hand edits to a built budget. Never touches budget_methods (next year's starting choices)."""
+    b = get_budget(db, bid)
+    months = set(budget_months(b['fy_start']))
+    if 'name' in body:
+        name = text(body.get('name'))
+        if not name:
+            raise ApiError('Give the budget a name')
+        db.execute('UPDATE budgets SET name=? WHERE id=?', (name, b['id']))
+    accts = {a['id'] for a in budget_accounts(db, include_archived=True)}
+    changes = body.get('amounts') or []
+    if not isinstance(changes, list):
+        raise ApiError('Budget amounts are not valid')
+    for c in changes:
+        aid = as_int(c.get('account_id'), 'Account')
+        if aid not in accts:
+            raise ApiError('Budgets can only include income, cost of sales and expense accounts')
+        m = text(c.get('month'))
+        if m not in months:
+            raise ApiError('That month is not in this budget')
+        amt = as_cents(c.get('amount') or 0)
+        if amt:
+            db.execute('INSERT INTO budget_amounts(budget_id, account_id, month, amount) VALUES (?,?,?,?) '
+                       'ON CONFLICT(budget_id, account_id, month) DO UPDATE SET amount=excluded.amount',
+                       (b['id'], aid, m, amt))
+        else:
+            db.execute('DELETE FROM budget_amounts WHERE budget_id=? AND account_id=? AND month=?', (b['id'], aid, m))
+    audit(db, 'budget_update', 'budget', b['id'], {'name': body.get('name'), 'changes': len(changes)})
+    return budget_rows(db, get_budget(db, b['id']))
+
+
+@route('DELETE', '/api/budgets/:bid')
+def api_budget_delete(db, q, body, bid):
+    b = get_budget(db, bid)
+    db.execute('DELETE FROM budget_amounts WHERE budget_id=?', (b['id'],))
+    db.execute('DELETE FROM budget_methods WHERE budget_id=?', (b['id'],))
+    db.execute('DELETE FROM budgets WHERE id=?', (b['id'],))
+    audit(db, 'budget_delete', 'budget', b['id'], b)
+    return {'ok': True}
+
+
 @route('GET', '/api/dashboard')
 def api_dashboard(db, q, body):
     t = today()
@@ -2694,7 +3136,7 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_api('DELETE')
 
 
-class Server(HTTPServer):
+class Server(socketserver.ThreadingMixIn, HTTPServer):
     """HTTPServer that won't share its port. On Windows, SO_REUSEADDR (HTTPServer's default) lets a second
     copy of numbr bind the same port while requests still reach the first, so use an exclusive bind there."""
     if os.name == 'nt':
@@ -2704,6 +3146,11 @@ class Server(HTTPServer):
             import socket
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             super().server_bind()
+
+    # One thread per connection: a browser can hold an idle connection open (e.g. when a page is
+    # refreshed), which would otherwise stall every other request. SQLite's BEGIN IMMEDIATE in
+    # handle_api still runs requests' transactions one at a time.
+    daemon_threads = True
 
 
 def running_server(method, path):

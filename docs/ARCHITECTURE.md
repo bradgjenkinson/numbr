@@ -24,6 +24,9 @@ A single Python process serves the static frontend and a JSON API. All state is 
 | `payments` / `allocations` | Customer receipts and supplier payments, and how each is split across invoices |
 | `reconciliations` | Statement date and closing balance per bank account. `note='opening'` for the opening-balance pseudo-reconciliation |
 | `recurring` | Templates: kind (sale, bill, spend, receive; `partner`=1 makes contributions), frequency, `next_date`, `anchor_day`, `end_date`, lines as JSON, `share_bp` copied to each invoice/bill it creates |
+| `budgets` | One per financial year: `fy_start` (YYYY-MM), name, the history months the builder used |
+| `budget_methods` | Per budget and account, how the user chose to build it (`average`, `last`, `schedule`, `manual`, `none`) and its `config` JSON. Only used to set up the next year's builder |
+| `budget_amounts` | The budget itself: natural-sign cents per account per month (zero months not stored) |
 | `audit_log` | Append-only change history |
 
 ### How documents post to the ledger
@@ -84,6 +87,19 @@ The Reconcile screen parses a bank CSV in the browser, then sends the lines to `
 
 The rule builder stores pattern *parts* (`text`, `number`, `letters`, `date` with a format like `DD/MM/YYYY`, `any`); `compile_rule_regex()` turns them into a regex (text escaped, parts joined by optional whitespace, `equals` anchored, case-insensitive). Users never write regex.
 
+### Budgets
+
+A budget covers the 12 months of one financial year and P&L accounts only. It is planning data: it never touches journals, balances or the lock date.
+
+The builder has three steps: year, a method per account, review. The builder data (`GET /budgets/builder`) gives each active P&L account its history over the last 12 complete months (fewer if the books are younger; read through `report_lines()`, so shared accounts are cut): `average` (sum / months, rounded half away from zero) and `last` (the latest month with any activity). The user picks a method per account:
+
+- `average` / `last`: that figure in every month.
+- `schedule`: a list of segments that add together. Monthly `{freq, amount, from, to}` (months); yearly `{freq, amount, from, to}`, a total spread evenly over those months (leftover cents go to the first months, so it adds up exactly); weekly/fortnightly `{freq, amount, first, to?}` (dates), where each occurrence lands in the month it falls in, so some months get 5 weeks or 3 fortnights.
+- `manual`: `{amounts: [12 cents]}` in financial-year order.
+- `none`: not budgeted.
+
+All the maths is server-side (`POST /budgets/preview` while building, the same code on `POST /budgets`). Saving stores the choices in `budget_methods` and the resulting figures in `budget_amounts`. **From then on the figures are only changed by hand** (`PUT /budgets/:id`), and the choices are never re-applied. They exist so the next year's builder starts the same way: it takes the latest earlier budget's choices and rolls them forward (`roll_config()`: monthly and yearly segments move by the gap in months; weekly/fortnightly start dates move to the same point in the original series, keeping the weekday; typed months are copied as typed, not as later edited). Accounts with no earlier choice default to `average` when they have history, else `none`. Deleting a budget removes its choices too. An account in a budget can't be deleted (archive it); one only marked `none` can.
+
 ## API reference
 
 All endpoints are under `/api`, take and return JSON, and require header `X-Ledger: 1`. Money is integer cents.
@@ -110,6 +126,10 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `GET /reports/bs?from=YYYY-MM&to=YYYY-MM` | Balance sheet, one month-end column per month (max 36). Older form `?to=YYYY-MM&count=N` still works |
 | `GET /reports/aged?kind=sale\|bill&as_at=` | Aged receivables/payables |
 | `GET /reports/tb?as_at=` | Trial balance |
+| `GET /budgets` | Budgets with yearly income, expenses and net profit |
+| `GET /budgets/builder?fy=YYYY-MM` | Builder set-up for a financial year (defaults to the first of this/next years without a budget): months, history window, earlier budget, per account `average`/`last`/`last_month`, default `method`/`config`, `from_prior` |
+| `POST /budgets/preview`, `POST /budgets` | `{fy, name?, accounts: [{account_id, method, config}]}`. Preview returns 12 values per account (an `error` per account instead of failing) and totals; create saves it |
+| `GET/PUT/DELETE /budgets/:id` | Budget laid out like the P&L; `PUT {name?, amounts: [{account_id, month, amount}]}` edits figures by hand (amount 0 removes) |
 | `GET /dashboard`, `GET /audit`, `POST /backup` | Dashboard figures, audit log, manual backup |
 
 ## Design decisions
@@ -119,4 +139,6 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 - **No stored balances.** Reports can't disagree with the ledger, and back-dated corrections flow through automatically (until the period is locked).
 - **Opening items rather than migrating MYOB history.** You start clean from a date, which avoids a lossy import.
 - **CSV parsing is client-side; only the description is kept.** The file is parsed in the browser. Statement text is stored only as `journal_lines.bank_text` on lines that rules created or that were matched, so re-imports can skip them. Bank rules create ordinary spend/receive journals, so every report and invariant treats them like hand-entered ones.
+- **Budgets keep choices and figures apart.** The builder's choices only seed next year's builder; a built budget is plain figures, so changing how you'd build it never rewrites a budget you've already made.
+- **Threaded server.** One thread per connection, so a browser holding an idle connection open can't stall other requests. Each request still runs in its own `BEGIN IMMEDIATE` transaction, which SQLite runs one at a time.
 - **Localhost only** with a custom-header check, so other websites in the same browser can't call the API.
