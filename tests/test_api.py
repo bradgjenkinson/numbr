@@ -452,6 +452,176 @@ try:
     r = call('POST', '/api/invoices', {'kind': 'partner', 'contact_id': pal, 'date': '2026-06-30', 'amount': 100}, expect_ok=False)
     check('locked' in r.get('error', ''), 'contribution in a locked period rejected')
 
+    # ---------------------------------------------------------------- bank rules
+    def ttest(op, tokens, sample, **kw):
+        return call('POST', '/api/rules/test', {'text_op': op, 'text_tokens': tokens, 'sample': sample, **kw})['sample_match']
+    T, NUM, ANY = (lambda v: {'t': 'text', 'v': v}), {'t': 'number'}, {'t': 'any'}
+    check(ttest('contains', [T('BEAN CAFE'), NUM], 'EFTPOS BEAN  CAFE 1234 SYDNEY'), 'contains text then number matches')
+    check(not ttest('contains', [T('BEAN CAFE'), NUM], 'BEAN CAFE SYDNEY'), 'text then number needs the number')
+    check(ttest('equals', [T('bean cafe'), NUM], ' BEAN CAFE 12 '), 'equals is case-insensitive and ignores outer spaces')
+    check(not ttest('equals', [T('BEAN CAFE'), NUM], 'xx BEAN CAFE 12'), 'equals needs the whole text')
+    check(ttest('contains', [T('A.B (C)')], 'paid A.B (C) today') and not ttest('contains', [T('A.B (C)')], 'AXB C'),
+          'special characters in text are matched literally')
+    check(ttest('contains', [T('PAY'), {'t': 'date', 'fmt': 'DD/MM/YYYY'}], 'PAY 07/11/2026')
+          and not ttest('contains', [T('PAY'), {'t': 'date', 'fmt': 'DD/MM/YYYY'}], 'PAY 2026-11-07'), 'date token follows its format')
+    check(ttest('equals', [T('REF'), {'t': 'letters', 'count': 3}], 'REF ABC')
+          and not ttest('equals', [T('REF'), {'t': 'letters', 'count': 3}], 'REF ABCD'), 'letters token with an exact count')
+    check(ttest('equals', [T('TFR'), ANY, T('SAVINGS')], 'TFR TO MY SAVINGS'), '"anything" token fills a gap')
+    for bad, why in (({'text_op': 'contains', 'text_tokens': []}, 'empty pattern'),
+                     ({'text_op': 'contains', 'text_tokens': [{'t': 'regex', 'v': '.*'}]}, 'unknown part type'),
+                     ({'text_op': 'contains', 'text_tokens': [ANY]}, 'pattern of only "anything"'),
+                     ({'text_op': 'contains', 'text_tokens': [{'t': 'date', 'fmt': '//'}]}, 'date format without D/M/Y')):
+        r = call('POST', '/api/rules/test', bad, expect_ok=False)
+        check('error' in r, f'rule test rejects {why}')
+    base = {'mode': 'recommend', 'target_account_id': A['6-9000']}
+    r = call('POST', '/api/rules', {**base, 'name': 'Nothing'}, expect_ok=False)
+    check('needs a bank text pattern' in r.get('error', ''), 'a rule needs at least one condition')
+    r = call('POST', '/api/rules', {**base, 'name': 'Bad', 'amount_op': 'lt', 'amount': 100, 'target_account_id': A['1-1300']}, expect_ok=False)
+    check('can\'t be used by a rule' in r.get('error', ''), 'Accounts Receivable can\'t be a rule target')
+    r = call('POST', '/api/rules', {**base, 'name': 'Bad', 'amount_op': 'lt', 'amount': 100, 'target_account_id': A['1-1200'],
+                                    'account_ids': [A['1-1200']]}, expect_ok=False)
+    check('can\'t transfer to it' in r.get('error', ''), 'a transfer rule can\'t only apply to the account it transfers to')
+    r = call('POST', '/api/rules', {**base, 'name': 'Bad', 'amount_op': 'lt', 'amount': 0}, expect_ok=False)
+    check('more than zero' in r.get('error', ''), 'rule amount must be positive')
+    bank1, savings = A['1-1100'], A['1-1200']
+    coffee = call('POST', '/api/rules', {**base, 'name': 'Coffee', 'text_op': 'contains', 'text_tokens': [T('BEAN CAFE')],
+                                         'direction': 'out', 'amount_op': 'lt', 'amount': 1000, 'account_ids': [bank1]})['id']
+    lunch = call('POST', '/api/rules', {'name': 'Lunch', 'mode': 'auto', 'target_account_id': A['6-1900'], 'text_op': 'contains',
+                                        'text_tokens': [T('BEAN CAFE')], 'direction': 'out', 'amount_op': 'gt', 'amount': 999})['id']
+    interest = call('POST', '/api/rules', {'name': 'Interest', 'mode': 'auto', 'target_account_id': A['4-3000'], 'text_op': 'equals',
+                                           'text_tokens': [T('INTEREST')], 'direction': 'in'})['id']
+    rl = call('GET', '/api/rules')
+    check([x['name'] for x in rl] == ['Coffee', 'Lunch', 'Interest'], 'rules list in priority order')
+    check(rl[0]['account_ids'] == [bank1] and rl[1]['account_ids'] == [] and rl[0]['regex'], 'rule scope and regex returned')
+    manual = call('POST', '/api/txn/spend', {'bank_account_id': bank1, 'date': '2026-11-02', 'memo': 'Lunch with client',
+                                             'lines': [{'account_id': A['6-9000'], 'amount': 1550}]})['id']
+    lock = call('GET', '/api/state')['settings']['lock_date']
+    stmt = [{'date': '2026-11-01', 'amount': -450, 'description': 'BEAN CAFE 1234 SYDNEY'},
+            {'date': '2026-11-01', 'amount': -450, 'description': 'BEAN CAFE 1234 SYDNEY'},
+            {'date': '2026-11-02', 'amount': -1550, 'description': 'Bean Cafe 99'},
+            {'date': '2026-11-03', 'amount': 120, 'description': 'INTEREST'},
+            {'date': '2026-11-03', 'amount': -2000, 'description': 'HARDWARE STORE'},
+            {'date': lock, 'amount': -300, 'description': 'BEAN CAFE 1'}]
+    imp = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': stmt})['results']
+    check([x['status'] for x in imp] == ['recommend', 'recommend', 'auto', 'auto', 'none', 'locked'],
+          f"import applies rules by amount and text {[x['status'] for x in imp]}")
+    check(imp[0]['rule_name'] == 'Coffee' and imp[2]['rule_name'] == 'Lunch' and imp[3]['rule_id'] == interest, 'import names the rule used')
+    mline = call('GET', f'/api/journals/{manual}')['lines']
+    mbank = [l for l in mline if l['role'] == 'bank'][0]['id']
+    check(imp[2].get('possible_dup_line_id') == mbank, 'rule wins but flags the similar hand-entered item')
+    cj = call('GET', f"/api/journals/{imp[0]['journal_id']}")
+    check(cj['source'] == 'spend' and cj['rule_mode'] == 'recommend' and cj['rule_name'] == 'Coffee'
+          and cj['bank_text'] == 'BEAN CAFE 1234 SYDNEY' and cj['items'][0]['account_id'] == A['6-9000']
+          and cj['items'][0]['amount'] == 450 and not cj['reconciled'], 'recommended rule creates an unreconciled spend in its category')
+    ij = call('GET', f"/api/journals/{imp[3]['journal_id']}")
+    check(ij['source'] == 'receive' and ij['total'] == 120 and ij['items'][0]['account_id'] == A['4-3000'], 'money-in rule creates a receive')
+    reg = call('GET', f'/api/register?account_id={bank1}&from=2026-11-01')
+    rr = {l['journal_id']: l for l in reg['lines']}
+    check(rr[imp[2]['journal_id']]['rule_name'] == 'Lunch' and rr[imp[2]['journal_id']]['rule_mode'] == 'auto',
+          'banking register shows which rule created a transaction')
+    sv = call('POST', '/api/reconcile/import', {'account_id': savings, 'lines': [{'date': '2026-11-01', 'amount': -450, 'description': 'BEAN CAFE 1'}]})
+    check(sv['results'][0]['status'] == 'none', 'a rule limited to one bank account ignores other accounts')
+    again = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': stmt})['results']
+    check([x['status'] for x in again][:4] == ['duplicate'] * 4 and again[4]['status'] == 'none',
+          f"re-importing the statement skips lines already in numbr {[x['status'] for x in again]}")
+    check(again[0]['line_id'] == imp[0]['line_id'] and again[0]['reconciled'] is False,
+          'a duplicate points at the existing unreconciled line so it can still be ticked')
+    check(rr[imp[0]['journal_id']]['category'] == '6-9000 General Expenses', 'register shows the category a rule chose')
+    triple = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [stmt[0]] * 3})['results']
+    check([x['status'] for x in triple] == ['duplicate', 'duplicate', 'recommend'], 'identical lines are counted, not collapsed')
+    call('DELETE', f"/api/journals/{triple[2]['journal_id']}")
+    # priority: first matching rule wins
+    hw_gen = call('POST', '/api/rules', {**base, 'name': 'Hardware', 'text_op': 'contains', 'text_tokens': [T('HARDWARE')]})['id']
+    hw_exact = call('POST', '/api/rules', {'name': 'Hardware $20', 'mode': 'auto', 'target_account_id': A['6-1500'],
+                                           'amount_op': 'eq', 'amount': 2000, 'direction': 'out'})['id']
+    call('POST', '/api/rules/reorder', {'ids': [hw_exact, coffee, lunch, interest, hw_gen]})
+    hw = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [
+        {'date': '2026-11-04', 'amount': -2000, 'description': 'HARDWARE STORE 2'},
+        {'date': '2026-11-04', 'amount': -3000, 'description': 'HARDWARE STORE'}]})['results']
+    check([x['rule_id'] for x in hw] == [hw_exact, hw_gen], 'rules run in priority order')
+    call('PUT', f'/api/rules/{hw_gen}', {**base, 'name': 'Hardware', 'text_op': 'contains', 'text_tokens': [T('HARDWARE')], 'active': False})
+    off = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [{'date': '2026-11-04', 'amount': -3100, 'description': 'HARDWARE X'}]})
+    check(off['results'][0]['status'] == 'none', 'inactive rules are skipped')
+    # editing a recommended transaction marks it reviewed and keeps its statement text
+    call('PUT', f"/api/journals/{imp[1]['journal_id']}", {'bank_account_id': bank1, 'date': '2026-11-01', 'memo': 'Coffee',
+                                                          'lines': [{'account_id': A['6-1100'], 'amount': 450}]})
+    ej = call('GET', f"/api/journals/{imp[1]['journal_id']}")
+    check(ej['reviewed'] == 1 and ej['rule_id'] == coffee and ej['bank_text'] == 'BEAN CAFE 1234 SYDNEY',
+          'editing a rule transaction marks it reviewed and keeps the bank text')
+    # reconcile stores statement text on matched hand-entered items
+    rc = call('GET', f'/api/reconcile?account_id={bank1}')
+    upto = [l for l in rc['lines'] if l['date'] <= '2026-11-04']
+    check(any(l['rule_mode'] == 'recommend' and l['rule_name'] == 'Coffee' for l in upto), 'reconcile lines carry rule info')
+    call('POST', '/api/reconcile', {'account_id': bank1, 'statement_date': '2026-11-04',
+                                    'statement_balance': rc['cleared_balance'] + sum(l['amount'] for l in upto),
+                                    'line_ids': [l['id'] for l in upto], 'bank_text': {str(mbank): 'EFTPOS LUNCH PLACE'}})
+    check(call('GET', f"/api/journals/{imp[0]['journal_id']}")['reviewed'] == 1, 'reconciling a recommended transaction marks it reviewed')
+    d2 = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [{'date': '2026-11-02', 'amount': -1550, 'description': 'EFTPOS  lunch place'}]})
+    check(d2['results'][0]['status'] == 'duplicate' and d2['results'][0]['reconciled'] is True,
+          'a matched hand-entered item is recognised on the next import')
+    # deleting rules
+    call('DELETE', f'/api/rules/{coffee}')
+    check(coffee not in [x['id'] for x in call('GET', '/api/rules')], 'deleted rule leaves the list')
+    check(call('GET', f"/api/journals/{imp[0]['journal_id']}")['rule_name'] == 'Coffee', 'transactions keep the name of a deleted rule')
+    unused = call('POST', '/api/rules', {**base, 'name': 'Unused', 'amount_op': 'eq', 'amount': 1})['id']
+    call('DELETE', f'/api/rules/{unused}')
+    r = call('GET', f'/api/rules/{unused}', expect_ok=False)
+    check('not found' in r.get('error', ''), 'unused rule is removed')
+    # transfer rules
+    xfer = call('POST', '/api/rules', {'name': 'To savings', 'mode': 'auto', 'target_account_id': savings, 'text_op': 'contains',
+                                       'text_tokens': [T('INTERNET TRANSFER SAVINGS')]})['id']
+    ximp = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [
+        {'date': '2026-11-05', 'amount': -50000, 'description': 'INTERNET TRANSFER SAVINGS'}]})['results'][0]
+    check(ximp['status'] == 'auto' and ximp['rule_id'] == xfer, 'a transfer rule applies to a statement line')
+    xj = call('GET', f"/api/journals/{ximp['journal_id']}")
+    check(xj['source'] == 'transfer' and xj['from_account_id'] == bank1 and xj['to_account_id'] == savings and xj['amount'] == 50000,
+          'a transfer rule creates a transfer between the two bank accounts')
+    check(ximp['line_id'] == [l['id'] for l in xj['lines'] if l['account_id'] == bank1][0], 'the line returned is in the imported account')
+    sv_line = [l['id'] for l in xj['lines'] if l['account_id'] == savings][0]
+    rc_sv = call('GET', f'/api/reconcile?account_id={savings}')
+    check(any(l['id'] == sv_line and l['category'].startswith('Transfer: ') for l in rc_sv['lines']), 'transfer rule lines show as a transfer')
+    # the same rule (all accounts) sees the other side in the savings statement: it's matched, not created again
+    other = call('POST', '/api/reconcile/import', {'account_id': savings, 'lines': [
+        {'date': '2026-11-06', 'amount': 50000, 'description': 'TRANSFER FROM CHEQUE'},
+        {'date': '2026-11-06', 'amount': -2500, 'description': 'INTERNET TRANSFER SAVINGS'}]})['results']
+    check(other[0]['status'] == 'none' and other[1]['status'] == 'none',
+          'a transfer rule never applies in the account it transfers to; other lines are left alone')
+    back = call('POST', '/api/rules', {'name': 'From cheque', 'mode': 'auto', 'target_account_id': bank1, 'text_op': 'contains',
+                                       'text_tokens': [T('TRANSFER FROM CHEQUE')], 'account_ids': [savings]})['id']
+    n_before = len(call('GET', '/api/journals?source=transfer'))
+    other = call('POST', '/api/reconcile/import', {'account_id': savings, 'lines': [
+        {'date': '2026-11-06', 'amount': 50000, 'description': 'TRANSFER FROM CHEQUE'}]})['results'][0]
+    check(other['status'] == 'duplicate' and other['line_id'] == sv_line and other['reconciled'] is False,
+          'importing the other side of a rule transfer matches the existing transfer')
+    check(len(call('GET', '/api/journals?source=transfer')) == n_before, 'the transfer is not created twice')
+    again = call('POST', '/api/reconcile/import', {'account_id': savings, 'lines': [
+        {'date': '2026-11-06', 'amount': 50000, 'description': 'TRANSFER FROM CHEQUE'}]})['results'][0]
+    check(again['status'] == 'duplicate' and again['line_id'] == sv_line, 're-importing the other side is still a duplicate')
+    # editing a rule transfer keeps both sides' statement text
+    call('PUT', f"/api/journals/{xj['id']}", {'from_account_id': bank1, 'to_account_id': savings, 'date': '2026-11-05',
+                                              'amount': 50000, 'memo': 'Savings'})
+    texts = {l['account_id']: l['bank_text'] for l in call('GET', f"/api/journals/{xj['id']}")['lines']}
+    check(texts == {bank1: 'INTERNET TRANSFER SAVINGS', savings: 'TRANSFER FROM CHEQUE'}, 'editing a transfer keeps both statement texts')
+    call('DELETE', f'/api/rules/{back}')
+
+    # saved CSV column choices per account
+    cmap = {'head': True, 'df': 'dmy', 'mode': 'single', 'flip': False,
+            'cols': {'date': {'i': 0, 'name': 'Date'}, 'desc': {'i': 5, 'name': 'Transaction Details'},
+                     'amt': {'i': 1, 'name': 'Amount'}, 'dr': {'i': -1, 'name': ''}, 'cr': {'i': -1, 'name': ''}}}
+    call('POST', '/api/reconcile/import', {'account_id': bank1, 'mapping': cmap,
+                                           'lines': [{'date': '2026-11-06', 'amount': -999, 'description': 'MAP TEST'}]})
+    accs = {a['id']: a for a in call('GET', '/api/state')['accounts']}
+    check(accs[bank1]['csv_map'] == cmap, 'import saves the CSV column choices on the account')
+    check(accs[savings]['csv_map'] is None, 'other accounts keep their own (no) column choices')
+    call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [{'date': '2026-11-06', 'amount': -998, 'description': 'MAP TEST 2'}]})
+    check({a['id']: a for a in call('GET', '/api/state')['accounts']}[bank1]['csv_map'] == cmap,
+          'an import without column choices keeps the saved ones')
+    r = call('POST', '/api/reconcile/import', {'account_id': bank1, 'mapping': 'bad', 'lines': [{'date': '2026-11-06', 'amount': -997, 'description': 'X'}]}, expect_ok=False)
+    check('column choices' in r.get('error', ''), 'invalid column choices are refused')
+    tb_ = call('GET', '/api/reports/tb?as_at=2026-11-30')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances after bank rules')
+    check(call('GET', '/api/reports/bs?to=2026-11&count=1')['balanced'], 'BS still balances after bank rules')
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')

@@ -46,6 +46,8 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 - **Partner contributions:** `invoices.partner=1` (kind `'sale'`) is money a partner is due to put into an account the user tracks. It posts no journal; its payments credit the `partner` system account, which `report_lines()` never cuts and reports as `PARTNER`. Never count it as income or AR: queries for invoices, aged reports and dashboard totals must filter on `partner`.
 - **Shared invoices/bills:** `invoices.share_bp` < 10000 (and `recurring.share_bp` for the invoices a template creates) cuts that invoice's non-AR/AP lines to the user's share in `report_lines()` the same way; the remainder also goes to `PARTNER`.
 
+- **Bank rules:** `bank_rules` categorise statement lines in `POST /api/reconcile/import` (pipeline: duplicate → rule → client-side match). A rule creates an ordinary `spend`/`receive` journal (or a `transfer` when its target is a bank account) tagged `journals.rule_id`/`rule_mode`; auto-applied lines are only *ticked*, never reconciled without the statement balance. A transfer rule claims an existing unreconciled transfer line instead of creating the transfer twice. `journal_lines.bank_text` + `bank_date` are the duplicate key (statement date + amount + normalised text); keep them when a journal is edited. Users build patterns from parts; `compile_rule_regex()` makes the regex, never accept raw regex from the client.
+
 ### Invariants the code enforces (keep them)
 
 1. Journals balance (`check_lines`).
@@ -67,7 +69,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
   - helpers (dates, cents, validation), `connect`/`init_db`/`backup`
   - `post_journal`, `check_lines`, `assert_journal_editable`: the core ledger writes
   - routes are declared with `@route('GET', '/api/...')`; handlers receive `(db, query, body, **path_params)`
-  - sections: settings/opening → accounts/contacts → invoices → payments → banking txns → register → reconcile → recurring → reports → dashboard → HTTP server
+  - sections: settings/opening → accounts/contacts → invoices → payments → banking txns → register → reconcile → bank rules/import → recurring → reports → dashboard → HTTP server
 - `static/app.js`
   - utilities (`api`, `fmt`, `parseMoney`, `modal`, `toast`), `lineEditor`, `journalEditor`
   - `ROUTES` hash router → one async function per screen (`dashboard`, `invoiceForm`, `reconcilePage`, `reportPL`, …)
@@ -92,5 +94,5 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 
 - Email or PDF invoices (print-to-PDF works today)
 - Credit notes (current workaround: void and reissue)
-- Saved bank-CSV column mappings per account
+- Bank rules that split one line across several accounts
 - Budget vs actual on the P&L

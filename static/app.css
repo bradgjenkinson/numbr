@@ -85,7 +85,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 label { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; font-weight: 500; }
 input, select, textarea { font: inherit; color: var(--ink); background: #fff; border: 1px solid #d5d0c6; border-radius: 6px; padding: 7px 9px; width: 100%; }
 input:focus, select:focus, textarea:focus { outline: 2px solid rgba(31,111,92,.25); border-color: var(--accent); }
-input[type=checkbox] { width: auto; }
+input[type=checkbox], input[type=radio] { width: auto; }
 input.num { text-align: right; font-variant-numeric: tabular-nums; }
 textarea { min-height: 60px; resize: vertical; }
 .field { margin-bottom: 12px; }
@@ -129,6 +129,26 @@ td.muted, .muted { color: var(--ink-3); }
 .pill.void { background: #eee; color: #888; text-decoration: line-through; }
 .pill.ok { background: var(--accent-soft); color: var(--accent); }
 .pill.bad { background: var(--bad-soft); color: var(--bad); }
+/* Bank rule badges: auto-applied vs recommended (needs review) */
+.pill.auto { background: #e9e6fb; color: #4b3aa8; }
+.pill.review { background: var(--warn-soft); color: var(--warn); }
+a.pill { margin-left: 4px; }
+a.pill:hover { text-decoration: none; filter: brightness(.96); }
+
+/* Bank rule pattern builder */
+.tokens { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.token-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--line-2); }
+.token-chip .tk-kind { font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+.token-chip input { width: auto; padding: 4px 7px; font-size: 13px; }
+.token-chip .tk-v { width: 170px; }
+.token-chip .tk-count { width: 52px; }
+.token-chip .tk-fmt { width: 130px; }
+.token-chip .tk-sub { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; margin: 0; }
+.token-chip .tk-btn { padding: 1px 6px; font-size: 12px; border-color: transparent; background: transparent; color: var(--ink-3); }
+.token-chip .tk-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--line); background: var(--panel); }
+.token-chip .tk-btn:disabled { opacity: .35; cursor: default; }
+code.regex { display: block; margin-top: 6px; padding: 8px 10px; background: var(--line-2); border-radius: 6px; font-size: 12px; word-break: break-all; }
+h3.csv-sub { font-size: 14px; margin: 14px 18px 4px; }
 
 /* Tabs */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; flex-wrap: wrap; }

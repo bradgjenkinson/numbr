@@ -105,6 +105,7 @@ try:
             f.write('Date,Description,Debit,Credit,Balance\n05/07/2026,ADOBE SYSTEMS,89.99,,7910.01\n20/07/2026,HARBOUR ANALYTICS PAYMENT,,3750.00,11660.01\n31/07/2026,ACCOUNT FEE,10.00,,11650.01\n')
         page.goto(URL + '#/reconcile'); page.wait_for_selector('#rc-bal')
         page.set_input_files('#rc-file', csv); page.wait_for_selector('#m-prev table')
+        assert page.is_hidden('#m-saved'), 'first import has no saved column choices'
         shot(page, '08-csvmap')
         page.click('#modal [data-x=yes]'); page.wait_for_selector('#rc-csv h2')
         assert '2 matched' in page.inner_text('#rc-csv'), page.inner_text('#rc-csv')
@@ -185,6 +186,89 @@ try:
         page.goto(URL + f'#/sales/{oid}'); page.wait_for_selector('#iv-partner')
         page.click('#iv-partner'); page.click('#modal [data-x=yes]'); page.wait_for_url(f'**/#/partner/{oid}'); page.wait_for_selector('text=Balance due')
         assert page.url.endswith(f'#/partner/{oid}'), page.url
+        # bank rules: build two rules with the pattern builder, then import a statement
+        def make_rule(name, aop, amt, code, mode):
+            page.goto(URL + '#/rules/new'); page.wait_for_selector('#ru-name')
+            page.fill('#ru-name', name)
+            page.fill('.tk-v', 'BEAN CAFE')
+            page.click('.ru-add[data-t=number]'); page.wait_for_selector('.token-chip >> nth=1')
+            page.select_option('#ru-aop', aop); page.fill('#ru-amt', amt)
+            page.select_option('#ru-target', str(page.evaluate(f"S.accounts.find(a=>a.code=='{code}').id")))
+            page.check(f'input[name=ru-mode][value={mode}]')
+            page.fill('#ru-sample', 'BEAN CAFE 1234 SYDNEY'); page.wait_for_selector('#ru-result .notice.good')
+            page.fill('#ru-sample', 'BEAN CAFE SYDNEY'); page.wait_for_selector('#ru-result .notice.warn')
+            shot(page, f'17-rule-{name.lower()}')
+            page.click('#ru-save'); page.wait_for_selector(f'#main td >> text={name}')
+        make_rule('Coffee', 'lt', '10', '6-9000', 'recommend')
+        make_rule('Lunch', 'gt', '10', '6-1900', 'auto')
+        assert 'Money out under $10.00' in page.inner_text('main'), page.inner_text('main')
+        # a transfer rule: pick "Transfer" and the other bank account instead of a category
+        page.goto(URL + '#/rules/new'); page.wait_for_selector('#ru-name')
+        assert page.is_visible('#ru-target') and page.is_hidden('#ru-to')
+        page.fill('#ru-name', 'Savings sweep'); page.fill('.tk-v', 'SWEEP TO SAVINGS')
+        page.select_option('#ru-kind', 'xfer')
+        assert page.is_hidden('#ru-target') and page.is_visible('#ru-to')
+        page.select_option('#ru-to', index=2)
+        page.click('#ru-save'); page.wait_for_selector('#main td >> text=Savings sweep')
+        assert 'Transfer: ' in page.locator('#main tr', has=page.locator('text=Savings sweep')).inner_text()
+        shot(page, '18-rules')
+        d = date.today().strftime('%d/%m/%Y')
+        csv2 = os.path.join(data, 'stmt2.csv')
+        with open(csv2, 'w') as f:
+            f.write(f'Date,Description,Debit,Credit\n{d},BEAN CAFE 1234 SYDNEY,4.50,\n{d},BEAN CAFE 1234 SYDNEY,18.00,\n{d},MYSTERY SHOP,7.00,\n')
+        page.goto(URL + '#/reconcile'); page.wait_for_selector('#rc-bal')
+        page.set_input_files('#rc-file', csv2); page.wait_for_selector('#m-acc')
+        assert 'Import into Westpac Business One' in page.inner_text('#modal [data-x=yes]')
+        page.click('#modal [data-x=yes]'); page.wait_for_selector('#rc-csv h2')
+        head = page.inner_text('#rc-csv h2')
+        assert '1 auto-applied' in head and '1 to review' in head and '1 unmatched' in head, head
+        assert 'ticked' in page.locator('#rc-body tr', has=page.locator('text=Auto · Lunch')).get_attribute('class')
+        assert 'ticked' not in page.locator('#rc-body tr', has=page.locator('text=Review · Coffee')).get_attribute('class')
+        assert '6-9000 General Expenses' in page.inner_text('#rc-csv')
+        shot(page, '19-reconcile-rules')
+        page.goto(URL + '#/banking'); page.wait_for_selector('#r-rule')
+        txt = page.inner_text('main')
+        assert 'Auto · Lunch' in txt and 'Review · Coffee' in txt, txt
+        page.select_option('#r-rule', 'review')
+        visible = [t for t in page.locator('tr[data-q]').all() if t.is_visible()]
+        assert len(visible) == 1 and 'Coffee' in visible[0].inner_text(), [v.inner_text() for v in visible]
+        shot(page, '20-banking-rules')
+        # re-importing the same statement creates nothing new
+        page.goto(URL + '#/reconcile'); page.wait_for_selector('#rc-bal')
+        page.set_input_files('#rc-file', csv2); page.wait_for_selector('#m-acc')
+        assert page.is_visible('#m-saved'), 'saved column choices are used on the next import'
+        # changing a choice then cancelling leaves the saved choices as they were
+        page.select_option('#m-df', 'mdy'); page.click('#modal [data-x=no]')
+        page.reload(); page.wait_for_selector('#rc-bal')
+        page.set_input_files('#rc-file', csv2); page.wait_for_selector('#m-acc')
+        assert page.input_value('#m-df') == 'dmy', 'cancelling the dialog does not save column choices'
+        page.click('#modal [data-x=yes]'); page.wait_for_selector('#rc-csv h2'); page.wait_for_timeout(300)
+        assert '2 already in numbr' in toast_text(page), toast_text(page)
+        assert page.locator('#rc-body tr', has=page.locator('text=Coffee')).count() == 1
+        # making a rule from an unmatched line prefills the builder
+        page.click('[data-rule]'); page.wait_for_selector('#ru-name')
+        assert page.input_value('.tk-v') == 'MYSTERY SHOP' and page.input_value('#ru-sample') == 'MYSTERY SHOP'
+        page.click('#ru-cancel'); page.wait_for_selector('#rc-bal')
+        # an unmatched line can be entered as a transfer to another bank account
+        page.click('[data-xfer]'); page.wait_for_selector('#q-other')
+        assert page.input_value('#q-kind') == 'xfer-out' and page.is_hidden('#q-acct') and page.is_visible('#q-other')
+        page.select_option('#q-other', index=2)
+        page.click('#modal [data-x=yes]'); page.wait_for_timeout(600); page.wait_for_selector('#rc-csv h2')
+        assert '0 unmatched' in page.inner_text('#rc-csv h2'), page.inner_text('#rc-csv h2')
+        assert page.locator('#rc-body tr', has=page.locator('text=MYSTERY SHOP')).count() == 1
+        # money in: Customer payment and Partner contribution open their forms with the line's details
+        csv3 = os.path.join(data, 'stmt3.csv')
+        with open(csv3, 'w') as f:
+            f.write(f'Date,Description,Debit,Credit\n{d},DEPOSIT FROM SOMEONE,,25.00\n')
+        n_err = len(errors)
+        for pay, form_title in (('receipt', 'Receive payment'), ('contribution', 'Partner contribution received')):
+            page.goto(URL + '#/reconcile'); page.wait_for_selector('#rc-bal')
+            page.set_input_files('#rc-file', csv3); page.wait_for_selector('#m-acc')
+            page.click('#modal [data-x=yes]'); page.wait_for_selector(f'[data-pay={pay}]')
+            page.click(f'[data-pay={pay}]'); page.wait_for_selector('#p-contact'); page.wait_for_timeout(300)
+            assert form_title in page.inner_text('main') and page.input_value('#p-amount') == '25.00'
+            page.select_option('#p-contact', index=1); page.wait_for_timeout(300)
+        assert len(errors) == n_err and 'Cannot set' not in toast_text(page), errors
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
         for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/partner', '#/banking/transfer', '#/dashboard']:
