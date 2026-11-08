@@ -169,9 +169,37 @@ try:
         shot(page, '10d-pl-groups-only')
         page.uncheck('#f-gonly'); page.wait_for_selector('tr.ghead')
         page.goto(URL + '#/reports/bs'); page.wait_for_selector('.report')
-        page.select_option('#f-count', '3'); page.wait_for_timeout(400)
+        # defaults to this financial year: one month-end column per month, same headings as the P&L
+        heads = page.locator('.rep-grid thead th').all_inner_texts()
+        assert heads[1].strip().upper() == page.evaluate("monthLabel(fyStartYM(S.today))").upper(), heads
+        page.fill('#f-from', '2026-08'); page.fill('#f-to', '2026-10'); page.locator('#f-to').dispatch_event('change'); page.wait_for_timeout(400)
+        assert page.locator('.rep-grid thead th').count() == 4
         assert 'doesn\'t balance' not in page.inner_text('main')
+        cells = [t.strip() for t in page.locator('.rep-grid td.num').all_inner_texts()]
+        assert '0.00' not in cells and '–' in cells, cells
+        # header row and account column are frozen
+        assert page.evaluate("getComputedStyle(document.querySelector('.rep-grid thead th')).position") == 'sticky'
+        assert page.evaluate("getComputedStyle(document.querySelector('.rep-grid tbody td')).position") == 'sticky'
         shot(page, '11-bs')
+        # scrolled in a small window: months stay at the top, accounts stay at the left
+        vp = page.viewport_size
+        page.set_viewport_size({'width': 900, 'height': 500})
+        page.click('[data-r] >> text=This financial year'); page.wait_for_timeout(400)
+        page.evaluate("const g = document.querySelector('.rep-grid'); g.scrollIntoView(); g.scrollTop = 120; g.scrollLeft = 400;")
+        page.wait_for_timeout(150)
+        th = page.locator('.rep-grid thead th').nth(0).bounding_box(); grid = page.locator('.rep-grid').bounding_box()
+        assert abs(th['y'] - grid['y']) < 2 and abs(th['x'] - grid['x']) < 2, (th, grid)
+        shot(page, '11b-bs-scrolled')
+        # scrolled right to the bottom of the table and the page: the month row is still on screen
+        for rep in ('bs', 'pl'):
+            page.goto(URL + f'#/reports/{rep}'); page.wait_for_selector('.rep-grid')
+            page.evaluate("const g = document.querySelector('.rep-grid'); g.scrollTop = g.scrollHeight;"
+                          "window.scrollTo(0, document.documentElement.scrollHeight); document.body.scrollTop = document.body.scrollHeight;")
+            page.wait_for_timeout(150)
+            th = page.locator('.rep-grid thead th').nth(1).bounding_box()
+            assert -1 <= th['y'] and th['y'] + th['height'] <= 500, (rep, th)
+        shot(page, '11c-pl-scrolled-bottom')
+        page.set_viewport_size(vp)
         # account picker: type to find an account, Enter picks it
         page.goto(URL + '#/banking/spend'); page.wait_for_selector('.acct-pick-input')
         pick = page.locator('.acct-pick-input').first

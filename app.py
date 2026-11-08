@@ -2436,9 +2436,13 @@ def api_report_pl(db, q, body):
 @route('GET', '/api/reports/bs')
 def api_report_bs(db, q, body):
     end_m = q.get('to') or today()[:7]
-    count = max(1, min(as_int(q.get('count') or 1, 'Columns'), 13))
-    last = month_start(end_m)
-    months = [add_months(last, -(count - 1 - i), 1).strftime('%Y-%m') for i in range(count)]
+    if q.get('from'):
+        # One month-end column for each month in the range, like the P&L.
+        months = months_between(q['from'], end_m)
+    else:
+        count = max(1, min(as_int(q.get('count') or 1, 'Columns'), 13))
+        last = month_start(end_m)
+        months = [add_months(last, -(count - 1 - i), 1).strftime('%Y-%m') for i in range(count)]
     dates = [month_end(m).isoformat() for m in months]
     accts = rows(db.execute("SELECT * FROM accounts WHERE type IN ('asset','liability','equity') ORDER BY name COLLATE NOCASE"))
     cols = [balances_as_at(db, d) for d in dates]

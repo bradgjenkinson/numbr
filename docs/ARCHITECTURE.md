@@ -107,7 +107,7 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `GET/POST /rules`, `GET/PUT/DELETE /rules/:id`, `POST /rules/reorder`, `POST /rules/test` | Bank rules; delete archives a rule that has created transactions; test returns the regex, a sample match and recent matching lines |
 | `GET/POST /recurring`, `GET/PUT/DELETE /recurring/:id`, `POST /recurring/:id/skip`, `POST /recurring/run` | Recurring templates |
 | `GET /reports/pl?from=YYYY-MM&to=YYYY-MM` | Profit & Loss by month |
-| `GET /reports/bs?to=YYYY-MM&count=N` | Balance sheet, N month-end columns |
+| `GET /reports/bs?from=YYYY-MM&to=YYYY-MM` | Balance sheet, one month-end column per month (max 36). Older form `?to=YYYY-MM&count=N` still works |
 | `GET /reports/aged?kind=sale\|bill&as_at=` | Aged receivables/payables |
 | `GET /reports/tb?as_at=` | Trial balance |
 | `GET /dashboard`, `GET /audit`, `POST /backup` | Dashboard figures, audit log, manual backup |

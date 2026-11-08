@@ -25,6 +25,7 @@ function esc(s) {
 function fmt(c, opt = {}) {
   if (c === null || c === undefined) return '';
   if (opt.blankZero && c === 0) return '';
+  if (opt.dashZero && c === 0) return '–';
   const s = (Math.abs(c) / 100).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return c < 0 ? (opt.paren ? `(${s})` : `-${s}`) : s;
 }
@@ -1812,65 +1813,87 @@ const RF = {};
 function reportHead(title, period) {
   return `<div class="report-title"><div class="biz-name">${esc(S.settings.business_name)}</div><h2>${title}</h2><div class="period">${period}</div></div>`;
 }
+// Report amounts: negatives in brackets, zero as a dash so the figures stand out.
+const repCell = v => numCell(v, { paren: true, dashZero: true });
+// Section heading / "None" rows: the label sits in its own cell so it stays in the frozen account column.
+const repLabelRow = (label, cols, cls, tdCls = '') => `<tr class="${cls}"><td${tdCls ? ` class="${tdCls}"` : ''}>${label}</td><td colspan="${cols}"></td></tr>`;
+// Scrolling table with the month header row and the account column frozen.
+const repTable = (head, rowsHtml) => `<div class="table-wrap rep-grid"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div>`;
+
+// From/To month pickers, quick ranges and Groups only, shared by the P&L and Balance Sheet.
+// Both default to this financial year (FY start to this month).
+function monthRangeState(key) {
+  RF[key] = RF[key] || { from: fyStartYM(S.today), to: S.today.slice(0, 7), groupsOnly: false };
+  return RF[key];
+}
+function monthRangeFilters(key, hasGroups) {
+  const cur = S.today.slice(0, 7), fy = fyStartYM(S.today), r = RF[key];
+  return `<div class="filters">
+    <div class="field"><label>From month</label><input type="month" id="f-from" value="${r.from}"></div>
+    <div class="field"><label>To month</label><input type="month" id="f-to" value="${r.to}"></div>
+    <div class="actions"><button class="small" data-r="${cur},${cur}">This month</button><button class="small" data-r="${addMonthsYM(cur, -1)},${addMonthsYM(cur, -1)}">Last month</button>
+    <button class="small" data-r="${fy},${cur}">This financial year</button><button class="small" data-r="${addMonthsYM(fy, -12)},${addMonthsYM(fy, -1)}">Last financial year</button></div>
+    ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${r.groupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>`;
+}
+function wireMonthRange(key, redraw) {
+  const r = RF[key];
+  const apply = () => { r.from = val('#f-from') || r.from; r.to = val('#f-to') || r.to; redraw(); };
+  $('#f-from').onchange = apply; $('#f-to').onchange = apply;
+  const g = $('#f-gonly');
+  if (g) g.onchange = () => { r.groupsOnly = g.checked; redraw(); };
+  $$('[data-r]').forEach(b => b.onclick = () => { [r.from, r.to] = b.dataset.r.split(','); redraw(); });
+}
 
 async function reportPL() {
-  const cur = S.today.slice(0, 7);
-  RF.plFrom = RF.plFrom || fyStartYM(S.today); RF.plTo = RF.plTo || cur;
-  const d = await GET(`/api/reports/pl?from=${RF.plFrom}&to=${RF.plTo}`);
+  const r = monthRangeState('pl');
+  const d = await GET(`/api/reports/pl?from=${r.from}&to=${r.to}`);
   const multi = d.months.length > 1;
+  const cols = d.months.length + (multi ? 1 : 0);
   const head = `<tr><th></th>${multi ? d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('') : ''}<th class="num">${multi ? 'Total' : monthLabel(d.months[0])}</th></tr>`;
-  const valsRow = (label, vals, total, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${multi ? vals.map(v => numCell(v, { paren: true })).join('') : ''}${numCell(total, { paren: true })}</tr>`;
+  const valsRow = (label, vals, total, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${multi ? vals.map(repCell).join('') : ''}${repCell(total)}</tr>`;
   const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
-  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!RF.plGroupsOnly);
+  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!r.groupsOnly);
   let rowsHtml = '';
   d.sections.forEach(s => {
     if (!s.rows.length && s.type === 'cos') return;
-    rowsHtml += `<tr class="sechead"><td colspan="${d.months.length + 2}">${s.title}</td></tr>`;
+    rowsHtml += repLabelRow(s.title, cols, 'sechead');
     lines(s).forEach(l => {
       if (l.kind === 'row') rowsHtml += valsRow(esc(l.row.name), l.row.values, l.row.total, 'sub', `#/register/${l.row.account_id}?from=${d.from}&to=${d.to}`, treeCell(l, 28));
       else rowsHtml += valsRow(esc(l.group.name), l.values, l.total, `sub ${headClass(l)}`, '', treeCell(l, 28));
     });
-    if (!s.rows.length) rowsHtml += `<tr class="sub"><td class="muted" colspan="${d.months.length + 2}">None</td></tr>`;
+    if (!s.rows.length) rowsHtml += repLabelRow('None', cols, 'sub', 'muted');
     rowsHtml += valsRow(`Total ${s.title.toLowerCase()}`, s.totals, s.total, 'total');
     if (s.type === 'cos' && s.rows.length) rowsHtml += valsRow('Gross profit', d.gross_profit, d.gross_profit_total, 'total');
   });
   rowsHtml += valsRow('Net profit', d.net_profit, d.net_profit_total, 'grand');
-  const fy = fyStartYM(S.today);
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
-    `<div class="filters">
-      <div class="field"><label>From month</label><input type="month" id="f-from" value="${RF.plFrom}"></div>
-      <div class="field"><label>To month</label><input type="month" id="f-to" value="${RF.plTo}"></div>
-      <div class="actions"><button class="small" data-r="${cur},${cur}">This month</button><button class="small" data-r="${addMonthsYM(cur, -1)},${addMonthsYM(cur, -1)}">Last month</button>
-      <button class="small" data-r="${fy},${cur}">This financial year</button><button class="small" data-r="${addMonthsYM(fy, -12)},${addMonthsYM(fy, -1)}">Last financial year</button></div>
-      ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${RF.plGroupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>
+    `${monthRangeFilters('pl', hasGroups)}
     <div class="report">${reportHead('Profit &amp; Loss', d.months.length === 1 ? monthLong(d.months[0]) : `${monthLong(d.months[0])} to ${monthLong(d.months[d.months.length - 1])}`)}
-      <div class="table-wrap"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div></div>`);
+      ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
-  const apply = () => { RF.plFrom = val('#f-from'); RF.plTo = val('#f-to'); reportPL(); };
-  $('#f-from').onchange = apply; $('#f-to').onchange = apply;
-  if (hasGroups) $('#f-gonly').onchange = () => { RF.plGroupsOnly = $('#f-gonly').checked; reportPL(); };
-  $$('[data-r]').forEach(b => b.onclick = () => { [RF.plFrom, RF.plTo] = b.dataset.r.split(','); reportPL(); });
+  wireMonthRange('pl', reportPL);
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Profit & Loss'], [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
     d.sections.forEach(s => {
       out.push([s.title]);
-      csvTreeLines(lines(s), r => r.name).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
+      csvTreeLines(lines(s), x => x.name).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
       out.push([`Total ${s.title}`, ...(multi ? s.totals.map(c2d) : []), c2d(s.total)]);
     });
     out.push(['Net profit', ...(multi ? d.net_profit.map(c2d) : []), c2d(d.net_profit_total)]);
-    download(`Profit-and-Loss-${RF.plFrom}-to-${RF.plTo}.csv`, out);
+    download(`Profit-and-Loss-${r.from}-to-${r.to}.csv`, out);
   };
 }
 
 async function reportBS() {
-  RF.bsTo = RF.bsTo || S.today.slice(0, 7); RF.bsCount = RF.bsCount || 1;
-  const d = await GET(`/api/reports/bs?to=${RF.bsTo}&count=${RF.bsCount}`);
+  const r = monthRangeState('bs');
+  const d = await GET(`/api/reports/bs?from=${r.from}&to=${r.to}`);
   const n = d.dates.length;
-  const head = `<tr><th></th>${d.dates.map(x => `<th class="num">${dfmt(x)}</th>`).join('')}</tr>`;
-  const valsRow = (label, vals, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${vals.map(v => numCell(v, { paren: true })).join('')}</tr>`;
+  // Same column headings as the P&L: one column per month, each the balance at that month's end.
+  const head = `<tr><th></th>${d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('')}</tr>`;
+  const valsRow = (label, vals, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${vals.map(repCell).join('')}</tr>`;
   const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
-  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!RF.bsGroupsOnly);
-  const rowLabel = r => esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : '');
+  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!r.groupsOnly);
+  const rowLabel = x => esc(x.name) + (x.computed ? ' <span class="muted">(this financial year)</span>' : '') + (x.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : '');
   const sectionRows = s => lines(s).forEach(l => {
     if (l.kind === 'row') rowsHtml += valsRow(rowLabel(l.row), l.row.values, 'sub', l.row.account_id ? `#/register/${l.row.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : '', treeCell(l, 28));
     else rowsHtml += valsRow(esc(l.group.name), l.values, `sub ${headClass(l)}`, '', treeCell(l, 28));
@@ -1878,36 +1901,33 @@ async function reportBS() {
   let rowsHtml = '';
   const [A, L, E] = d.sections;
   [A, L].forEach(s => {
-    rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${s.title}</td></tr>`;
+    rowsHtml += repLabelRow(s.title, n, 'sechead');
     sectionRows(s);
-    if (!s.rows.length) rowsHtml += `<tr class="sub"><td class="muted" colspan="${n + 1}">None</td></tr>`;
+    if (!s.rows.length) rowsHtml += repLabelRow('None', n, 'sub', 'muted');
     rowsHtml += valsRow(`Total ${s.title.toLowerCase()}`, s.totals, 'total');
   });
   rowsHtml += valsRow('Net assets', d.net_assets, 'grand');
-  rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${E.title}</td></tr>`;
+  rowsHtml += repLabelRow(E.title, n, 'sechead');
   sectionRows(E);
   rowsHtml += valsRow('Total equity', E.totals, 'grand');
-  const hist = E.rows.find(r => r.subtype === 'hist');
+  const hist = E.rows.find(x => x.subtype === 'hist');
+  const period = n === 1 ? `As at ${dfmt(d.dates[0])}` : `Month ends, ${monthLong(d.months[0])} to ${monthLong(d.months[n - 1])}`;
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
-    `<div class="filters"><div class="field"><label>As at end of</label><input type="month" id="f-to" value="${RF.bsTo}"></div>
-      <div class="field"><label>Compare</label><select id="f-count">${[[1, 'Single month'], [2, '2 months'], [3, '3 months'], [6, '6 months'], [12, '12 months'], [13, '13 months (year on year)']].map(([v, l]) => `<option value="${v}" ${+RF.bsCount === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-      ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${RF.bsGroupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>
+    `${monthRangeFilters('bs', hasGroups)}
     ${!d.balanced ? '<div class="notice bad">The balance sheet doesn\'t balance. This shouldn\'t happen. Please check the Trial Balance.</div>' : ''}
     ${hist && hist.values.some(v => v) ? '<div class="notice warn">Historical Balancing isn\'t zero. Your opening balances don\'t fully balance yet. <a href="#/opening">Review opening balances</a></div>' : ''}
-    <div class="report">${reportHead('Balance Sheet', `As at ${dfmt(d.dates[n - 1])}`)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div></div>`);
+    <div class="report">${reportHead('Balance Sheet', period)}${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
-  $('#f-to').onchange = () => { RF.bsTo = val('#f-to'); reportBS(); };
-  $('#f-count').onchange = () => { RF.bsCount = val('#f-count'); reportBS(); };
-  if (hasGroups) $('#f-gonly').onchange = () => { RF.bsGroupsOnly = $('#f-gonly').checked; reportBS(); };
+  wireMonthRange('bs', reportBS);
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Balance Sheet'], [], ['Account', ...d.dates]];
     d.sections.forEach(s => {
       out.push([s.title]);
-      csvTreeLines(lines(s), r => r.name).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
+      csvTreeLines(lines(s), x => x.name).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
       out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
     });
     out.push(['Net assets', ...d.net_assets.map(c2d)]);
-    download(`Balance-Sheet-${RF.bsTo}.csv`, out);
+    download(`Balance-Sheet-${r.from}-to-${r.to}.csv`, out);
   };
 }
 
