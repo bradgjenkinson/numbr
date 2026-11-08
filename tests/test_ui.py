@@ -356,6 +356,48 @@ try:
             assert form_title in page.inner_text('main') and page.input_value('#p-amount') == '25.00'
             page.select_option('#p-contact', index=1); page.wait_for_timeout(300)
         assert len(errors) == n_err and 'Cannot set' not in toast_text(page), errors
+
+        # budgets: build one through the wizard, with a two-step monthly amount, then edit a figure by hand
+        page.goto(URL + '#/budgets'); page.wait_for_selector('a[href="#/budgets/new"]')
+        page.click('a[href="#/budgets/new"]'); page.wait_for_selector('#bb-fy')
+        page.click('#bb-next'); page.wait_for_selector('.bb-table')
+        sales = page.evaluate("S.accounts.find(a=>a.code=='4-1000').id")
+        assert page.input_value(f'.bb-table tr[data-a="{sales}"] .bb-method') == 'average', 'accounts with history start at their average'
+        rent = page.evaluate("S.accounts.find(a=>a.name=='Rent').id")
+        row = f'.bb-table tr[data-a="{rent}"]'
+        page.select_option(f'{row} .bb-method', 'schedule'); page.wait_for_selector('#oa-body .seg')
+        page.fill('.s-amt', '100')
+        page.select_option('.s-to', index=3)
+        page.click('#oa-add'); page.locator('.s-amt').nth(1).fill('110')
+        page.wait_for_timeout(700)
+        assert '1,280.00' in page.inner_text('#oa-prev'), page.inner_text('#oa-prev')  # 4 x 100 + 8 x 110
+        shot(page, '21b-budget-own-amounts')
+        page.click('#oa-ok'); page.wait_for_timeout(600)
+        assert '1,280.00' in page.inner_text(row) and 'a month' in page.inner_text(row), page.inner_text(row)
+        # a total for the year, spread evenly
+        ins = page.evaluate("S.accounts.find(a=>a.name=='Insurance').id")
+        irow = f'.bb-table tr[data-a="{ins}"]'
+        page.select_option(f'{irow} .bb-method', 'schedule'); page.wait_for_selector('#oa-body .seg')
+        page.select_option('.s-freq', 'yearly'); page.wait_for_timeout(200)
+        page.fill('.s-amt', '1200'); page.wait_for_timeout(700)
+        assert page.inner_text('#oa-prev').count('100.00') == 12, page.inner_text('#oa-prev')
+        page.click('#oa-ok'); page.wait_for_timeout(600)
+        assert 'spread evenly over the year' in page.inner_text(irow) and '1,200.00' in page.inner_text(irow), page.inner_text(irow)
+        shot(page, '21c-budget-accounts')
+        page.click('#bb-next'); page.wait_for_selector('#bb-name')
+        shot(page, '21d-budget-review')
+        page.click('#bb-next'); page.wait_for_selector('.bcell input')
+        cell = page.locator(f'.bcell input[data-a="{rent}"][data-i="0"]')
+        assert cell.input_value() == '100.00', cell.input_value()
+        cell.fill('150'); cell.press('Tab')
+        assert not page.is_disabled('#bv-save')
+        shot(page, '21e-budget-edit')
+        page.click('#bv-save'); page.wait_for_timeout(600)
+        page.reload(); page.wait_for_selector('.bcell input')
+        assert page.locator(f'.bcell input[data-a="{rent}"][data-i="0"]').input_value() == '150.00'
+        assert '1,330.00' in page.inner_text(f'tr[data-a="{rent}"]')
+        assert len(errors) == n_err, errors
+
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
         for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/partner', '#/banking/transfer', '#/dashboard']:

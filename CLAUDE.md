@@ -52,6 +52,8 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 
 - **Bank rules:** `bank_rules` categorise statement lines in `POST /api/reconcile/import` (pipeline: duplicate → rule → client-side match). A rule creates an ordinary `spend`/`receive` journal (or a `transfer` when its target is a bank account) tagged `journals.rule_id`/`rule_mode`; auto-applied lines are only *ticked*, never reconciled without the statement balance. A transfer rule claims an existing unreconciled transfer line instead of creating the transfer twice. `journal_lines.bank_text` + `bank_date` are the duplicate key (statement date + amount + normalised text); keep them when a journal is edited. Users build patterns from parts; `compile_rule_regex()` makes the regex, never accept raw regex from the client.
 
+- **Budgets:** `budgets` (one per financial year), `budget_methods` (the builder's choice per account) and `budget_amounts` (monthly natural-sign cents). Planning data only: never in journals or ledger maths. History for the builder comes through `report_lines()`. Choices are stored only to default next year's builder (`roll_config()`); a built budget's figures change only by hand (`PUT /api/budgets/:id`) and are never recalculated from the choices. P&L accounts only.
+
 ### Invariants the code enforces (keep them)
 
 1. Journals balance (`check_lines`).
@@ -73,12 +75,13 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
   - helpers (dates, cents, validation), `connect`/`init_db`/`backup`
   - `post_journal`, `check_lines`, `assert_journal_editable`: the core ledger writes
   - routes are declared with `@route('GET', '/api/...')`; handlers receive `(db, query, body, **path_params)`
-  - sections: settings/opening → accounts/contacts → invoices → payments → banking txns → register → reconcile → bank rules/import → recurring → reports → dashboard → HTTP server
+  - sections: settings/opening → accounts/contacts → invoices → payments → banking txns → register → reconcile → bank rules/import → recurring → reports → budgets → dashboard → HTTP server
 - `static/app.js`
   - utilities (`api`, `fmt`, `parseMoney`, `modal`, `toast`), `lineEditor`, `journalEditor`
   - account choosers: `acctOptions()` inside a `<select class="acct-pick">`; `enhanceAcctPick()` (applied automatically by a MutationObserver) adds the type-to-search box and keeps the real select underneath holding the value
   - `ROUTES` hash router → one async function per screen (`dashboard`, `invoiceForm`, `reconcilePage`, `reportPL`, …)
   - global `S` holds settings, accounts and contacts (refresh with `refreshState()`)
+  - budgets: `budgetList`, `budgetBuilder` (3 steps, state in `BB`, `ownAmountsModal` for schedules/typed months), `budgetView` (editable grid; `budgetTable` lays budget figures out like the P&L)
   - CSV statement parsing and matching are client-side (`parseCSV`, `csvMapping`, `drawCsv` inside `reconcilePage`)
 - `docs/ARCHITECTURE.md`: schema, API reference, design decisions
 - `docs/OPERATIONS.md`: how the user runs the books (weekly, month end, backups, recovery)
