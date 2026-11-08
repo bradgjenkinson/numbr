@@ -159,6 +159,9 @@ try:
     check(pl['net_profit'][1] == -40000 - 2000, f"Aug NP {pl['net_profit'][1]}")
     bs = call('GET', '/api/reports/bs?to=2026-10&count=4')
     check(bs['balanced'], 'balance sheet balances every month')
+    bs_r = call('GET', '/api/reports/bs?from=2026-07&to=2026-10')
+    check(bs_r['months'] == ['2026-07', '2026-08', '2026-09', '2026-10'] and bs_r['net_assets'] == bs['net_assets'],
+          f"BS from/to range gives one month-end column per month {bs_r['months']}")
     eq = bs['sections'][2]
     cye = [r for r in eq['rows'] if r.get('computed')][0]['values']
     check(cye[-1] == pl['net_profit_total'], f'CYE equals YTD profit {cye[-1]} vs {pl["net_profit_total"]}')
