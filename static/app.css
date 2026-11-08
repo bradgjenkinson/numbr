@@ -1,11 +1,11 @@
 :root {
-  --bg: #f4f2ee;
+  --bg: #f1f3f5;
   --panel: #ffffff;
   --ink: #1d2433;
   --ink-2: #4a5468;
   --ink-3: #7c8597;
-  --line: #e3e0d9;
-  --line-2: #efece6;
+  --line: #dfe3e8;
+  --line-2: #eceff2;
   --nav: #0f1726;
   --nav-2: #16223a;
   --nav-ink: #b9c3d4;
@@ -89,7 +89,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Forms */
 label { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; font-weight: 500; }
-input, select, textarea { font: inherit; color: var(--ink); background: #fff; border: 1px solid #d5d0c6; border-radius: 6px; padding: 7px 9px; width: 100%; }
+input, select, textarea { font: inherit; color: var(--ink); background: #fff; border: 1px solid #cfd5dc; border-radius: 6px; padding: 7px 9px; width: 100%; }
 input:focus, select:focus, textarea:focus { outline: 2px solid rgba(31,111,92,.25); border-color: var(--accent); }
 input[type=checkbox], input[type=radio] { width: auto; }
 input.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -104,10 +104,10 @@ textarea { min-height: 60px; resize: vertical; }
 /* Tables */
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--line-2); vertical-align: middle; }
-th { font-size: 12px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; background: #faf9f6; border-bottom-color: var(--line); }
+th { font-size: 12px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; background: #f6f7f9; border-bottom-color: var(--line); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.click { cursor: pointer; }
-tr.click:hover td { background: #faf8f3; }
+tr.click:hover td { background: #f6f7f9; }
 tr.total td { font-weight: 650; border-top: 1px solid var(--line); background: var(--total-bg); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 tr.grand td { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: 3px double var(--ink); background: var(--total-bg); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 tr.sechead td { font-weight: 650; padding-top: 16px; background: none; border-bottom: 1px solid var(--line); }
@@ -217,6 +217,22 @@ tr.matched td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .steps { display: flex; gap: 8px; margin-bottom: 18px; }
 .steps span { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
 .steps span.on { background: var(--accent); }
+
+/* Account picker: a text box over the (invisible) account <select>, with a filtered list.
+   The list is position:fixed (placed by JS) so scrolling tables and modals don't clip it. */
+.acct-pick-wrap { position: relative; display: block; }
+.acct-pick-wrap > select.acct-pick { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
+.acct-pick-input { position: relative; padding-right: 26px; text-overflow: ellipsis;
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%237c8597'/%3E%3C/svg%3E") no-repeat right 10px center; }
+.acct-pick-list { position: fixed; z-index: 60; max-height: 300px; overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(15,23,38,.16); padding: 4px 0; text-align: left; }
+.acct-pick-list .ap-head { padding: 6px 10px 3px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-3); }
+.acct-pick-list .ap-item { padding: 5px 10px 5px 18px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-pick-list .ap-item.ap-blank { padding-left: 10px; color: var(--ink-3); }
+.acct-pick-list .ap-item:hover { background: var(--line-2); }
+.acct-pick-list .ap-item.active { background: var(--accent-soft); color: var(--ink); }
+.acct-pick-list .ap-item mark { background: none; color: var(--accent); font-weight: 600; }
+.acct-pick-list .ap-none { padding: 8px 10px; color: var(--ink-3); }
 
 @media print {
   #nav, .page-head .actions, .filters, .no-print, #toast { display: none !important; }
