@@ -38,10 +38,11 @@ try:
         page.locator('.b-name').first.fill('Westpac Business One')
         page.click('#s-next'); page.wait_for_selector('.ob')
         # opening balances: bank 1 = 8000, AR = 2750, credit card 320, capital = rest
-        def ob(code, v):
-            aid = page.evaluate(f"S.accounts.find(a=>a.code=='{code}').id")
+        assert '1-1100' not in page.inner_text('main'), 'codes are hidden'
+        def ob(name, v):
+            aid = page.evaluate(f"S.accounts.find(a=>a.name=={name!r}).id")
             page.fill(f'.ob[data-id="{aid}"]', v)
-        ob('1-1100', '8,000'); ob('1-1300', '2750'); ob('2-1110', '320'); ob('3-1000', '10430')
+        ob('Westpac Business One', '8,000'); ob('Accounts Receivable', '2750'); ob('Credit Card 1', '320'); ob("Owner's Capital", '10430')
         page.locator('.ob').first.blur()
         assert page.inner_text('#ob-hist').strip() == '0.00', page.inner_text('#ob-hist')
         shot(page, '02-opening')
@@ -142,6 +143,19 @@ try:
         page.check(f'#gm-list input[value="{sw}"]'); page.click('#modal [data-x=yes]'); page.wait_for_timeout(500)
         assert page.locator('tr.ghead').count() == 2 and page.locator('tr.ghead.gl1', has_text='Software').count() == 1
         shot(page, '10b-groups')
+        # chart of accounts: no codes, a search box, and unique names
+        assert '6-1200' not in page.inner_text('main') and page.locator('th', has_text='Code').count() == 0
+        page.fill('#a-find', 'bank fe'); page.wait_for_timeout(200)
+        vis = [t.strip() for t in page.locator('tr[data-name]:visible').all_inner_texts()]
+        assert len(vis) == 2 and 'Overheads' in vis[0] and 'Bank Fees' in vis[1], vis
+        page.fill('#a-find', 'zzzz'); page.wait_for_timeout(200); assert page.is_visible('#a-none')
+        page.fill('#a-find', ''); page.wait_for_timeout(200)
+        page.click('#a-new'); page.wait_for_selector('#am-name')
+        assert page.locator('#am-code').count() == 0
+        page.fill('#am-name', 'bank FEES'); page.select_option('#am-type', 'expense'); page.click('#modal [data-x=yes]'); page.wait_for_timeout(400)
+        assert 'already an account called' in toast_text(page), toast_text(page)
+        page.fill('#am-name', 'Parking'); page.click('#modal [data-x=yes]'); page.wait_for_timeout(500)
+        assert page.evaluate("S.accounts.find(a=>a.name=='Parking').code").startswith('6-')
         page.goto(URL + '#/reports/pl'); page.wait_for_selector('.report')
         want = page.evaluate(f"""(async () => {{ const d = await GET('/api/reports/pl?from=2026-07&to=2026-10');
             return fmt(d.sections.flatMap(s => s.rows).filter(r => [{sw}, {fees}].includes(r.account_id)).reduce((a, r) => a + r.total, 0)); }})()""")
@@ -158,6 +172,22 @@ try:
         page.select_option('#f-count', '3'); page.wait_for_timeout(400)
         assert 'doesn\'t balance' not in page.inner_text('main')
         shot(page, '11-bs')
+        # account picker: type to find an account, Enter picks it
+        page.goto(URL + '#/banking/spend'); page.wait_for_selector('.acct-pick-input')
+        pick = page.locator('.acct-pick-input').first
+        pick.click(); assert page.locator('.acct-pick-list .ap-head').first.inner_text().strip().upper() == 'ASSETS'
+        pick.fill('ren'); page.wait_for_timeout(150)
+        items = page.locator('.acct-pick-list .ap-item').all_inner_texts()
+        assert items == ['Rent'], items
+        pick.press('Enter')
+        rent_id = page.evaluate("String(S.accounts.find(a=>a.name=='Rent').id)")
+        assert page.locator('[data-f=account_id]').first.input_value() == rent_id and pick.input_value() == 'Rent'
+        pick.click(); pick.fill('expenses tele'); page.wait_for_timeout(150)
+        items = page.locator('.acct-pick-list .ap-item').all_inner_texts()
+        assert items == ['Telephone & Internet'], items
+        pick.press('Escape'); assert pick.input_value() == 'Rent' and page.is_hidden('.acct-pick-list')
+        assert page.is_visible('main'), 'Escape in the picker does not leave the page'
+        shot(page, '11b-picker')
         page.goto(URL + '#/reports/aged-ar'); page.wait_for_selector('.report')
         assert 'Ties to' in page.inner_text('main'), page.inner_text('main')
         shot(page, '12-aged')
@@ -253,7 +283,7 @@ try:
         assert '1 auto-applied' in head and '1 to review' in head and '1 unmatched' in head, head
         assert 'ticked' in page.locator('#rc-body tr', has=page.locator('text=Auto · Lunch')).get_attribute('class')
         assert 'ticked' not in page.locator('#rc-body tr', has=page.locator('text=Review · Coffee')).get_attribute('class')
-        assert '6-9000 General Expenses' in page.inner_text('#rc-csv')
+        assert 'General Expenses' in page.inner_text('#rc-csv') and '6-9000' not in page.inner_text('#rc-csv')
         shot(page, '19-reconcile-rules')
         page.goto(URL + '#/banking'); page.wait_for_selector('#r-rule')
         txt = page.inner_text('main')
@@ -281,7 +311,7 @@ try:
         # an unmatched line can be entered as a transfer to another bank account
         page.click('[data-xfer]'); page.wait_for_selector('#q-other')
         assert page.input_value('#q-kind') == 'xfer-out' and page.is_hidden('#q-acct') and page.is_visible('#q-other')
-        page.select_option('#q-other', index=2)
+        page.select_option('#q-other', label='Credit Card 1')
         page.click('#modal [data-x=yes]'); page.wait_for_timeout(600); page.wait_for_selector('#rc-csv h2')
         assert '0 unmatched' in page.inner_text('#rc-csv h2'), page.inner_text('#rc-csv h2')
         assert page.locator('#rc-body tr', has=page.locator('text=MYSTERY SHOP')).count() == 1

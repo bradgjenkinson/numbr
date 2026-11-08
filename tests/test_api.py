@@ -1,6 +1,6 @@
 """Backend scenario test: runs the app against a temporary database and checks the books tie out.
 Run: python tests/test_api.py"""
-import json, os, subprocess, sys, time, urllib.request, tempfile, shutil, calendar
+import json, os, sqlite3, subprocess, sys, time, urllib.request, tempfile, shutil, calendar
 from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -526,7 +526,7 @@ try:
           f"re-importing the statement skips lines already in numbr {[x['status'] for x in again]}")
     check(again[0]['line_id'] == imp[0]['line_id'] and again[0]['reconciled'] is False,
           'a duplicate points at the existing unreconciled line so it can still be ticked')
-    check(rr[imp[0]['journal_id']]['category'] == '6-9000 General Expenses', 'register shows the category a rule chose')
+    check(rr[imp[0]['journal_id']]['category'] == 'General Expenses', 'register shows the category a rule chose')
     triple = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [stmt[0]] * 3})['results']
     check([x['status'] for x in triple] == ['duplicate', 'duplicate', 'recommend'], 'identical lines are counted, not collapsed')
     call('DELETE', f"/api/journals/{triple[2]['journal_id']}")
@@ -698,6 +698,49 @@ try:
     check(acc_state(A['6-1200'])['group_id'] is None, 'deleting a group moves its accounts up')
     acts = [a['action'] for a in call('GET', '/api/audit')]
     check(all(x in acts for x in ('group_create', 'group_update', 'group_delete')), 'group changes are audited')
+
+    # account codes are backend-only: the server picks one when none is given
+    codes_before = {a['code'] for a in call('GET', '/api/state')['accounts']}
+    na = call('POST', '/api/accounts', {'name': 'Parking', 'type': 'expense'})['id']
+    nb = call('POST', '/api/accounts', {'name': 'Tolls', 'type': 'expense'})['id']
+    ca, cb = acc_state(na)['code'], acc_state(nb)['code']
+    check(ca.startswith('6-') and cb.startswith('6-') and ca != cb and ca not in codes_before,
+          f'new accounts without a code get a free code of their type ({ca}, {cb})')
+    check(acc_state(call('POST', '/api/accounts', {'name': 'Savings 2', 'type': 'asset', 'subtype': 'bank'})['id'])['code'].startswith('1-'),
+          'a new bank account gets an asset code')
+    call('PUT', f'/api/accounts/{na}', {'name': 'Parking fees'})
+    check(acc_state(na)['code'] == ca and acc_state(na)['name'] == 'Parking fees', 'renaming keeps the code')
+    r = call('POST', '/api/accounts', {'name': '', 'type': 'expense'}, expect_ok=False)
+    check('name' in r.get('error', ''), 'an account needs a name')
+
+    # account names are unique (ignoring case and spaces), because users pick accounts by name
+    r = call('POST', '/api/accounts', {'name': '  parking   FEES ', 'type': 'income'}, expect_ok=False)
+    check('already an account called' in r.get('error', ''), 'a duplicate name is refused, ignoring case, spaces and type')
+    r = call('PUT', f'/api/accounts/{nb}', {'name': 'Parking Fees'}, expect_ok=False)
+    check('already an account called' in r.get('error', '') and acc_state(nb)['name'] == 'Tolls', 'renaming onto another name is refused')
+    call('PUT', f'/api/accounts/{nb}', {'name': 'Bridge  tolls '})
+    check(acc_state(nb)['name'] == 'Bridge tolls', 'names are saved trimmed with single spaces')
+    call('PUT', f'/api/accounts/{nb}', {'archived': True})
+    r = call('POST', '/api/accounts', {'name': 'Bridge Tolls', 'type': 'expense'}, expect_ok=False)
+    check('archived' in r.get('error', ''), 'a name used by an archived account is refused, with a hint to un-archive')
+    # books made before this rule may already have duplicates: they can still be edited, just not renamed onto each other
+    con = sqlite3.connect(os.path.join(data, 'books.db'))
+    dup = con.execute("INSERT INTO accounts(code, name, type, subtype) VALUES ('6-8888', 'parking fees', 'expense', 'other')").lastrowid
+    con.commit(); con.close()
+    call('PUT', f'/api/accounts/{dup}', {'name': 'parking fees', 'archived': True})
+    check(acc_state(dup)['archived'], 'an existing duplicate can still be edited and archived')
+    call('PUT', f'/api/accounts/{dup}', {'name': 'Parking (old)'})
+    check(acc_state(dup)['name'] == 'Parking (old)', 'an existing duplicate can be renamed to something unique')
+
+    # accounts come back A-Z by name; the trial balance is by type, then name
+    names = [a['name'] for a in call('GET', '/api/state')['accounts']]
+    check(names == sorted(names, key=str.casefold), 'accounts are listed A-Z by name')
+    tb_ = call('GET', '/api/reports/tb?as_at=2026-11-30')
+    order = ['asset', 'liability', 'equity', 'income', 'cos', 'expense']
+    keys = [(order.index(r['type']), r['name'].casefold()) for r in tb_['rows'] if r['account_id']]
+    check(keys == sorted(keys), 'trial balance is in type order, then A-Z')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances after account changes')
+    check(call('GET', '/api/reports/bs?to=2026-11&count=1')['balanced'], 'BS still balances after account changes')
 
     # security header
     try:

@@ -49,7 +49,9 @@ function addMonthsYM(ym, n) { let [y, m] = ym.split('-').map(Number); m += n; wh
 function fyStartYM(iso) { const m0 = +S.settings.fy_start_month || 7; const [y, m] = iso.split('-').map(Number); return `${m >= m0 ? y : y - 1}-${String(m0).padStart(2, '0')}`; }
 const acct = id => S.accounts.find(a => a.id == id);
 const contactById = id => S.contacts.find(c => c.id == id);
-const acctLabel = id => { const a = acct(id); return a ? `${a.code} ${a.name}` : ''; };
+const acctLabel = id => { const a = acct(id); return a ? a.name : ''; };
+// Accounts sort by name, ignoring case; numbers inside names sort naturally (Bank 2 before Bank 10).
+const byName = (a, b) => a.name.localeCompare(b.name, 'en-AU', { sensitivity: 'base', numeric: true });
 
 let toastTimer;
 function toast(msg, err = false) {
@@ -107,32 +109,32 @@ const parsePct = (v, name) => {
 const cutBp = (c, bp) => Math.sign(c) * Math.round(Math.abs(c) * bp / 10000);
 const postable = a => !['ar', 'ap'].includes(a.subtype);
 
+// Options for an account chooser: grouped by type (Assets, Liabilities, …), then A-Z by name.
+// Put them in a <select class="acct-pick"> to get the type-to-search picker.
 function acctOptions(sel, filter = () => true, blank = 'Choose account…') {
   let h = blank !== null ? `<option value="">${esc(blank)}</option>` : '';
   for (const [t, label] of TYPE_GROUPS) {
-    const list = S.accounts.filter(a => a.type === t && (!a.archived || a.id == sel) && filter(a));
+    const list = S.accounts.filter(a => a.type === t && (!a.archived || a.id == sel) && filter(a)).sort(byName);
     if (!list.length) continue;
     h += `<optgroup label="${label}">` + list.map(a =>
-      `<option value="${a.id}" ${a.id == sel ? 'selected' : ''}>${esc(a.code)} ${esc(a.name)}</option>`).join('') + '</optgroup>';
+      `<option value="${a.id}" ${a.id == sel ? 'selected' : ''}>${esc(a.name)}</option>`).join('') + '</optgroup>';
   }
   return h;
 }
 function bankOptions(sel, blank = null) {
-  const list = S.accounts.filter(a => isBank(a) && (!a.archived || a.id == sel));
+  const list = S.accounts.filter(a => isBank(a) && (!a.archived || a.id == sel)).sort(byName);
   return (blank ? `<option value="">${esc(blank)}</option>` : '') +
     list.map(a => `<option value="${a.id}" ${a.id == sel ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
 }
-// Create a bank account (type 'asset') or credit card (type 'liability') with the next free code and a default name.
+// Create a bank account (type 'asset') or credit card (type 'liability') with a default name. The server picks the code.
 async function createBankAccount(type, name) {
-  const pre = type === 'asset' ? '1-11' : '2-11';
-  let n = 10; while (S.accounts.some(a => a.code === `${pre}${n}`)) n += 10;
   if (!name) {
     const base = type === 'asset' ? 'Bank' : 'Credit Card';
     let k = S.accounts.filter(a => isBank(a) && a.type === type).length + 1;
     while (S.accounts.some(a => a.name.toLowerCase() === `${base} ${k}`.toLowerCase())) k++;
     name = `${base} ${k}`;
   }
-  return api('POST', '/api/accounts', { code: `${pre}${n}`, name, type, subtype: 'bank' });
+  return api('POST', '/api/accounts', { name, type, subtype: 'bank' });
 }
 const firstBank = () => (S.accounts.find(a => isBank(a) && !a.archived && a.type === 'asset') || S.accounts.find(a => isBank(a) && !a.archived) || {}).id;
 function contactOptions(sel, kind, blank = 'Choose…') {
@@ -141,6 +143,121 @@ function contactOptions(sel, kind, blank = 'Choose…') {
     `<option value="${c.id}" ${c.id == sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('') +
     `<option value="__new">+ Add new contact…</option>`;
 }
+
+// ---------------------------------------------------------------- account names and the type-to-search picker
+// Names compare ignoring case and extra spaces (matches name_key() in app.py).
+const nameKey = s => String(s || '').trim().split(/\s+/).join(' ').toLowerCase();
+const searchWords = q => nameKey(q).split(' ').filter(Boolean);
+const wordsMatch = (words, text) => { const t = nameKey(text); return words.every(w => t.includes(w)); };
+// Names used by more than one account (only possible in books made before names had to be unique).
+function duplicateAccountNames() {
+  const seen = new Map();
+  S.accounts.forEach(a => { const k = nameKey(a.name); seen.set(k, [...(seen.get(k) || []), a.name]); });
+  return [...seen.values()].filter(v => v.length > 1).map(v => v[0]);
+}
+// Escape text and wrap each typed word in <mark>.
+function highlight(text, words) {
+  if (!words.length) return esc(text);
+  const rx = new RegExp(`(${words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+  return String(text).split(rx).map((p, i) => (i % 2 ? `<mark>${esc(p)}</mark>` : esc(p))).join('');
+}
+// Turns a <select class="acct-pick"> into a text box with a filtered list. The select stays in the page
+// (invisible, underneath) and holds the value, so existing .value reads, onchange handlers and tests work.
+function enhanceAcctPick(sel) {
+  if (sel.classList.contains('ap-done')) return;
+  sel.classList.add('ap-done'); sel.tabIndex = -1;
+  const wrap = document.createElement('span'); wrap.className = 'acct-pick-wrap';
+  sel.parentNode.insertBefore(wrap, sel); wrap.appendChild(sel);
+  const input = document.createElement('input');
+  Object.assign(input, { type: 'text', autocomplete: 'off', spellcheck: false, className: 'acct-pick-input' });
+  input.setAttribute('role', 'combobox'); input.setAttribute('aria-expanded', 'false');
+  const list = document.createElement('div'); list.className = 'acct-pick-list'; list.hidden = true; list.setAttribute('role', 'listbox');
+  wrap.append(input, list);
+  let items = [], active = -1, open = false;
+  const selectedText = () => { const o = sel.selectedOptions[0]; return o && o.value ? o.textContent : ''; };
+  const blank = () => sel.querySelector('option[value=""]');
+  const sync = () => {
+    if (!open) input.value = selectedText();
+    input.placeholder = blank() ? blank().textContent : 'Choose account…';
+    input.disabled = sel.disabled;
+  };
+  const mark = () => {
+    list.querySelectorAll('.ap-item').forEach(d => d.classList.toggle('active', +d.dataset.k === active));
+    const a = list.querySelector('.ap-item.active'); if (a) a.scrollIntoView({ block: 'nearest' });
+  };
+  const draw = q => {
+    const words = searchWords(q);
+    let h = ''; items = [];
+    const item = (o, cls = '') => { h += `<div class="ap-item${cls}" role="option" data-k="${items.length}">${highlight(o.textContent, words)}</div>`; items.push(o.value); };
+    if (!words.length && blank()) item(blank(), ' ap-blank');
+    sel.querySelectorAll('optgroup').forEach(og => {
+      // Each word must be in the name, or start the type name (3+ letters), so "exp tele" finds Telephone under Expenses.
+      const type = nameKey(og.label);
+      const opts = [...og.querySelectorAll('option')].filter(o => {
+        const n = nameKey(o.textContent);
+        return words.every(w => n.includes(w) || (w.length >= 3 && type.startsWith(w)));
+      });
+      if (!opts.length) return;
+      h += `<div class="ap-head">${esc(og.label)}</div>`;
+      opts.forEach(o => item(o));
+    });
+    list.innerHTML = h || '<div class="ap-none">No accounts match. Try fewer letters.</div>';
+    active = !items.length ? -1 : words.length ? 0 : Math.max(0, items.indexOf(sel.value));
+    place(); mark();
+  };
+  // The list is position:fixed so scrolling tables and modals don't clip it; place it under (or above) the box.
+  const place = () => {
+    const r = input.getBoundingClientRect(), below = window.innerHeight - r.bottom - 8;
+    const h = Math.min(300, Math.max(below, r.top - 8));
+    list.style.left = `${r.left}px`; list.style.width = `${Math.max(r.width, 240)}px`; list.style.maxHeight = `${h}px`;
+    list.style.top = below >= Math.min(300, list.scrollHeight) || below >= r.top ? `${r.bottom + 3}px` : `${Math.max(8, r.top - 3 - Math.min(h, list.scrollHeight))}px`;
+  };
+  const onScroll = e => { if (!list.contains(e.target)) place(); };
+  const show = () => {
+    if (open || sel.disabled) return;
+    open = true; list.hidden = false; input.setAttribute('aria-expanded', 'true'); draw('');
+    window.addEventListener('scroll', onScroll, true); window.addEventListener('resize', place);
+  };
+  const hide = () => {
+    open = false; list.hidden = true; input.setAttribute('aria-expanded', 'false'); sync();
+    window.removeEventListener('scroll', onScroll, true); window.removeEventListener('resize', place);
+  };
+  const choose = v => {
+    const changed = sel.value !== v;
+    open = false; sel.value = v; hide();
+    if (changed) sel.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  // Keep the text right when code sets select.value or rebuilds its options.
+  const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+  Object.defineProperty(sel, 'value', { configurable: true, get() { return desc.get.call(this); }, set(v) { desc.set.call(this, v); sync(); } });
+  new MutationObserver(sync).observe(sel, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+  sel.addEventListener('change', sync);
+  input.addEventListener('mousedown', () => { if (document.activeElement === input) show(); });
+  input.addEventListener('click', () => { show(); input.select(); });
+  input.addEventListener('input', () => { show(); draw(input.value); });
+  input.addEventListener('blur', hide);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { show(); return; }
+      if (items.length) active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      mark();
+    } else if (e.key === 'Enter') {
+      if (open) { e.preventDefault(); if (active >= 0) choose(items[active]); }
+    } else if (e.key === 'Escape') {
+      if (open) { e.stopPropagation(); hide(); }
+    } else if (e.key === 'Tab') {
+      if (open && input.value !== selectedText() && active >= 0) choose(items[active]);
+    }
+  });
+  list.addEventListener('mousedown', e => {
+    e.preventDefault();  // keep focus in the text box
+    const d = e.target.closest('.ap-item'); if (d) choose(items[+d.dataset.k]);
+  });
+  sync();
+}
+new MutationObserver(() => document.querySelectorAll('select.acct-pick:not(.ap-done)').forEach(enhanceAcctPick))
+  .observe(document.body, { childList: true, subtree: true });
 
 // numbr was updated while an older copy was still running: the old server ignores new fields, so changes
 // (like a bank account's share) wouldn't save. Tell the user how to restart.
@@ -226,7 +343,7 @@ function lineEditor(el, { lines = [], filter = postable, amountLabel = 'Amount',
     el.innerHTML = `<div class="table-wrap"><table class="lines"><thead><tr><th style="width:40%">Description</th><th style="width:36%">Account</th>
       <th class="num" style="width:18%">${amountLabel}</th><th></th></tr></thead><tbody>
       ${rows.map((r, i) => `<tr data-i="${i}"><td><input data-f="description" value="${esc(r.description)}" placeholder="Description"></td>
-        <td><select data-f="account_id">${acctOptions(r.account_id, filter)}</select></td>
+        <td><select class="acct-pick" data-f="account_id">${acctOptions(r.account_id, filter)}</select></td>
         <td><input class="num" data-f="amount" value="${r.amount ? fmt(r.amount) : ''}" placeholder="0.00" inputmode="decimal"></td>
         <td><button type="button" class="rm" title="Remove line">×</button></td></tr>`).join('')}
       </tbody></table></div>
@@ -417,8 +534,8 @@ async function setupPage(step) {
     const banks = S.accounts.filter(isBank);
     main.innerHTML = `<div class="setup">${steps}<div class="panel"><h2>Your bank and credit card accounts</h2>
       <p class="muted">Rename these to match your real accounts, or add more. You can fine-tune the full chart of accounts later.</p>
-      <table><thead><tr><th>Code</th><th>Name</th><th>Kind</th><th></th></tr></thead><tbody>
-      ${banks.map(a => `<tr data-id="${a.id}"><td style="width:110px"><input class="b-code" value="${esc(a.code)}"></td><td><input class="b-name" value="${esc(a.name)}"></td>
+      <table><thead><tr><th>Name</th><th>Kind</th><th></th></tr></thead><tbody>
+      ${banks.map(a => `<tr data-id="${a.id}"><td><input class="b-name" value="${esc(a.name)}"></td>
         <td>${a.type === 'asset' ? 'Bank account' : 'Credit card'}</td><td>${a.used ? '' : `<button class="small danger b-del">Remove</button>`}</td></tr>`).join('')}
       </tbody></table>
       <div class="actions" style="margin-top:10px"><button class="small" id="b-add-bank">+ Bank account</button><button class="small" id="b-add-cc">+ Credit card</button></div>
@@ -426,8 +543,8 @@ async function setupPage(step) {
     const saveAll = async () => {
       for (const tr of $$('tr[data-id]')) {
         const a = acct(tr.dataset.id);
-        const code = tr.querySelector('.b-code').value, name = tr.querySelector('.b-name').value;
-        if (code !== a.code || name !== a.name) await api('PUT', `/api/accounts/${a.id}`, { code, name });
+        const name = tr.querySelector('.b-name').value;
+        if (name !== a.name) await api('PUT', `/api/accounts/${a.id}`, { name });
       }
     };
     const add = async type => {
@@ -480,8 +597,8 @@ async function openingPage(inSetup = false, steps = '') {
   const vals = {}; accts.forEach(a => { vals[a.id] = ob.balances[a.id] || 0; });
   const locked = ob.locked;
   const rowsHtml = TYPE_GROUPS.filter(([t]) => ['asset', 'liability', 'equity'].includes(t)).map(([t, label]) =>
-    `<tr class="sechead"><td colspan="2">${label}</td></tr>` + accts.filter(a => a.type === t).map(a =>
-      `<tr class="sub"><td>${esc(a.code)} ${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}</td>
+    `<tr class="sechead"><td colspan="2">${label}</td></tr>` + accts.filter(a => a.type === t).sort(byName).map(a =>
+      `<tr class="sub"><td>${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}</td>
        <td style="width:180px"><input class="num ob" data-id="${a.id}" value="${vals[a.id] ? fmt(vals[a.id]) : ''}" placeholder="0.00" ${locked ? 'disabled' : ''}></td></tr>`).join('')).join('');
   const body = `${locked ? `<div class="notice info">Opening balances are locked because you've reconciled a bank account since. Undo reconciliations to change them.</div>` : ''}
     <div class="panel"><p class="muted" style="margin-top:0">Enter each balance as at close of business on <b>${dfmt(addDays(conv, -1))}</b>, taken from your previous balance sheet at that date.
@@ -587,7 +704,7 @@ async function invoiceView(kind, id) {
       <div style="margin-bottom:18px"><div class="muted" style="font-size:12px;text-transform:uppercase">${kind === 'sale' ? 'Bill to' : kind === 'partner' ? 'Partner' : 'From'}</div>
         <div style="font-weight:600">${esc(inv.contact_name)}</div><div style="white-space:pre-line">${esc(inv.contact_address || '')}</div></div>
       <table><thead><tr><th>Description</th><th class="no-print">Account</th><th class="num">Amount</th></tr></thead><tbody>
-        ${inv.lines.map(l => `<tr><td>${esc(l.description || '')}</td><td class="no-print muted">${esc(l.account_code)} ${esc(l.account_name)}</td><td class="num">${fmt(l.amount)}</td></tr>`).join('')}
+        ${inv.lines.map(l => `<tr><td>${esc(l.description || '')}</td><td class="no-print muted">${esc(l.account_name)}</td><td class="num">${fmt(l.amount)}</td></tr>`).join('')}
         <tr class="total"><td>Total</td><td class="no-print"></td><td class="num">${$fmt(inv.total)}</td></tr>
         ${inv.payments.map(p => `<tr><td class="muted">Paid ${dfmt(p.date)}${p.reference ? ` · ${esc(p.reference)}` : ''} <a class="no-print" href="#/payment/${p.payment_id}">view</a></td><td class="no-print muted">${esc(p.bank_name)}</td><td class="num">-${fmt(p.amount)}</td></tr>`).join('')}
         <tr class="grand"><td>Balance due</td><td class="no-print"></td><td class="num">${$fmt(inv.balance)}</td></tr>
@@ -826,7 +943,7 @@ async function registerView(id, { title, picker = '', actions = '', hashBase }) 
   const a = r.account, bank = isBank(a), sh = r.shared;
   const sgn = ['asset', 'cos', 'expense'].includes(a.type) ? 1 : -1;  // show the share in the account's natural sign
   const lines = [...r.lines].reverse();
-  page(title || `${esc(a.code)} ${esc(a.name)}`, title ? '' : TYPE_LABEL[a.type], actions,
+  page(title || esc(a.name), title ? '' : TYPE_LABEL[a.type], actions,
     `${picker}<div class="filters"><div class="field"><label>From</label><input type="date" id="r-from" value="${from}"></div>
       <div class="field"><label>To</label><input type="date" id="r-to" value="${to}"></div>
       <div class="field"><label>Search</label><input id="r-q" placeholder="Description, contact, amount, rule"></div>
@@ -936,7 +1053,7 @@ function journalEditor(el, lines) {
   const tot = k => rows.reduce((s, r) => s + (isNaN(r[k]) ? 0 : r[k]), 0);
   function render() {
     el.innerHTML = `<table class="lines"><thead><tr><th style="width:34%">Account</th><th>Description</th><th class="num" style="width:15%">Debit</th><th class="num" style="width:15%">Credit</th><th></th></tr></thead><tbody>
-      ${rows.map((r, i) => `<tr data-i="${i}"><td><select data-f="account_id">${acctOptions(r.account_id, postable)}</select></td><td><input data-f="description" value="${esc(r.description)}"></td>
+      ${rows.map((r, i) => `<tr data-i="${i}"><td><select class="acct-pick" data-f="account_id">${acctOptions(r.account_id, postable)}</select></td><td><input data-f="description" value="${esc(r.description)}"></td>
       <td><input class="num" data-f="debit" value="${r.debit ? fmt(r.debit) : ''}"></td><td><input class="num" data-f="credit" value="${r.credit ? fmt(r.credit) : ''}"></td><td><button type="button" class="rm">×</button></td></tr>`).join('')}
       </tbody></table><button type="button" class="small add-line">+ Add line</button>
       <div class="totals-box"><table><tr><td>Total debits</td><td class="num jd"></td></tr><tr><td>Total credits</td><td class="num jc"></td></tr><tr class="grand"><td>Out of balance</td><td class="num jo"></td></tr></table></div>`;
@@ -1207,7 +1324,7 @@ function quickBankTxn(bankId, pre, done) {
       <div class="field"><label>Amount</label><input id="q-amt" class="num" value="${pre.amount ? fmt(pre.amount) : ''}"></div>
     </div>
     <div class="field"><label>Description</label><input id="q-desc" value="${esc(pre.description || '')}"></div>
-    <div class="field" id="q-acctbox"><label>Allocate to account</label><select id="q-acct">${acctOptions('', a => postable(a) && !isBank(a))}</select></div>
+    <div class="field" id="q-acctbox"><label>Allocate to account</label><select class="acct-pick" id="q-acct">${acctOptions('', a => postable(a) && !isBank(a))}</select></div>
     <div class="field" id="q-otherbox"><label id="q-otherlabel">Other bank account</label><select id="q-other">${bankOptions('', 'Choose account…')}</select>
       <div class="hint">When you import that account's statement, its side of the transfer is matched to this one.</div></div>
     <div class="hint" id="q-payhint">For a customer or supplier payment against an invoice or bill, use Receive payment / Pay bills instead so it clears what they owe.</div>
@@ -1498,7 +1615,7 @@ async function rulesList() {
     ${list.map((r, i) => `<tr class="click" data-href="#/rules/${r.id}" data-i="${i}">
       <td><span class="inline" style="gap:4px"><button class="small ru-up" ${i ? '' : 'disabled'} title="Move up" aria-label="Move up">↑</button><button class="small ru-down" ${i < list.length - 1 ? '' : 'disabled'} title="Move down" aria-label="Move down">↓</button></span></td>
       <td>${esc(r.name)}</td><td>${esc(ruleSummary(r))}</td>
-      <td>${isBank(acct(r.target_account_id) || {}) ? 'Transfer: ' : ''}${esc(`${r.target_code} ${r.target_name}`)}${r.contact_name ? ` <span class="muted">· ${esc(r.contact_name)}</span>` : ''}</td>
+      <td>${isBank(acct(r.target_account_id) || {}) ? 'Transfer: ' : ''}${esc(r.target_name)}${r.contact_name ? ` <span class="muted">· ${esc(r.contact_name)}</span>` : ''}</td>
       <td>${r.account_ids.length ? esc(r.account_ids.map(id => (acct(id) || {}).name || '?').join(', ')) : '<span class="muted">All</span>'}</td>
       <td><span class="pill ${r.mode === 'auto' ? 'auto' : 'review'}">${RULE_MODE[r.mode]}</span></td>
       <td class="num">${r.used}</td><td>${r.active ? '' : '<span class="pill">Off</span>'}</td></tr>`).join('')}
@@ -1563,7 +1680,7 @@ async function ruleForm(id) {
         <div class="field"><label>Action</label><select id="ru-kind">
           <option value="cat" ${isXfer ? '' : 'selected'}>Categorise it</option>
           <option value="xfer" ${isXfer ? 'selected' : ''}>Transfer to/from another bank account</option></select></div>
-        <div class="field" id="ru-catbox"><label>Categorise as</label><select id="ru-target">${acctOptions(isXfer ? '' : d.target_account_id || '', a => postable(a) && !isBank(a) && !['re', 'hist'].includes(a.subtype))}</select></div>
+        <div class="field" id="ru-catbox"><label>Categorise as</label><select class="acct-pick" id="ru-target">${acctOptions(isXfer ? '' : d.target_account_id || '', a => postable(a) && !isBank(a) && !['re', 'hist'].includes(a.subtype))}</select></div>
         <div class="field" id="ru-xferbox"><label>Other bank account</label><select id="ru-to">${bankOptions(isXfer ? d.target_account_id : '', 'Choose account…')}</select>
           <div class="hint">Money out of the statement's account goes to this account; money in comes from it.</div></div>
         <div class="field"><label>Contact (optional)</label><select id="ru-contact"></select></div>
@@ -1737,7 +1854,7 @@ async function reportPL() {
     const out = [[S.settings.business_name], ['Profit & Loss'], [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
     d.sections.forEach(s => {
       out.push([s.title]);
-      csvTreeLines(lines(s), r => `${r.code} ${r.name}`).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
+      csvTreeLines(lines(s), r => r.name).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
       out.push([`Total ${s.title}`, ...(multi ? s.totals.map(c2d) : []), c2d(s.total)]);
     });
     out.push(['Net profit', ...(multi ? d.net_profit.map(c2d) : []), c2d(d.net_profit_total)]);
@@ -1786,7 +1903,7 @@ async function reportBS() {
     const out = [[S.settings.business_name], ['Balance Sheet'], [], ['Account', ...d.dates]];
     d.sections.forEach(s => {
       out.push([s.title]);
-      csvTreeLines(lines(s), r => `${r.code} ${r.name}`).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
+      csvTreeLines(lines(s), r => r.name).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
       out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
     });
     out.push(['Net assets', ...d.net_assets.map(c2d)]);
@@ -1830,12 +1947,12 @@ async function reportTB() {
   const d = await GET(`/api/reports/tb?as_at=${RF.tbAt}`);
   page('Trial Balance', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `<div class="filters"><div class="field"><label>As at</label><input type="date" id="f-at" value="${RF.tbAt}"></div></div>
-    <div class="report">${reportHead('Trial Balance', `As at ${dfmt(d.as_at)}`)}<table><thead><tr><th>Code</th><th>Account</th><th>Type</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead><tbody>
-    ${d.rows.map(r => `<tr${r.account_id ? ` class="click" data-href="#/register/${r.account_id}?from=2000-01-01&to=${d.as_at}"` : ''}><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td class="muted">${TYPE_LABEL[r.type]}</td><td class="num">${fmt(r.debit, { blankZero: true })}</td><td class="num">${fmt(r.credit, { blankZero: true })}</td></tr>`).join('')}
-    <tr class="grand"><td colspan="3">Total</td><td class="num">${fmt(d.debit)}</td><td class="num">${fmt(d.credit)}</td></tr></tbody></table></div>`);
+    <div class="report">${reportHead('Trial Balance', `As at ${dfmt(d.as_at)}`)}<table><thead><tr><th>Account</th><th>Type</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead><tbody>
+    ${d.rows.map(r => `<tr${r.account_id ? ` class="click" data-href="#/register/${r.account_id}?from=2000-01-01&to=${d.as_at}"` : ''}><td>${esc(r.name)}</td><td class="muted">${TYPE_LABEL[r.type]}</td><td class="num">${fmt(r.debit, { blankZero: true })}</td><td class="num">${fmt(r.credit, { blankZero: true })}</td></tr>`).join('')}
+    <tr class="grand"><td colspan="2">Total</td><td class="num">${fmt(d.debit)}</td><td class="num">${fmt(d.credit)}</td></tr></tbody></table></div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   $('#f-at').onchange = () => { RF.tbAt = val('#f-at'); reportTB(); };
-  $('#x-csv').onclick = () => download(`Trial-Balance-${d.as_at}.csv`, [['Code', 'Account', 'Debit', 'Credit'], ...d.rows.map(r => [r.code, r.name, c2d(r.debit), c2d(r.credit)]), ['', 'Total', c2d(d.debit), c2d(d.credit)]]);
+  $('#x-csv').onclick = () => download(`Trial-Balance-${d.as_at}.csv`, [['Account', 'Type', 'Debit', 'Credit'], ...d.rows.map(r => [r.name, TYPE_LABEL[r.type], c2d(r.debit), c2d(r.credit)]), ['Total', '', c2d(d.debit), c2d(d.credit)]]);
 }
 
 // ---------------------------------------------------------------- contacts
@@ -1861,7 +1978,7 @@ async function contactForm(id) {
       <div class="field"><label>Name</label><input id="c-name" value="${esc(c ? c.name : '')}"></div>
       <div class="field"><label>Type</label><select id="c-kind">${['customer', 'supplier', 'both'].map(k => `<option value="${k}" ${(c ? c.kind : (QS.get('kind') || 'customer')) === k ? 'selected' : ''}>${k[0].toUpperCase() + k.slice(1)}</option>`).join('')}</select></div>
       <div class="field"><label>Phone</label><input id="c-phone" value="${esc(c ? c.phone || '' : '')}"></div>
-      <div class="field"><label>Default account</label><select id="c-acct">${acctOptions(c ? c.default_account_id : '', a => postable(a) && !isBank(a), 'None')}</select><div class="hint">Pre-fills new invoices, bills and spends</div></div>
+      <div class="field"><label>Default account</label><select class="acct-pick" id="c-acct">${acctOptions(c ? c.default_account_id : '', a => postable(a) && !isBank(a), 'None')}</select><div class="hint">Pre-fills new invoices, bills and spends</div></div>
     </div>
     <div class="grid g2"><div class="field"><label>Address</label><textarea id="c-addr">${esc(c ? c.address || '' : '')}</textarea></div>
     <div class="field"><label>Notes</label><textarea id="c-notes">${esc(c ? c.notes || '' : '')}</textarea></div></div>
@@ -1896,19 +2013,18 @@ function groupOptions(type, selected, exceptId) {
     .map(([path, g]) => `<option value="${g.id}" ${g.id == selected ? 'selected' : ''}>${esc(path)}</option>`).join('');
 }
 
-// Arrange report rows (each with group_id, code and values[]) into their groups for one account type.
-// At every level, groups come first in name order, then accounts by code; rows without a code
-// (computed lines such as Current Year Earnings) stay last in the order given. Group values are summed in cents.
+// Arrange report rows (each with group_id, name and values[]) into their groups for one account type.
+// At every level, groups come first A-Z, then accounts A-Z; computed lines (Current Year Earnings,
+// Other owners' share) stay last in the order given. Group values are summed in cents.
 function groupTree(type, rows, keepEmpty = false) {
   const width = rows.length ? rows[0].values.length : 1;
   const nodes = new Map(groupsOfType(type).map(g => [g.id, { group: g, children: [] }]));
   const top = [];
   rows.forEach(r => { const p = r.group_id != null && nodes.get(r.group_id); (p ? p.children : top).push({ row: r }); });
   nodes.forEach(n => { const p = n.group.parent_id != null && nodes.get(n.group.parent_id); (p ? p.children : top).push(n); });
-  const rank = x => (x.row ? (x.row.code ? 1 : 2) : 0);
+  const rank = x => (x.row ? (x.row.computed || x.row.partner ? 2 : 1) : 0);
   const order = (a, b) => rank(a) - rank(b) ||
-    (a.group ? a.group.name.localeCompare(b.group.name, 'en-AU', { sensitivity: 'base', numeric: true })
-      : a.row.code && b.row.code ? (a.row.code < b.row.code ? -1 : a.row.code > b.row.code ? 1 : 0) : 0);
+    (a.group ? byName(a.group, b.group) : rank(a) === 1 ? byName(a.row, b.row) : 0);
   const finish = list => {
     const out = [];
     list.forEach(x => {
@@ -1968,25 +2084,56 @@ async function accountsPage() {
   TYPE_GROUPS.forEach(([t, label]) => {
     const list = S.accounts.filter(a => a.type === t && (showArch || !a.archived));
     if (!list.length && !groupsOfType(t).length) return;
-    rowsHtml += `<tr class="sechead"><td colspan="4">${label}</td></tr>`;
+    rowsHtml += `<tr class="sechead" data-type="${t}"><td colspan="3">${label}</td></tr>`;
+    // Each line carries its type and enclosing group ids so the search box can show the headings above a match.
+    const anc = [];
     treeLines(groupTree(t, list.map(a => ({ ...a, values: [a.balance] })), true)).forEach(l => {
+      anc.length = l.depth;
+      const attrs = `data-type="${t}" data-anc="${anc.join(' ')}"`;
       if (l.kind === 'row') {
         const a = l.row;
-        rowsHtml += `<tr class="click sub" data-id="${a.id}"><td>${esc(a.code)}</td><td ${treeCell(l, 12)}>${esc(a.name)}
+        rowsHtml += `<tr class="click sub" data-id="${a.id}" ${attrs} data-name="${esc(a.name)}"><td ${treeCell(l, 12)}>${esc(a.name)}
           ${a.archived ? ' <span class="pill">archived</span>' : ''}</td><td class="muted">${kind(a)}</td>
           <td class="num">${a.used ? `<a href="#/register/${a.id}?from=2000-01-01" onclick="event.stopPropagation()">${fmt(a.balance)}</a>` : ''}</td></tr>`;
       } else {
-        rowsHtml += `<tr class="click sub ${headClass(l)}" data-gid="${l.group.id}"><td></td><td ${treeCell(l, 12)}>${esc(l.group.name)}</td><td class="muted">Group</td><td class="num">${fmt(l.values[0])}</td></tr>`;
+        rowsHtml += `<tr class="click sub ${headClass(l)}" data-gid="${l.group.id}" ${attrs} data-name="${esc(l.group.name)}"><td ${treeCell(l, 12)}>${esc(l.group.name)}</td><td class="muted">Group</td><td class="num">${fmt(l.values[0])}</td></tr>`;
+        anc.push(l.group.id);
       }
     });
   });
+  const dups = duplicateAccountNames();
   page('Chart of accounts', 'Open an account to put it in a group. Groups show a subtotal here and on the reports.',
     `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button id="g-new">New group</button><button class="primary" id="a-new">New account</button>`,
-    `<div class="panel flush"><table><thead><tr><th style="width:110px">Code</th><th>Name</th><th>Kind</th><th class="num">Balance</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`);
+    `${dups.length ? `<div class="notice warn">More than one account is called ${dups.map(n => `“${esc(n)}”`).join(', ')}. Rename one of each so they can't be mixed up.</div>` : ''}
+    <div class="filters"><div class="field"><label>Find an account</label><input type="search" id="a-find" placeholder="Type part of a name" autocomplete="off"></div></div>
+    <div class="panel flush"><table><thead><tr><th>Name</th><th>Kind</th><th class="num">Balance</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+    <div class="muted" id="a-none" style="padding:12px 14px" hidden>No accounts match.</div></div>`);
   $$('tr[data-id]').forEach(tr => tr.onclick = () => accountModal(acct(tr.dataset.id)));
   $$('tr[data-gid]').forEach(tr => tr.onclick = () => groupModal(groupById(tr.dataset.gid)));
   $('#a-new').onclick = () => accountModal(null);
   $('#g-new').onclick = () => groupModal(null);
+  $('#a-find').oninput = () => filterChart(val('#a-find'));
+}
+// Show only chart lines whose name has every typed word, plus the headings above them and,
+// for a matching group, everything inside it.
+function filterChart(q) {
+  const lines = $$('tr[data-name]'), words = searchWords(q);
+  if (!words.length) { $$('tbody tr').forEach(tr => { tr.hidden = false; }); $('#a-none').hidden = true; return; }
+  const show = new Set(), groups = new Set(), types = new Set();
+  lines.forEach(tr => {
+    if (!wordsMatch(words, tr.dataset.name)) return;
+    show.add(tr); types.add(tr.dataset.type);
+    tr.dataset.anc.split(' ').filter(Boolean).forEach(g => groups.add(g));
+    if (tr.dataset.gid) groups.add(`in:${tr.dataset.gid}`);
+  });
+  lines.forEach(tr => {
+    const anc = tr.dataset.anc.split(' ').filter(Boolean);
+    if (anc.some(g => groups.has(`in:${g}`))) { show.add(tr); if (tr.dataset.gid) groups.add(`in:${tr.dataset.gid}`); }
+    if (tr.dataset.gid && groups.has(tr.dataset.gid)) show.add(tr);
+  });
+  lines.forEach(tr => { tr.hidden = !show.has(tr); });
+  $$('tr.sechead').forEach(tr => { tr.hidden = !types.has(tr.dataset.type); });
+  $('#a-none').hidden = show.size > 0;
 }
 
 function groupModal(g) {
@@ -2003,10 +2150,10 @@ function groupModal(g) {
     const fill = () => {
       const t = val('#gm-type', el);
       el.querySelector('#gm-parent').innerHTML = `<option value="">None (top level)</option>${groupOptions(t, g && g.parent_id, g && g.id)}`;
-      const list = S.accounts.filter(a => a.type === t && (!a.archived || (g && a.group_id == g.id)));
+      const list = S.accounts.filter(a => a.type === t && (!a.archived || (g && a.group_id == g.id))).sort(byName);
       el.querySelector('#gm-list').innerHTML = list.length ? list.map(a => {
         const other = a.group_id && (!g || a.group_id != g.id) ? groupById(a.group_id) : null;
-        return `<label class="check"><input type="checkbox" value="${a.id}" ${g && a.group_id == g.id ? 'checked' : ''}> ${esc(a.code)} ${esc(a.name)}${other ? ` <span class="muted">(now in ${esc(groupPath(other))})</span>` : ''}</label>`;
+        return `<label class="check"><input type="checkbox" value="${a.id}" ${g && a.group_id == g.id ? 'checked' : ''}> ${esc(a.name)}${other ? ` <span class="muted">(now in ${esc(groupPath(other))})</span>` : ''}</label>`;
       }).join('') : '<div class="muted">No accounts of this type yet.</div>';
     };
     el.querySelector('#gm-type').onchange = fill; fill();
@@ -2033,7 +2180,6 @@ function accountModal(a) {
   modal(`<h2>${a ? 'Edit account' : 'New account'}</h2>
     ${sys ? '<div class="notice info">This is a system account used by invoices, bills or reports. You can rename it, but not change its type.</div>' : ''}
     <div class="form-grid">
-      <div class="field"><label>Code</label><input id="am-code" value="${esc(a ? a.code : '')}" placeholder="e.g. 6-1250"></div>
       <div class="field"><label>Name</label><input id="am-name" value="${esc(a ? a.name : '')}"></div>
       <div class="field"><label>Type</label><select id="am-type" ${sys ? 'disabled' : ''}>${TYPE_GROUPS.map(([t, l]) => `<option value="${t}" ${a && a.type === t ? 'selected' : ''}>${l.replace(/s$/, '').replace('Liabilitie', 'Liability').replace('Cost of Sale', 'Cost of Sales')}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select id="am-sub" ${sys ? 'disabled' : ''}><option value="other">Normal</option><option value="bank" ${a && a.subtype === 'bank' ? 'selected' : ''}>Bank / credit card (reconcilable)</option></select></div>
@@ -2061,7 +2207,7 @@ function accountModal(a) {
     if (del) del.onclick = async () => { try { await api('DELETE', `/api/accounts/${a.id}`); closeModal(); toast('Deleted'); accountsPage(); } catch (e) { fail(e); } };
     el.querySelector('[data-x=yes]').onclick = async () => {
       try {
-        const b = { code: val('#am-code', el), name: val('#am-name', el), type: val('#am-type', el), subtype: val('#am-sub', el) };
+        const b = { name: val('#am-name', el), type: val('#am-type', el), subtype: val('#am-sub', el) };
         if (b.subtype === 'bank') b.share_pct = parsePct(val('#am-share', el), b.name || 'Account');
         const grp = val('#am-group', el);
         if (grp === 'new') b.new_group = { name: val('#am-gname', el), parent_id: val('#am-gparent', el) || null };

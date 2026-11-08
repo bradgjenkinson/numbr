@@ -48,10 +48,14 @@ SIGN = {'asset': 1, 'cos': 1, 'expense': 1, 'liability': -1, 'equity': -1, 'inco
 PL_TYPES = ('income', 'cos', 'expense')
 FREQS = ('weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')
 SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist', 'partner')
+# Account codes are backend-only (users see names). New codes start with the MYOB-style type digit.
+CODE_PREFIX = {'asset': '1', 'liability': '2', 'equity': '3', 'income': '4', 'cos': '5', 'expense': '6'}
+TYPE_ORDER_SQL = ("CASE type WHEN 'asset' THEN 1 WHEN 'liability' THEN 2 WHEN 'equity' THEN 3 "
+                  "WHEN 'income' THEN 4 WHEN 'cos' THEN 5 ELSE 6 END")
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
 # For a bank line a rule created: the account(s) on the other side, so the user can see how it was categorised.
 RULE_CATEGORY_SQL = ("CASE WHEN j.rule_id IS NOT NULL THEN (CASE WHEN j.source='transfer' THEN 'Transfer: ' ELSE '' END) || "
-                     "(SELECT GROUP_CONCAT(a2.code || ' ' || a2.name, ', ') "
+                     "(SELECT GROUP_CONCAT(a2.name, ', ') "
                      'FROM journal_lines l2 JOIN accounts a2 ON a2.id=l2.account_id '
                      'WHERE l2.journal_id=j.id AND l2.id<>l.id) END AS category')
 SHARE_FULL = 10000          # share_bp of an account the user owns outright
@@ -531,7 +535,7 @@ def check_lines(db, lines):
     for l in lines:
         a = account(db, l['account_id'])
         if a['archived']:
-            raise ApiError(f'Account {a["code"]} {a["name"]} is archived')
+            raise ApiError(f'The account “{a["name"]}” is archived. Un-archive it in the chart of accounts, or choose another account.')
     return lines
 
 
@@ -611,7 +615,7 @@ def route(method, pattern):
 
 
 def list_accounts(db):
-    accts = rows(db.execute('SELECT * FROM accounts ORDER BY code'))
+    accts = rows(db.execute('SELECT * FROM accounts ORDER BY name COLLATE NOCASE'))
     bal = {r[0]: r[1] for r in db.execute('SELECT account_id, SUM(amount) FROM journal_lines GROUP BY account_id')}
     used = {r[0] for r in db.execute('SELECT DISTINCT account_id FROM invoice_lines')} | \
            {r[0] for r in db.execute('SELECT DISTINCT account_id FROM journal_lines')}
@@ -779,14 +783,44 @@ def share_from_body(body, default=SHARE_FULL):
     return int(round(pct * 100))
 
 
+def name_key(name):
+    """Account names compare ignoring case and extra spaces, so 'Bank  fees' clashes with 'Bank Fees'."""
+    return ' '.join((name or '').split()).casefold()
+
+
+def next_account_code(db, typ):
+    """A free code for a new account: the type digit, then 10 past the highest number in use."""
+    p = CODE_PREFIX[typ]
+    used = {r[0] for r in db.execute('SELECT code FROM accounts')}
+    nums = [int(c[2:]) for c in used if re.fullmatch(p + r'-\d{4}', c)]
+    n = max(nums, default=990) + 10
+    while n <= 9999:
+        if f'{p}-{n:04d}' not in used:
+            return f'{p}-{n:04d}'
+        n += 1
+    k = 1
+    while f'{p}-X{k}' in used:
+        k += 1
+    return f'{p}-X{k}'
+
+
 def account_payload(db, body, existing=None):
-    code = text(body.get('code', existing and existing['code']))
-    name = text(body.get('name', existing and existing['name']))
-    if not code or not name:
-        raise ApiError('Code and name are required')
+    name = ' '.join(text(body.get('name', existing and existing['name'])).split())
+    if not name:
+        raise ApiError('Give the account a name')
     typ = body.get('type', existing and existing['type'])
     if typ not in SIGN:
         raise ApiError('Choose an account type')
+    code = text(body.get('code')) or (existing and existing['code']) or next_account_code(db, typ)
+    # Users pick accounts by name, so two accounts can't share one. Existing duplicates are left alone
+    # until one is renamed, so they don't block other edits.
+    if not existing or name_key(name) != name_key(existing['name']):
+        for other in db.execute('SELECT id, name, archived FROM accounts WHERE id<>?', (existing['id'] if existing else 0,)):
+            if name_key(other[1]) == name_key(name):
+                msg = f"There's already an account called “{other[1]}”. Choose a different name so the two can't be mixed up."
+                if other[2]:
+                    msg += ' That account is archived; you could un-archive it instead.'
+                raise ApiError(msg)
     sub = body.get('subtype', existing and existing['subtype']) or 'other'
     if existing and existing['subtype'] in SYSTEM_SUBTYPES:
         sub = existing['subtype']
@@ -798,7 +832,7 @@ def account_payload(db, body, existing=None):
         raise ApiError('Bank/credit card accounts must be an asset or liability')
     dup = scalar(db, 'SELECT id FROM accounts WHERE code=? AND id<>?', (code, existing['id'] if existing else 0))
     if dup:
-        raise ApiError(f'Account code {code} is already used')
+        raise ApiError(f'Account code {code} is already used. Leave the code out and numbr will choose one.')
     share = SHARE_FULL
     if sub == 'bank':
         share = share_from_body(body, existing['share_bp'] if existing else SHARE_FULL)
@@ -936,7 +970,7 @@ def group_payload(db, body, existing=None):
         for v in body.get('account_ids') or []:
             a = account(db, as_int(v, 'Account'))
             if a['type'] != typ:
-                raise ApiError(f"{a['code']} {a['name']} is a different type of account, so it can't go in this group")
+                raise ApiError(f"{a['name']} is a different type of account, so it can't go in this group")
             ids.append(a['id'])
     return name, typ, pid, ids
 
@@ -2374,7 +2408,7 @@ def api_report_pl(db, q, body):
     months = months_between(q.get('from') or t, q.get('to') or t)
     start, end = month_start(months[0]).isoformat(), month_end(months[-1]).isoformat()
     idx = {m: i for i, m in enumerate(months)}
-    accts = {a['id']: a for a in rows(db.execute("SELECT * FROM accounts WHERE type IN ('income','cos','expense') ORDER BY code"))}
+    accts = {a['id']: a for a in rows(db.execute("SELECT * FROM accounts WHERE type IN ('income','cos','expense') ORDER BY name COLLATE NOCASE"))}
     data = {}
     for aid, typ, date, amt in report_lines(db, to=end, frm=start):
         if typ in PL_TYPES:
@@ -2406,7 +2440,7 @@ def api_report_bs(db, q, body):
     last = month_start(end_m)
     months = [add_months(last, -(count - 1 - i), 1).strftime('%Y-%m') for i in range(count)]
     dates = [month_end(m).isoformat() for m in months]
-    accts = rows(db.execute("SELECT * FROM accounts WHERE type IN ('asset','liability','equity') ORDER BY code"))
+    accts = rows(db.execute("SELECT * FROM accounts WHERE type IN ('asset','liability','equity') ORDER BY name COLLATE NOCASE"))
     cols = [balances_as_at(db, d) for d in dates]
     n = len(dates)
     re_vals, cye_vals = [], []
@@ -2485,7 +2519,7 @@ def api_report_tb(db, q, body):
     as_at = as_date(q.get('as_at') or today(), 'As at date')
     bal = balances_as_at(db, as_at)
     out = []
-    for a in rows(db.execute('SELECT * FROM accounts ORDER BY code')):
+    for a in rows(db.execute('SELECT * FROM accounts ORDER BY ' + TYPE_ORDER_SQL + ', name COLLATE NOCASE')):
         v = bal.get(a['id']) or 0
         if v:
             out.append({'account_id': a['id'], 'code': a['code'], 'name': a['name'], 'type': a['type'],
@@ -2502,7 +2536,7 @@ def api_report_tb(db, q, body):
 def api_dashboard(db, q, body):
     t = today()
     banks = []
-    for a in rows(db.execute("SELECT * FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY code")):
+    for a in rows(db.execute("SELECT * FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY name COLLATE NOCASE")):
         s = SIGN[a['type']]
         bal = s * scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=?', (a['id'],))
         last = one(db.execute('SELECT * FROM reconciliations WHERE account_id=? ORDER BY statement_date DESC, id DESC LIMIT 1',
