@@ -1702,12 +1702,17 @@ async function reportPL() {
   const d = await GET(`/api/reports/pl?from=${RF.plFrom}&to=${RF.plTo}`);
   const multi = d.months.length > 1;
   const head = `<tr><th></th>${multi ? d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('') : ''}<th class="num">${multi ? 'Total' : monthLabel(d.months[0])}</th></tr>`;
-  const valsRow = (label, vals, total, cls = '', href = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td>${label}</td>${multi ? vals.map(v => numCell(v, { paren: true })).join('') : ''}${numCell(total, { paren: true })}</tr>`;
+  const valsRow = (label, vals, total, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${multi ? vals.map(v => numCell(v, { paren: true })).join('') : ''}${numCell(total, { paren: true })}</tr>`;
+  const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
+  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!RF.plGroupsOnly);
   let rowsHtml = '';
   d.sections.forEach(s => {
     if (!s.rows.length && s.type === 'cos') return;
     rowsHtml += `<tr class="sechead"><td colspan="${d.months.length + 2}">${s.title}</td></tr>`;
-    s.rows.forEach(r => { rowsHtml += valsRow(esc(r.name), r.values, r.total, 'sub', `#/register/${r.account_id}?from=${d.from}&to=${d.to}`); });
+    lines(s).forEach(l => {
+      if (l.kind === 'row') rowsHtml += valsRow(esc(l.row.name), l.row.values, l.row.total, 'sub', `#/register/${l.row.account_id}?from=${d.from}&to=${d.to}`, treeCell(l, 28));
+      else rowsHtml += valsRow(esc(l.group.name), l.values, l.total, `sub ${headClass(l)}`, '', treeCell(l, 28));
+    });
     if (!s.rows.length) rowsHtml += `<tr class="sub"><td class="muted" colspan="${d.months.length + 2}">None</td></tr>`;
     rowsHtml += valsRow(`Total ${s.title.toLowerCase()}`, s.totals, s.total, 'total');
     if (s.type === 'cos' && s.rows.length) rowsHtml += valsRow('Gross profit', d.gross_profit, d.gross_profit_total, 'total');
@@ -1719,18 +1724,20 @@ async function reportPL() {
       <div class="field"><label>From month</label><input type="month" id="f-from" value="${RF.plFrom}"></div>
       <div class="field"><label>To month</label><input type="month" id="f-to" value="${RF.plTo}"></div>
       <div class="actions"><button class="small" data-r="${cur},${cur}">This month</button><button class="small" data-r="${addMonthsYM(cur, -1)},${addMonthsYM(cur, -1)}">Last month</button>
-      <button class="small" data-r="${fy},${cur}">This financial year</button><button class="small" data-r="${addMonthsYM(fy, -12)},${addMonthsYM(fy, -1)}">Last financial year</button></div></div>
+      <button class="small" data-r="${fy},${cur}">This financial year</button><button class="small" data-r="${addMonthsYM(fy, -12)},${addMonthsYM(fy, -1)}">Last financial year</button></div>
+      ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${RF.plGroupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>
     <div class="report">${reportHead('Profit &amp; Loss', d.months.length === 1 ? monthLong(d.months[0]) : `${monthLong(d.months[0])} to ${monthLong(d.months[d.months.length - 1])}`)}
       <div class="table-wrap"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div></div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   const apply = () => { RF.plFrom = val('#f-from'); RF.plTo = val('#f-to'); reportPL(); };
   $('#f-from').onchange = apply; $('#f-to').onchange = apply;
+  if (hasGroups) $('#f-gonly').onchange = () => { RF.plGroupsOnly = $('#f-gonly').checked; reportPL(); };
   $$('[data-r]').forEach(b => b.onclick = () => { [RF.plFrom, RF.plTo] = b.dataset.r.split(','); reportPL(); });
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Profit & Loss'], [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
     d.sections.forEach(s => {
       out.push([s.title]);
-      s.rows.forEach(r => out.push([`${r.code} ${r.name}`, ...(multi ? r.values.map(c2d) : []), c2d(r.total)]));
+      csvTreeLines(lines(s), r => `${r.code} ${r.name}`).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
       out.push([`Total ${s.title}`, ...(multi ? s.totals.map(c2d) : []), c2d(s.total)]);
     });
     out.push(['Net profit', ...(multi ? d.net_profit.map(c2d) : []), c2d(d.net_profit_total)]);
@@ -1743,32 +1750,45 @@ async function reportBS() {
   const d = await GET(`/api/reports/bs?to=${RF.bsTo}&count=${RF.bsCount}`);
   const n = d.dates.length;
   const head = `<tr><th></th>${d.dates.map(x => `<th class="num">${dfmt(x)}</th>`).join('')}</tr>`;
-  const valsRow = (label, vals, cls = '', href = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td>${label}</td>${vals.map(v => numCell(v, { paren: true })).join('')}</tr>`;
+  const valsRow = (label, vals, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${vals.map(v => numCell(v, { paren: true })).join('')}</tr>`;
+  const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
+  const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!RF.bsGroupsOnly);
+  const rowLabel = r => esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : '');
+  const sectionRows = s => lines(s).forEach(l => {
+    if (l.kind === 'row') rowsHtml += valsRow(rowLabel(l.row), l.row.values, 'sub', l.row.account_id ? `#/register/${l.row.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : '', treeCell(l, 28));
+    else rowsHtml += valsRow(esc(l.group.name), l.values, `sub ${headClass(l)}`, '', treeCell(l, 28));
+  });
   let rowsHtml = '';
   const [A, L, E] = d.sections;
   [A, L].forEach(s => {
     rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${s.title}</td></tr>`;
-    s.rows.forEach(r => { rowsHtml += valsRow(esc(r.name), r.values, 'sub', `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}`); });
+    sectionRows(s);
     if (!s.rows.length) rowsHtml += `<tr class="sub"><td class="muted" colspan="${n + 1}">None</td></tr>`;
     rowsHtml += valsRow(`Total ${s.title.toLowerCase()}`, s.totals, 'total');
   });
   rowsHtml += valsRow('Net assets', d.net_assets, 'grand');
   rowsHtml += `<tr class="sechead"><td colspan="${n + 1}">${E.title}</td></tr>`;
-  E.rows.forEach(r => { rowsHtml += valsRow(esc(r.name) + (r.computed ? ' <span class="muted">(this financial year)</span>' : '') + (r.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : ''), r.values, 'sub', r.account_id ? `#/register/${r.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : ''); });
+  sectionRows(E);
   rowsHtml += valsRow('Total equity', E.totals, 'grand');
   const hist = E.rows.find(r => r.subtype === 'hist');
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `<div class="filters"><div class="field"><label>As at end of</label><input type="month" id="f-to" value="${RF.bsTo}"></div>
-      <div class="field"><label>Compare</label><select id="f-count">${[[1, 'Single month'], [2, '2 months'], [3, '3 months'], [6, '6 months'], [12, '12 months'], [13, '13 months (year on year)']].map(([v, l]) => `<option value="${v}" ${+RF.bsCount === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+      <div class="field"><label>Compare</label><select id="f-count">${[[1, 'Single month'], [2, '2 months'], [3, '3 months'], [6, '6 months'], [12, '12 months'], [13, '13 months (year on year)']].map(([v, l]) => `<option value="${v}" ${+RF.bsCount === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${RF.bsGroupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>
     ${!d.balanced ? '<div class="notice bad">The balance sheet doesn\'t balance. This shouldn\'t happen. Please check the Trial Balance.</div>' : ''}
     ${hist && hist.values.some(v => v) ? '<div class="notice warn">Historical Balancing isn\'t zero. Your opening balances don\'t fully balance yet. <a href="#/opening">Review opening balances</a></div>' : ''}
     <div class="report">${reportHead('Balance Sheet', `As at ${dfmt(d.dates[n - 1])}`)}<div class="table-wrap"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div></div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   $('#f-to').onchange = () => { RF.bsTo = val('#f-to'); reportBS(); };
   $('#f-count').onchange = () => { RF.bsCount = val('#f-count'); reportBS(); };
+  if (hasGroups) $('#f-gonly').onchange = () => { RF.bsGroupsOnly = $('#f-gonly').checked; reportBS(); };
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Balance Sheet'], [], ['Account', ...d.dates]];
-    d.sections.forEach(s => { out.push([s.title]); s.rows.forEach(r => out.push([`${r.code} ${r.name}`.trim(), ...r.values.map(c2d)])); out.push([`Total ${s.title}`, ...s.totals.map(c2d)]); });
+    d.sections.forEach(s => {
+      out.push([s.title]);
+      csvTreeLines(lines(s), r => `${r.code} ${r.name}`).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
+      out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
+    });
     out.push(['Net assets', ...d.net_assets.map(c2d)]);
     download(`Balance-Sheet-${RF.bsTo}.csv`, out);
   };
@@ -1863,22 +1883,149 @@ async function contactForm(id) {
   };
 }
 
+// ---------------------------------------------------------------- account groups
+// Groups are headings with subtotals in the chart of accounts and reports. They never change balances.
+const groupById = id => (S.groups || []).find(g => g.id == id);
+const groupsOfType = t => (S.groups || []).filter(g => g.type === t);
+function groupPath(g) { const p = []; for (let x = g; x; x = groupById(x.parent_id)) p.unshift(x.name); return p.join(' › '); }
+function groupWithin(g, ancestorId) { for (let x = g; x; x = groupById(x.parent_id)) if (x.id == ancestorId) return true; return false; }
+// <option>s for the groups of one type, shown as paths. exceptId hides that group and everything inside it.
+function groupOptions(type, selected, exceptId) {
+  return groupsOfType(type).filter(g => !exceptId || !groupWithin(g, exceptId))
+    .map(g => [groupPath(g), g]).sort((x, y) => x[0].localeCompare(y[0]))
+    .map(([path, g]) => `<option value="${g.id}" ${g.id == selected ? 'selected' : ''}>${esc(path)}</option>`).join('');
+}
+
+// Arrange report rows (each with group_id, code and values[]) into their groups for one account type.
+// At every level, groups come first in name order, then accounts by code; rows without a code
+// (computed lines such as Current Year Earnings) stay last in the order given. Group values are summed in cents.
+function groupTree(type, rows, keepEmpty = false) {
+  const width = rows.length ? rows[0].values.length : 1;
+  const nodes = new Map(groupsOfType(type).map(g => [g.id, { group: g, children: [] }]));
+  const top = [];
+  rows.forEach(r => { const p = r.group_id != null && nodes.get(r.group_id); (p ? p.children : top).push({ row: r }); });
+  nodes.forEach(n => { const p = n.group.parent_id != null && nodes.get(n.group.parent_id); (p ? p.children : top).push(n); });
+  const rank = x => (x.row ? (x.row.code ? 1 : 2) : 0);
+  const order = (a, b) => rank(a) - rank(b) ||
+    (a.group ? a.group.name.localeCompare(b.group.name, 'en-AU', { sensitivity: 'base', numeric: true })
+      : a.row.code && b.row.code ? (a.row.code < b.row.code ? -1 : a.row.code > b.row.code ? 1 : 0) : 0);
+  const finish = list => {
+    const out = [];
+    list.forEach(x => {
+      if (x.row) { out.push(x); return; }
+      x.children = finish(x.children);
+      if (!x.children.length && !keepEmpty) return;
+      x.values = Array(width).fill(0); x.total = 0;
+      x.children.forEach(c => {
+        const v = c.row ? c.row.values : c.values;
+        v.forEach((n, i) => { x.values[i] += n; });
+        x.total += c.row ? (c.row.total ?? v.reduce((a, b) => a + b, 0)) : c.total;
+      });
+      out.push(x);
+    });
+    return out.sort(order);
+  };
+  return finish(top);
+}
+// Flatten a group tree into lines to draw: 'row' (an account) or 'head' (a group, carrying its subtotal).
+// A head is 'open' when its contents follow it; with groupsOnly each top-level group is one closed line.
+function treeLines(nodes, groupsOnly = false, depth = 0, out = []) {
+  nodes.forEach(n => {
+    if (n.row) { out.push({ kind: 'row', row: n.row, depth }); return; }
+    const open = !groupsOnly && n.children.length > 0;
+    out.push({ kind: 'head', group: n.group, values: n.values, total: n.total, depth, open });
+    if (!groupsOnly) treeLines(n.children, false, depth + 1, out);
+  });
+  return out;
+}
+// Attributes for the name cell of a tree line: the indent, a dot before a group's name (CSS ::before at --x)
+// and a rail down the left of each enclosing group, drawn as background stripes so rows join up.
+const RAIL_STEP = 20;
+function treeCell(l, base) {
+  const x = k => base + RAIL_STEP * k + 4, rail = 'linear-gradient(var(--accent),var(--accent))';
+  const img = [], pos = [], size = [];
+  for (let k = 0; k < l.depth; k++) { img.push(rail); pos.push(`${x(k)}px 0`); size.push('2px 100%'); }
+  if (l.kind === 'head' && l.open) { img.push(rail); pos.push(`${x(l.depth)}px 100%`); size.push('2px 50%'); }
+  const head = l.kind === 'head';
+  const style = `padding-left:${base + RAIL_STEP * l.depth + (head ? 18 : 0)}px;--x:${base + RAIL_STEP * l.depth}px;` +
+    (img.length ? `background-image:${img.join(',')};background-position:${pos.join(',')};background-size:${size.join(',')};background-repeat:no-repeat;` : '');
+  return `class="${head ? 'gname' : ''}" style="${style}"`;
+}
+const headClass = l => `ghead gl${Math.min(l.depth, 2)}`;
+// The same lines for a CSV export: [label, values, total].
+function csvTreeLines(lines, rowLabel) {
+  const pad = depth => '  '.repeat(depth);
+  return lines.map(l => l.kind === 'row' ? [pad(l.depth) + rowLabel(l.row).trim(), l.row.values, l.row.total]
+    : [pad(l.depth) + l.group.name, l.values, l.total]);
+}
+
 // ---------------------------------------------------------------- accounts
 async function accountsPage() {
   await refreshState();
   const showArch = QS.get('archived') === '1';
   let rowsHtml = '';
+  const kind = a => a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') + (isShared(a) ? ` · shared, yours ${pctText(a.share_bp)}` : '') : a.system ? 'System' : '';
   TYPE_GROUPS.forEach(([t, label]) => {
     const list = S.accounts.filter(a => a.type === t && (showArch || !a.archived));
-    if (!list.length) return;
-    rowsHtml += `<tr class="sechead"><td colspan="4">${label}</td></tr>` + list.map(a => `<tr class="click sub" data-id="${a.id}"><td>${esc(a.code)}</td><td>${esc(a.name)}
-      ${a.archived ? ' <span class="pill">archived</span>' : ''}</td><td class="muted">${a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') + (isShared(a) ? ` · shared, yours ${pctText(a.share_bp)}` : '') : a.system ? 'System' : ''}</td>
-      <td class="num">${a.used ? `<a href="#/register/${a.id}?from=2000-01-01" onclick="event.stopPropagation()">${fmt(a.balance)}</a>` : ''}</td></tr>`).join('');
+    if (!list.length && !groupsOfType(t).length) return;
+    rowsHtml += `<tr class="sechead"><td colspan="4">${label}</td></tr>`;
+    treeLines(groupTree(t, list.map(a => ({ ...a, values: [a.balance] })), true)).forEach(l => {
+      if (l.kind === 'row') {
+        const a = l.row;
+        rowsHtml += `<tr class="click sub" data-id="${a.id}"><td>${esc(a.code)}</td><td ${treeCell(l, 12)}>${esc(a.name)}
+          ${a.archived ? ' <span class="pill">archived</span>' : ''}</td><td class="muted">${kind(a)}</td>
+          <td class="num">${a.used ? `<a href="#/register/${a.id}?from=2000-01-01" onclick="event.stopPropagation()">${fmt(a.balance)}</a>` : ''}</td></tr>`;
+      } else {
+        rowsHtml += `<tr class="click sub ${headClass(l)}" data-gid="${l.group.id}"><td></td><td ${treeCell(l, 12)}>${esc(l.group.name)}</td><td class="muted">Group</td><td class="num">${fmt(l.values[0])}</td></tr>`;
+      }
+    });
   });
-  page('Chart of accounts', '', `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button class="primary" id="a-new">New account</button>`,
+  page('Chart of accounts', 'Open an account to put it in a group. Groups show a subtotal here and on the reports.',
+    `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button id="g-new">New group</button><button class="primary" id="a-new">New account</button>`,
     `<div class="panel flush"><table><thead><tr><th style="width:110px">Code</th><th>Name</th><th>Kind</th><th class="num">Balance</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`);
   $$('tr[data-id]').forEach(tr => tr.onclick = () => accountModal(acct(tr.dataset.id)));
+  $$('tr[data-gid]').forEach(tr => tr.onclick = () => groupModal(groupById(tr.dataset.gid)));
   $('#a-new').onclick = () => accountModal(null);
+  $('#g-new').onclick = () => groupModal(null);
+}
+
+function groupModal(g) {
+  const typeSel = TYPE_GROUPS.map(([t, l]) => `<option value="${t}" ${g && g.type === t ? 'selected' : ''}>${l}</option>`).join('');
+  modal(`<h2>${g ? 'Edit group' : 'New group'}</h2>
+    <p class="muted" style="margin-top:0">A group puts a heading and a subtotal around its accounts in the chart of accounts, Profit &amp; Loss and Balance Sheet. It doesn't change any balances.</p>
+    <div class="form-grid">
+      <div class="field"><label>Name</label><input id="gm-name" value="${esc(g ? g.name : '')}" placeholder="e.g. Motor vehicle"></div>
+      <div class="field"><label>Account type</label><select id="gm-type" ${g ? 'disabled' : ''}>${typeSel}</select></div>
+      <div class="field"><label>Inside group</label><select id="gm-parent"></select><div class="hint">Optional. Put this group inside another one for a subtotal within a subtotal.</div></div>
+    </div>
+    <div class="field"><label>Accounts in this group</label><div class="gm-list" id="gm-list"></div></div>
+    <div class="modal-foot">${g ? '<button class="danger" data-x="del" style="margin-right:auto">Delete group</button>' : ''}<button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
+    const fill = () => {
+      const t = val('#gm-type', el);
+      el.querySelector('#gm-parent').innerHTML = `<option value="">None (top level)</option>${groupOptions(t, g && g.parent_id, g && g.id)}`;
+      const list = S.accounts.filter(a => a.type === t && (!a.archived || (g && a.group_id == g.id)));
+      el.querySelector('#gm-list').innerHTML = list.length ? list.map(a => {
+        const other = a.group_id && (!g || a.group_id != g.id) ? groupById(a.group_id) : null;
+        return `<label class="check"><input type="checkbox" value="${a.id}" ${g && a.group_id == g.id ? 'checked' : ''}> ${esc(a.code)} ${esc(a.name)}${other ? ` <span class="muted">(now in ${esc(groupPath(other))})</span>` : ''}</label>`;
+      }).join('') : '<div class="muted">No accounts of this type yet.</div>';
+    };
+    el.querySelector('#gm-type').onchange = fill; fill();
+    el.querySelector('[data-x=no]').onclick = closeModal;
+    const del = el.querySelector('[data-x=del]');
+    if (del) del.onclick = async () => {
+      const where = g.parent_id ? `“${esc(groupById(g.parent_id).name)}”` : 'no group';
+      if (!await confirmBox(`Delete the group “${esc(g.name)}”? Its accounts and any groups inside it move to ${where}. No transactions or balances change.`, 'Delete group', true)) return;
+      try { await api('DELETE', `/api/groups/${g.id}`); toast('Group deleted'); accountsPage(); } catch (e) { fail(e); }
+    };
+    el.querySelector('[data-x=yes]').onclick = async () => {
+      try {
+        const b = { name: val('#gm-name', el), parent_id: val('#gm-parent', el) || null,
+          account_ids: [...el.querySelectorAll('#gm-list input:checked')].map(i => +i.value) };
+        if (g) await api('PUT', `/api/groups/${g.id}`, b); else await api('POST', '/api/groups', { ...b, type: val('#gm-type', el) });
+        closeModal(); toast('Saved'); accountsPage();
+      } catch (e) { fail(e); }
+    };
+  });
 }
 
 function accountModal(a) {
@@ -1891,18 +2038,34 @@ function accountModal(a) {
       <div class="field"><label>Type</label><select id="am-type" ${sys ? 'disabled' : ''}>${TYPE_GROUPS.map(([t, l]) => `<option value="${t}" ${a && a.type === t ? 'selected' : ''}>${l.replace(/s$/, '').replace('Liabilitie', 'Liability').replace('Cost of Sale', 'Cost of Sales')}</option>`).join('')}</select></div>
       <div class="field"><label>Kind</label><select id="am-sub" ${sys ? 'disabled' : ''}><option value="other">Normal</option><option value="bank" ${a && a.subtype === 'bank' ? 'selected' : ''}>Bank / credit card (reconcilable)</option></select></div>
       <div class="field am-share"><label>Your share %</label><input id="am-share" inputmode="decimal" value="${a ? +(a.share_bp / 100).toFixed(2) : 100}"><div class="hint">Less than 100 for a shared account. Reports show only your share.</div></div>
+      <div class="field"><label>Group</label><select id="am-group"></select><div class="hint">Groups add a heading and subtotal on the chart and reports.</div></div>
+      <div class="field am-newgrp"><label>New group name</label><input id="am-gname" placeholder="e.g. Motor vehicle"></div>
+      <div class="field am-newgrp"><label>Put new group inside</label><select id="am-gparent"></select></div>
     </div>
     ${a && !sys ? `<label class="check"><input type="checkbox" id="am-arch" ${a.archived ? 'checked' : ''}> Archived</label>` : ''}
     <div class="modal-foot">${a && !sys && !a.used ? '<button class="danger" data-x="del" style="margin-right:auto">Delete</button>' : ''}<button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
     el.querySelector('[data-x=no]').onclick = closeModal;
     const shareVis = () => { el.querySelector('.am-share').hidden = val('#am-sub', el) !== 'bank'; };
     el.querySelector('#am-sub').onchange = shareVis; shareVis();
+    const newVis = () => { const on = val('#am-group', el) === 'new'; el.querySelectorAll('.am-newgrp').forEach(f => { f.hidden = !on; }); };
+    const fillGroups = () => {
+      const t = val('#am-type', el), keep = val('#am-group', el) || (a && a.type === t ? a.group_id : '');
+      el.querySelector('#am-group').innerHTML = `<option value="">No group</option>${groupOptions(t, keep)}<option value="new" ${keep === 'new' ? 'selected' : ''}>+ New group…</option>`;
+      el.querySelector('#am-gparent').innerHTML = `<option value="">Top level (no other group)</option>${groupOptions(t)}`;
+      newVis();
+    };
+    el.querySelector('#am-group').onchange = () => { newVis(); if (val('#am-group', el) === 'new') el.querySelector('#am-gname').focus(); };
+    el.querySelector('#am-type').onchange = () => { el.querySelector('#am-group').value = ''; fillGroups(); };
+    fillGroups();
     const del = el.querySelector('[data-x=del]');
     if (del) del.onclick = async () => { try { await api('DELETE', `/api/accounts/${a.id}`); closeModal(); toast('Deleted'); accountsPage(); } catch (e) { fail(e); } };
     el.querySelector('[data-x=yes]').onclick = async () => {
       try {
         const b = { code: val('#am-code', el), name: val('#am-name', el), type: val('#am-type', el), subtype: val('#am-sub', el) };
         if (b.subtype === 'bank') b.share_pct = parsePct(val('#am-share', el), b.name || 'Account');
+        const grp = val('#am-group', el);
+        if (grp === 'new') b.new_group = { name: val('#am-gname', el), parent_id: val('#am-gparent', el) || null };
+        else b.group_id = grp || null;
         if (a && !sys) b.archived = el.querySelector('#am-arch').checked;
         if (a) await api('PUT', `/api/accounts/${a.id}`, b); else await api('POST', '/api/accounts', b);
         closeModal(); toast('Saved'); accountsPage();

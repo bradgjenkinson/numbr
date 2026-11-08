@@ -78,7 +78,16 @@ CREATE TABLE IF NOT EXISTS accounts (
   subtype TEXT NOT NULL DEFAULT 'other',
   archived INTEGER NOT NULL DEFAULT 0,
   share_bp INTEGER NOT NULL DEFAULT 10000,  -- shared bank accounts: user's share in basis points (10000 = 100%)
-  csv_map TEXT                              -- bank accounts: JSON column choices from the last statement CSV import
+  csv_map TEXT,                             -- bank accounts: JSON column choices from the last statement CSV import
+  group_id INTEGER REFERENCES account_groups(id)  -- optional group for subtotals (presentation only)
+);
+-- Account groups only change how the chart and reports are laid out (headings and subtotals); they never
+-- affect balances. A group holds accounts of one type and may sit inside another group of the same type.
+CREATE TABLE IF NOT EXISTS account_groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('asset','liability','equity','income','cos','expense')),
+  parent_id INTEGER REFERENCES account_groups(id)
 );
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY,
@@ -394,6 +403,8 @@ def init_db():
         db.execute('ALTER TABLE accounts ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
     if 'csv_map' not in cols:
         db.execute('ALTER TABLE accounts ADD COLUMN csv_map TEXT')
+    if 'group_id' not in cols:
+        db.execute('ALTER TABLE accounts ADD COLUMN group_id INTEGER REFERENCES account_groups(id)')
     for table in ('invoices', 'recurring'):
         tcols = {r[1] for r in db.execute(f'PRAGMA table_info({table})')}
         if 'share_bp' not in tcols:
@@ -637,6 +648,7 @@ def api_state(db, q, body):
         generated = run_recurring(db)
         s = all_settings(db)
     return {'settings': s, 'accounts': list_accounts(db), 'contacts': list_contacts(db),
+            'groups': rows(db.execute('SELECT * FROM account_groups ORDER BY name COLLATE NOCASE')),
             'today': today(), 'generated': generated, 'server_current': code_stamp() == STARTED_STAMP}
 
 
@@ -790,14 +802,28 @@ def account_payload(db, body, existing=None):
     share = SHARE_FULL
     if sub == 'bank':
         share = share_from_body(body, existing['share_bp'] if existing else SHARE_FULL)
-    return code, name, typ, sub, share
+    if 'group_id' in body:
+        gid = body.get('group_id')
+        gid = None if gid in (None, '') else as_int(gid, 'Group')
+        if gid is not None and account_group(db, gid)['type'] != typ:
+            raise ApiError('That group holds a different type of account. Choose a group of the same type, or no group.')
+    else:
+        gid = existing and existing['group_id']
+        if gid and account_group(db, gid)['type'] != typ:
+            gid = None  # the account changed type, so it leaves a group of the old type
+    if body.get('new_group'):  # "+ New group…" in the account form: create it in the same transaction
+        ng = body['new_group'] if isinstance(body['new_group'], dict) else {}
+        gname, _, gpid, _ = group_payload(db, {'name': ng.get('name'), 'type': typ, 'parent_id': ng.get('parent_id')})
+        gid = db.execute('INSERT INTO account_groups(name, type, parent_id) VALUES (?,?,?)', (gname, typ, gpid)).lastrowid
+        audit(db, 'group_create', 'account_group', gid, {'name': gname, 'type': typ, 'parent_id': gpid})
+    return code, name, typ, sub, share, gid
 
 
 @route('POST', '/api/accounts')
 def api_account_create(db, q, body):
-    code, name, typ, sub, share = account_payload(db, body)
-    cur = db.execute('INSERT INTO accounts(code, name, type, subtype, share_bp) VALUES (?,?,?,?,?)',
-                     (code, name, typ, sub, share))
+    code, name, typ, sub, share, gid = account_payload(db, body)
+    cur = db.execute('INSERT INTO accounts(code, name, type, subtype, share_bp, group_id) VALUES (?,?,?,?,?,?)',
+                     (code, name, typ, sub, share, gid))
     audit(db, 'account_create', 'account', cur.lastrowid, body)
     return {'id': cur.lastrowid}
 
@@ -805,7 +831,7 @@ def api_account_create(db, q, body):
 @route('PUT', '/api/accounts/:aid')
 def api_account_update(db, q, body, aid):
     a = account(db, as_int(aid))
-    code, name, typ, sub, share = account_payload(db, body, a)
+    code, name, typ, sub, share, gid = account_payload(db, body, a)
     used = scalar(db, 'SELECT COUNT(*) FROM journal_lines WHERE account_id=?', (a['id'],))
     if used and (typ != a['type']):
         if (typ in PL_TYPES) != (a['type'] in PL_TYPES):
@@ -819,8 +845,8 @@ def api_account_update(db, q, body, aid):
         bal = scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=?', (a['id'],))
         if bal:
             raise ApiError('Only accounts with a zero balance can be archived. Move the balance to another account first.')
-    db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=?, share_bp=? WHERE id=?',
-               (code, name, typ, sub, archived, share, a['id']))
+    db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=?, share_bp=?, group_id=? WHERE id=?',
+               (code, name, typ, sub, archived, share, gid, a['id']))
     audit(db, 'account_update', 'account', a['id'], body)
     return {'id': a['id']}
 
@@ -844,6 +870,115 @@ def api_account_delete(db, q, body, aid):
     db.execute('UPDATE contacts SET default_account_id=NULL WHERE default_account_id=?', (a['id'],))
     db.execute('DELETE FROM accounts WHERE id=?', (a['id'],))
     audit(db, 'account_delete', 'account', a['id'], a)
+    return {'ok': True}
+
+
+# Account groups: headings with subtotals in the chart of accounts and reports. Presentation only.
+GROUP_MAX_DEPTH = 4
+
+
+def account_group(db, gid):
+    g = one(db.execute('SELECT * FROM account_groups WHERE id=?', (gid,)))
+    if not g:
+        raise ApiError('Group not found. Refresh the page and try again.')
+    return g
+
+
+def group_depth(db, gid):
+    """Levels from this group up to the top (a top-level group is 1)."""
+    n = 0
+    while gid is not None:
+        n += 1
+        gid = scalar(db, 'SELECT parent_id FROM account_groups WHERE id=?', (gid,))
+    return n
+
+
+def group_height(db, gid):
+    """Levels from this group down to its deepest subgroup (a group with no subgroups is 1)."""
+    kids = [r[0] for r in db.execute('SELECT id FROM account_groups WHERE parent_id=?', (gid,))]
+    return 1 + max((group_height(db, k) for k in kids), default=0)
+
+
+def sibling_named(db, typ, pid, name, exclude=0):
+    return scalar(db, 'SELECT id FROM account_groups WHERE type=? AND parent_id IS ? AND name=? COLLATE NOCASE '
+                      'AND id<>?', (typ, pid, name, exclude))
+
+
+def group_payload(db, body, existing=None):
+    name = text(body.get('name', existing and existing['name']))
+    if not name:
+        raise ApiError('Give the group a name')
+    typ = existing['type'] if existing else body.get('type')
+    if typ not in SIGN:
+        raise ApiError('Choose an account type for the group')
+    if 'parent_id' in body:
+        pid = body.get('parent_id')
+        pid = None if pid in (None, '') else as_int(pid, 'Parent group')
+    else:
+        pid = existing and existing['parent_id']
+    if pid is not None:
+        if account_group(db, pid)['type'] != typ:
+            raise ApiError('A group can only sit inside a group of the same account type')
+        if existing:
+            up = pid
+            while up is not None:
+                if up == existing['id']:
+                    raise ApiError("A group can't sit inside itself or one of its own subgroups")
+                up = scalar(db, 'SELECT parent_id FROM account_groups WHERE id=?', (up,))
+        height = group_height(db, existing['id']) if existing else 1
+        if group_depth(db, pid) + height > GROUP_MAX_DEPTH:
+            raise ApiError(f'Groups can only go {GROUP_MAX_DEPTH} levels deep. Choose a higher-level group to put it in.')
+    if sibling_named(db, typ, pid, name, existing['id'] if existing else 0):
+        raise ApiError(f'There is already a group called "{name}" here. Choose another name.')
+    ids = None
+    if 'account_ids' in body:
+        ids = []
+        for v in body.get('account_ids') or []:
+            a = account(db, as_int(v, 'Account'))
+            if a['type'] != typ:
+                raise ApiError(f"{a['code']} {a['name']} is a different type of account, so it can't go in this group")
+            ids.append(a['id'])
+    return name, typ, pid, ids
+
+
+def set_group_accounts(db, gid, ids):
+    db.execute('UPDATE accounts SET group_id=NULL WHERE group_id=?', (gid,))
+    for aid in ids:
+        db.execute('UPDATE accounts SET group_id=? WHERE id=?', (gid, aid))
+
+
+@route('POST', '/api/groups')
+def api_group_create(db, q, body):
+    name, typ, pid, ids = group_payload(db, body)
+    cur = db.execute('INSERT INTO account_groups(name, type, parent_id) VALUES (?,?,?)', (name, typ, pid))
+    if ids is not None:
+        set_group_accounts(db, cur.lastrowid, ids)
+    audit(db, 'group_create', 'account_group', cur.lastrowid, body)
+    return {'id': cur.lastrowid}
+
+
+@route('PUT', '/api/groups/:gid')
+def api_group_update(db, q, body, gid):
+    g = account_group(db, as_int(gid))
+    name, typ, pid, ids = group_payload(db, body, g)
+    db.execute('UPDATE account_groups SET name=?, parent_id=? WHERE id=?', (name, pid, g['id']))
+    if ids is not None:
+        set_group_accounts(db, g['id'], ids)
+    audit(db, 'group_update', 'account_group', g['id'], body)
+    return {'id': g['id']}
+
+
+@route('DELETE', '/api/groups/:gid')
+def api_group_delete(db, q, body, gid):
+    """Remove a group. Its accounts and subgroups move up into its parent (or become ungrouped)."""
+    g = account_group(db, as_int(gid))
+    for sub_id, sub_name in db.execute('SELECT id, name FROM account_groups WHERE parent_id=?', (g['id'],)).fetchall():
+        if sibling_named(db, g['type'], g['parent_id'], sub_name, g['id']):
+            raise ApiError(f'A group called "{sub_name}" already exists one level up. Rename one of them first.')
+    db.execute('UPDATE accounts SET group_id=? WHERE group_id=?', (g['parent_id'], g['id']))
+    db.execute('UPDATE account_groups SET parent_id=? WHERE parent_id=?', (g['parent_id'], g['id']))
+    db.execute('DELETE FROM account_groups WHERE id=?', (g['id'],))
+    audit(db, 'group_delete', 'account_group', g['id'], g)
     return {'ok': True}
 
 
@@ -2251,7 +2386,8 @@ def api_report_pl(db, q, body):
         for aid, a in accts.items():
             if a['type'] == typ and aid in data and any(data[aid]):
                 vals = data[aid]
-                rs.append({'account_id': aid, 'code': a['code'], 'name': a['name'], 'values': vals, 'total': sum(vals)})
+                rs.append({'account_id': aid, 'code': a['code'], 'name': a['name'], 'values': vals, 'total': sum(vals),
+                           'group_id': a['group_id']})
         tot = [sum(r['values'][i] for r in rs) for i in range(n)]
         return {'type': typ, 'title': title, 'rows': rs, 'totals': tot, 'total': sum(tot)}
 
@@ -2290,7 +2426,7 @@ def api_report_bs(db, q, body):
                 vals = [vals[i] + re_vals[i] for i in range(n)]
             if any(vals) or a['subtype'] == 're':
                 rs.append({'account_id': a['id'], 'code': a['code'], 'name': a['name'], 'values': vals,
-                           'subtype': a['subtype']})
+                           'subtype': a['subtype'], 'group_id': a['group_id']})
         if typ == 'equity':
             partner = [-(c.get(PARTNER) or 0) for c in cols]
             if any(partner):

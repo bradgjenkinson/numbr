@@ -21,6 +21,12 @@
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
   --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  /* Report tints taken from the sidebar: navy for totals, teal (lighter) for account groups */
+  --total-bg: #e9edf4;
+  --grp-bg-1: #edf6f4;
+  --grp-bg-2: #f2f9f7;
+  --grp-bg-3: #f6fbfa;
+  --grp-hover: #e4f1ee;
   --brand-grad: linear-gradient(135deg, #5eead4 0%, #0e9f8e 100%);
 }
 * { box-sizing: border-box; }
@@ -102,10 +108,22 @@ th { font-size: 12px; font-weight: 600; color: var(--ink-3); text-transform: upp
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.click { cursor: pointer; }
 tr.click:hover td { background: #faf8f3; }
-tr.total td { font-weight: 650; border-top: 1px solid var(--line); background: #fbfaf7; }
-tr.grand td { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: 3px double var(--ink); background: #fff; }
+tr.total td { font-weight: 650; border-top: 1px solid var(--line); background: var(--total-bg); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+tr.grand td { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: 3px double var(--ink); background: var(--total-bg); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 tr.sechead td { font-weight: 650; padding-top: 16px; background: none; border-bottom: 1px solid var(--line); }
 tr.sub td:first-child { padding-left: 28px; }
+/* Account groups: a shaded heading row carrying the subtotal, a dot before the name, and a rail
+   (drawn by treeCell in app.js) running down the left of the group's accounts. */
+tr.ghead td { font-weight: 650; background-color: var(--grp-bg-1); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+tr.ghead.gl1 td { background-color: var(--grp-bg-2); }
+tr.ghead.gl2 td { background-color: var(--grp-bg-3); }
+tr.ghead.click:hover td { background-color: var(--grp-hover); }
+tr.ghead + tr.ghead td { border-top: 1px solid var(--panel); }
+td.gname { position: relative; }
+td.gname::before { content: ''; position: absolute; left: var(--x); top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+td[style*="background-image"] { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+.gm-list { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 6px; }
 td.muted, .muted { color: var(--ink-3); }
 .empty { padding: 30px; text-align: center; color: var(--ink-3); }
 .neg { color: var(--bad); }

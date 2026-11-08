@@ -622,6 +622,83 @@ try:
     check(tb_['debit'] == tb_['credit'], 'TB still balances after bank rules')
     check(call('GET', '/api/reports/bs?to=2026-11&count=1')['balanced'], 'BS still balances after bank rules')
 
+    # account groups (presentation only: headings and subtotals)
+    def acc_state(aid):
+        return {a['id']: a for a in call('GET', '/api/state')['accounts']}[aid]
+
+    def bal_snapshot():
+        return {a['id']: a['balance'] for a in call('GET', '/api/state')['accounts']}
+
+    before = bal_snapshot()
+    pl_before = call('GET', '/api/reports/pl?from=2026-07&to=2026-11')
+    office = call('POST', '/api/groups', {'name': 'Office costs', 'type': 'expense'})['id']
+    check(call('POST', '/api/groups', {'name': 'office COSTS', 'type': 'expense'}, expect_ok=False).get('error'),
+          'duplicate group name at the same level is refused')
+    premises = call('POST', '/api/groups', {'name': 'Premises', 'type': 'expense', 'parent_id': office,
+                                            'account_ids': [A['6-1600'], A['6-2000']]})['id']
+    check(acc_state(A['6-1600'])['group_id'] == premises, 'group create can assign accounts')
+    r = call('POST', '/api/groups', {'name': 'X', 'type': 'income', 'parent_id': office}, expect_ok=False)
+    check('same account type' in r.get('error', ''), 'a group must sit inside a group of the same type')
+    r = call('POST', '/api/groups', {'name': 'X', 'type': 'expense', 'account_ids': [A['4-1000']]}, expect_ok=False)
+    check('different type' in r.get('error', ''), 'a group only takes accounts of its own type')
+    r = call('PUT', f'/api/groups/{office}', {'parent_id': premises}, expect_ok=False)
+    check('inside itself' in r.get('error', ''), 'a group can not sit inside its own subgroup')
+    g3 = call('POST', '/api/groups', {'name': 'L3', 'type': 'expense', 'parent_id': premises})['id']
+    g4 = call('POST', '/api/groups', {'name': 'L4', 'type': 'expense', 'parent_id': g3})['id']
+    r = call('POST', '/api/groups', {'name': 'L5', 'type': 'expense', 'parent_id': g4}, expect_ok=False)
+    check('levels deep' in r.get('error', ''), 'groups stop at 4 levels')
+    call('DELETE', f'/api/groups/{g4}')
+    call('DELETE', f'/api/groups/{g3}')
+
+    # account form: pick a group, or create one on the spot
+    acc = acc_state(A['6-1200'])
+    call('PUT', f"/api/accounts/{A['6-1200']}", {'code': acc['code'], 'name': acc['name'], 'type': 'expense', 'group_id': office})
+    check(acc_state(A['6-1200'])['group_id'] == office, 'account edit puts the account in a group')
+    r = call('PUT', f"/api/accounts/{A['4-2000']}", {'code': '4-2000', 'name': 'Other Income', 'type': 'income', 'group_id': office}, expect_ok=False)
+    check('different type' in r.get('error', ''), 'account edit refuses a group of another type')
+    acc = acc_state(A['6-1700'])
+    call('PUT', f"/api/accounts/{A['6-1700']}", {'code': acc['code'], 'name': acc['name'], 'type': 'expense',
+                                                'new_group': {'name': 'Tech', 'parent_id': office}})
+    st_ = call('GET', '/api/state')
+    tech = [g for g in st_['groups'] if g['name'] == 'Tech']
+    check(len(tech) == 1 and tech[0]['parent_id'] == office and acc_state(A['6-1700'])['group_id'] == tech[0]['id'],
+          'account edit can create a new group and join it')
+    r = call('PUT', f"/api/accounts/{A['6-1800']}", {'code': '6-1800', 'name': 'Telephone & Internet', 'type': 'expense',
+                                                    'new_group': {'name': ''}}, expect_ok=False)
+    check(r.get('error') and not [g for g in call('GET', '/api/state')['groups'] if g['name'] == ''], 'a new group needs a name')
+    nc = call('POST', '/api/accounts', {'code': '6-9100', 'name': 'Grouped new', 'type': 'expense', 'group_id': office})['id']
+    check(acc_state(nc)['group_id'] == office, 'a new account can start in a group')
+    call('PUT', f'/api/accounts/{nc}', {'code': '6-9100', 'name': 'Grouped new', 'type': 'cos'})
+    check(acc_state(nc)['group_id'] is None, 'changing an account type takes it out of a group of the old type')
+    call('DELETE', f'/api/accounts/{nc}')
+
+    # reports carry group_id; totals and balances are untouched
+    pl_g = call('GET', '/api/reports/pl?from=2026-07&to=2026-11')
+    exp = next(s for s in pl_g['sections'] if s['type'] == 'expense')
+    rent = next(r for r in exp['rows'] if r['account_id'] == A['6-1600'])
+    check(rent['group_id'] == premises, 'P&L rows carry their group')
+    check(pl_g['net_profit_total'] == pl_before['net_profit_total'] and
+          [s['total'] for s in pl_g['sections']] == [s['total'] for s in pl_before['sections']],
+          'groups do not change P&L totals')
+    bs_g = call('GET', '/api/reports/bs?to=2026-11&count=1')
+    check(all('group_id' in r for s in bs_g['sections'] for r in s['rows'] if r.get('account_id')), 'BS rows carry group_id')
+    check(bs_g['balanced'], 'BS still balances with groups')
+    tb_ = call('GET', '/api/reports/tb?as_at=2026-11-30')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances with groups')
+    check(bal_snapshot() == before, 'groups do not change any account balance')
+
+    # group edit sets the exact members; delete moves contents up a level
+    call('PUT', f'/api/groups/{premises}', {'name': 'Premises', 'account_ids': [A['6-1600']]})
+    check(acc_state(A['6-2000'])['group_id'] is None and acc_state(A['6-1600'])['group_id'] == premises,
+          'group edit sets exactly the ticked accounts')
+    call('DELETE', f'/api/groups/{office}')
+    gs = {g['id']: g for g in call('GET', '/api/state')['groups']}
+    check(office not in gs and gs[premises]['parent_id'] is None and gs[tech[0]['id']]['parent_id'] is None,
+          'deleting a group moves its subgroups up')
+    check(acc_state(A['6-1200'])['group_id'] is None, 'deleting a group moves its accounts up')
+    acts = [a['action'] for a in call('GET', '/api/audit')]
+    check(all(x in acts for x in ('group_create', 'group_update', 'group_delete')), 'group changes are audited')
+
     # security header
     try:
         urllib.request.urlopen(BASE + '/api/state')
