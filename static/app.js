@@ -295,6 +295,9 @@ const ROUTES = [
   [/^#\/banking\/(spend|receive|transfer)$/, m => txnForm(m[1])],
   [/^#\/txn\/(\d+)$/, m => txnForm(null, m[1])],
   [/^#\/reconcile$/, reconcilePage],
+  [/^#\/rules$/, rulesList],
+  [/^#\/rules\/new$/, () => ruleForm()],
+  [/^#\/rules\/(\d+)$/, m => ruleForm(m[1])],
   [/^#\/recurring$/, recurringList],
   [/^#\/recurring\/new$/, () => recurringForm()],
   [/^#\/recurring\/(\d+)$/, m => recurringForm(m[1])],
@@ -676,6 +679,8 @@ async function paymentForm(pkind) {
   const sel = $('#p-contact');
   sel.innerHTML = contactOptions(QS.get('contact') || '', K.ckind);
   const total = () => $$('.p-alloc').reduce((s, i) => s + (parseMoney(i.value) || 0), 0);
+  // The total row only exists once a contact with something outstanding is chosen.
+  const showTotal = () => { const t = $('#p-total'); if (t) t.textContent = $fmt(total()); };
   const renderInvs = () => {
     if (!sel.value) { $('#p-invs').innerHTML = `<div class="empty">Choose a ${K.who.toLowerCase()} to see what's outstanding</div>`; return; }
     if (!invs.length) { $('#p-invs').innerHTML = `<div class="empty">Nothing outstanding for this ${K.who.toLowerCase()}</div>`; return; }
@@ -684,22 +689,22 @@ async function paymentForm(pkind) {
         <td class="num">${fmt(i.total)}</td><td class="num">${fmt(i.balance)}</td>
         <td><div class="inline"><input class="num p-alloc" data-id="${i.id}" data-bal="${i.balance}" placeholder="0.00"><button class="small p-full" title="Pay in full">Full</button></div></td></tr>`).join('')}
       <tr class="total"><td colspan="5">Total payment</td><td class="num" id="p-total">$0.00</td></tr></tbody></table>`;
-    $$('.p-alloc').forEach(i => { i.oninput = () => { $('#p-total').textContent = $fmt(total()); }; i.onblur = () => { const v = parseMoney(i.value); if (!isNaN(v) && i.value) i.value = fmt(v); }; });
-    $$('.p-full').forEach(b => b.onclick = () => { const i = b.parentElement.querySelector('input'); i.value = fmt(+i.dataset.bal); $('#p-total').textContent = $fmt(total()); });
+    $$('.p-alloc').forEach(i => { i.oninput = () => { showTotal(); }; i.onblur = () => { const v = parseMoney(i.value); if (!isNaN(v) && i.value) i.value = fmt(v); }; });
+    $$('.p-full').forEach(b => b.onclick = () => { const i = b.parentElement.querySelector('input'); i.value = fmt(+i.dataset.bal); showTotal(); });
   };
   const autoAllocate = () => {
     let rem = parseMoney(val('#p-amount'));
     if (isNaN(rem) || !val('#p-amount')) return;
     const ordered = [...$$('.p-alloc')].sort((a, b) => invs.find(i => i.id == a.dataset.id).due_date.localeCompare(invs.find(i => i.id == b.dataset.id).due_date));
     ordered.forEach(i => { const amt = Math.min(rem, +i.dataset.bal); i.value = amt > 0 ? fmt(amt) : ''; rem -= Math.max(amt, 0); });
-    $('#p-total').textContent = $fmt(total());
+    showTotal();
     if (rem > 0) toast(`${$fmt(rem)} is more than the total outstanding`, true);
   };
   const load = async () => {
     invs = sel.value ? (await GET(`/api/invoices?kind=${kind}&status=open&contact_id=${sel.value}`)).sort((a, b) => a.due_date.localeCompare(b.due_date)) : [];
     renderInvs();
     const want = QS.get('inv');
-    if (want) { const i = $(`.p-alloc[data-id="${want}"]`); if (i) { i.value = fmt(+i.dataset.bal); $('#p-total').textContent = $fmt(total()); } }
+    if (want) { const i = $(`.p-alloc[data-id="${want}"]`); if (i) { i.value = fmt(+i.dataset.bal); showTotal(); } }
     else autoAllocate();
   };
   wireContactSelect(sel, K.ckind, load);
@@ -755,7 +760,7 @@ async function bankingHome() {
   await registerView(sel, {
     title: 'Banking',
     picker: `<div class="tabs">${banks.map(b => `<a href="#/banking?account=${b.id}" class="${b.id == sel ? 'active' : ''}">${esc(b.name)}${isShared(b) ? ` <span class="muted">(${pctText(b.share_bp)})</span>` : ''}</a>`).join('')}</div>`,
-    actions: `<button id="bk-manage">Manage accounts</button><a class="btn" href="#/banking/transfer">Transfer</a><a class="btn" href="#/banking/receive">Receive money</a>
+    actions: `<button id="bk-manage">Manage accounts</button><a class="btn" href="#/rules">Bank rules</a><a class="btn" href="#/banking/transfer">Transfer</a><a class="btn" href="#/banking/receive">Receive money</a>
       <a class="btn" href="#/banking/spend">Spend money</a><a class="btn primary" href="#/reconcile?account=${sel}">Reconcile</a>`,
     hashBase: `#/banking?account=${sel}`,
   });
@@ -824,26 +829,37 @@ async function registerView(id, { title, picker = '', actions = '', hashBase }) 
   page(title || `${esc(a.code)} ${esc(a.name)}`, title ? '' : TYPE_LABEL[a.type], actions,
     `${picker}<div class="filters"><div class="field"><label>From</label><input type="date" id="r-from" value="${from}"></div>
       <div class="field"><label>To</label><input type="date" id="r-to" value="${to}"></div>
-      <div class="field"><label>Search</label><input id="r-q" placeholder="Description, contact, amount"></div>
+      <div class="field"><label>Search</label><input id="r-q" placeholder="Description, contact, amount, rule"></div>
+      ${bank ? `<div class="field"><label>Show</label><select id="r-rule"><option value="">All transactions</option><option value="rule">Created by bank rules</option>
+        <option value="auto">Auto-applied by rules</option><option value="review">Rule suggestions to review</option></select></div>` : ''}
       <div style="margin-left:auto;text-align:right"><div class="muted" style="font-size:12px">Balance${to ? ` at ${dfmt(to)}` : ''}</div>
       <div style="font-size:20px;font-weight:650">${$fmt(r.closing)}</div>
       ${sh ? `<div class="muted" style="font-size:12px">Your share ${$fmt(r.share_closing)}</div>` : ''}</div></div>
     ${sh ? `<div class="notice info">${isShared(a) ? `This is a shared account. ${pctText(a.share_bp)} of it is yours.` : 'Some of these transactions came from a shared bank account.'} Reports use the <b>Your share</b> column.</div>` : ''}
     <div class="panel flush">${lines.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Type</th><th>Ref</th>
       <th class="num">${bank ? 'Money in' : 'Debit'}</th><th class="num">${bank ? 'Money out' : 'Credit'}</th><th class="num">Balance</th>${sh ? '<th class="num">Your share</th><th class="num">Your balance</th>' : ''}${bank ? '<th></th>' : ''}</tr></thead><tbody>
-      ${lines.map(l => `<tr class="click" data-href="${sourceHref(l.source, l.source_id, l.journal_id)}" data-q="${esc((l.memo + ' ' + (l.description || '') + ' ' + (l.contact_name || '') + ' ' + fmt(Math.abs(l.amount))).toLowerCase())}">
-        <td>${dfmt(l.date)}</td><td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))}</td>
+      ${lines.map(l => `<tr class="click" data-href="${sourceHref(l.source, l.source_id, l.journal_id)}" data-rule="${!l.rule_id ? '' : l.rule_mode === 'auto' ? 'auto' : l.reviewed ? 'reviewed' : 'review'}" data-q="${esc((l.memo + ' ' + (l.description || '') + ' ' + (l.contact_name || '') + ' ' + (l.rule_name || '') + ' ' + (l.bank_text || '') + ' ' + fmt(Math.abs(l.amount))).toLowerCase())}">
+        <td>${dfmt(l.date)}</td><td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))}${rulePill(l)}${l.category ? `<div class="muted" style="font-size:12px">→ ${esc(l.category)}</div>` : ''}</td>
         <td class="muted">${SOURCE_LABEL[l.source] || l.source}</td><td class="muted">${esc(l.reference || '')}</td>
         <td class="num">${l.amount > 0 ? fmt(l.amount) : ''}</td><td class="num">${l.amount < 0 ? fmt(-l.amount) : ''}</td><td class="num">${fmt(l.balance)}</td>
         ${sh ? `<td class="num">${fmt(l.share * sgn)}</td><td class="num">${fmt(l.share_balance)}</td>` : ''}
         ${bank ? `<td title="${l.recon_id ? 'Reconciled' : 'Not reconciled'}">${l.recon_id ? '✓' : ''}</td>` : ''}</tr>`).join('')}
       <tr class="total"><td colspan="6">Opening balance ${dfmt(from)}</td><td class="num">${fmt(r.opening)}</td>${sh ? `<td></td><td class="num">${fmt(r.share_opening)}</td>` : ''}${bank ? '<td></td>' : ''}</tr>
       </tbody></table></div>` : '<div class="empty">No transactions in this period</div>'}</div>`);
-  $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
+  $$('tr[data-href]').forEach(tr => tr.onclick = e => { if (!e.target.closest('a')) go(tr.dataset.href); });
   const sep = hashBase.includes('?') ? (hashBase.endsWith('?') ? '' : '&') : '?';
   const reload = () => go(`${hashBase}${sep}from=${val('#r-from')}${val('#r-to') ? `&to=${val('#r-to')}` : ''}`);
   $('#r-from').onchange = reload; $('#r-to').onchange = reload;
-  $('#r-q').oninput = () => { const q = val('#r-q').toLowerCase().trim(); $$('tr[data-q]').forEach(tr => { tr.hidden = q && !tr.dataset.q.includes(q); }); };
+  const filter = () => {
+    const q = val('#r-q').toLowerCase().trim(), rf = val('#r-rule');
+    $$('tr[data-q]').forEach(tr => {
+      const r = tr.dataset.rule;
+      const ruleOk = !rf || (rf === 'rule' ? !!r : r === rf);
+      tr.hidden = !ruleOk || (q && !tr.dataset.q.includes(q));
+    });
+  };
+  $('#r-q').oninput = filter;
+  if ($('#r-rule')) $('#r-rule').onchange = filter;
 }
 
 async function txnForm(source, id) {
@@ -880,7 +896,10 @@ async function txnForm(source, id) {
   }
   page(j ? `${titles[source]}` : titles[source], j ? `${dfmt(j.date)}${j.recurring_id ? ' · created by a recurring transaction' : ''}` : '',
     `<a class="btn" href="${RETURN_TO || backHref}" id="t-cancel">${ro ? 'Back' : 'Cancel'}</a>${j && !ro ? '<button class="danger" id="t-del">Delete</button>' : ''}${ro ? '' : '<button class="primary" id="t-save">Save</button>'}`,
-    `${ro ? `<div class="notice info">${why}</div>` : ''}<div class="panel">${body}</div>`);
+    `${ro ? `<div class="notice info">${why}</div>` : ''}${j && j.rule_id ? `<div class="notice ${j.rule_mode === 'recommend' && !j.reviewed ? 'warn' : 'info'}">
+      ${j.rule_mode === 'auto' ? 'Categorised and ticked automatically' : j.reviewed ? 'Categorised (and since reviewed)' : 'Categorised, waiting for your review,'} by the bank rule
+      <a href="#/rules/${j.rule_id}"><b>${esc(j.rule_name || 'rule')}</b></a>${j.bank_text ? ` from the statement line "${esc(j.bank_text)}"` : ''}.
+      ${ro ? '' : 'If the category is wrong, change it below and save. To stop it happening again, edit the rule.'}</div>` : ''}<div class="panel">${body}</div>`);
   $('#t-cancel').onclick = () => { RETURN_TO = null; };
   let ed, jed;
   if (source === 'spend' || source === 'receive') {
@@ -999,13 +1018,14 @@ async function reconcilePage() {
     const shown = data.lines.filter(l => R.showLater || l.date <= sd || R.ticked.has(l.id));
     body.innerHTML = shown.length ? shown.map(l => `<tr class="${R.ticked.has(l.id) ? 'ticked' : ''}${matchedIds.has(l.id) ? ' matched' : ''}" data-id="${l.id}">
       <td><input type="checkbox" ${R.ticked.has(l.id) ? 'checked' : ''}></td><td>${dfmt(l.date)}${l.date > sd ? ' <span class="pill overdue">after</span>' : ''}</td>
-      <td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))} <a href="${sourceHref(l.source, l.source_id, l.journal_id)}" class="muted" title="Open">↗</a></td>
+      <td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))} <a href="${sourceHref(l.source, l.source_id, l.journal_id)}" class="muted" title="Open">↗</a>${rulePill(l)}
+        ${l.category ? `<div class="muted" style="font-size:12px">→ ${esc(l.category)}</div>` : ''}</td>
       <td class="muted">${SOURCE_LABEL[l.source] || ''}</td><td class="muted">${esc(l.reference || '')}</td>
       <td class="num">${l.amount > 0 ? fmt(l.amount) : ''}</td><td class="num">${l.amount < 0 ? fmt(-l.amount) : ''}</td></tr>`).join('')
       : `<tr><td colspan="7" class="empty">Everything up to this date is reconciled. Enter new transactions, or import your statement.</td></tr>`;
     $$('tr[data-id]', body).forEach(tr => {
       tr.onclick = e => {
-        if (e.target.tagName === 'A') return;
+        if (e.target.closest('a')) return;
         const id = +tr.dataset.id;
         if (R.ticked.has(id)) R.ticked.delete(id); else R.ticked.add(id);
         tr.classList.toggle('ticked', R.ticked.has(id)); tr.querySelector('input').checked = R.ticked.has(id); calc();
@@ -1036,7 +1056,11 @@ async function reconcilePage() {
   $('#rc-none').onclick = () => { R.ticked.clear(); drawLines(); };
   $('#rc-go').onclick = async () => {
     try {
-      await api('POST', '/api/reconcile', { account_id: acc, statement_date: val('#rc-date'), statement_balance: parseMoney(val('#rc-bal')), line_ids: [...R.ticked] });
+      // Remember the statement text of CSV lines matched to items entered by hand, so re-importing skips them.
+      const bankText = {};
+      (R.csv || []).forEach(c => { if (c.status === 'none' && c.match && R.ticked.has(c.match) && c.description) bankText[c.match] = { text: c.description, date: c.date }; });
+      await api('POST', '/api/reconcile', { account_id: acc, statement_date: val('#rc-date'), statement_balance: parseMoney(val('#rc-bal')),
+        line_ids: [...R.ticked], bank_text: bankText });
       toast('Reconciled'); R.ticked.clear(); R.csv = null; R.statement_balance = ''; await refreshState(); reconcilePage();
     } catch (e) { fail(e); }
   };
@@ -1047,37 +1071,81 @@ async function reconcilePage() {
   };
   $('#rc-add').onclick = () => quickBankTxn(acc, {}, () => reconcilePage());
 
-  // CSV statement matching
+  // CSV statement matching. The server has already (see /api/reconcile/import):
+  //   skipped lines already in numbr ('duplicate'), and run bank rules ('auto' / 'recommend', or 'locked' / 'error').
+  // Lines left as 'none' are matched here to items entered by hand (same amount, within 7 days).
   const drawCsv = () => {
     if (!R.csv) { $('#rc-csv').innerHTML = ''; return; }
     matchedIds.clear();
-    const used = new Set();
+    const used = new Set(R.csv.filter(c => c.line_id).map(c => c.line_id));
     R.csv.forEach(c => {
+      if (c.status === 'auto' || c.status === 'recommend') { c.match = lineById[c.line_id] ? c.line_id : null; return; }
+      if (c.status === 'duplicate') { c.match = !c.reconciled && lineById[c.line_id] ? c.line_id : null; return; }
+      if (c.status !== 'none') { c.match = null; return; }
+      if (c.match && lineById[c.match] && !used.has(c.match)) { used.add(c.match); return; }
       c.match = null;
       let best = null, bestGap = 99;
       data.lines.forEach(l => {
-        if (used.has(l.id) || l.amount !== c.amount) return;
+        if (used.has(l.id) || l.bank_text || l.amount !== c.amount) return;
         const gap = Math.abs((new Date(l.date) - new Date(c.date)) / 86400000);
         if (gap <= 7 && gap < bestGap) { best = l; bestGap = gap; }
       });
-      if (best) { c.match = best.id; used.add(best.id); matchedIds.add(best.id); }
+      if (best) { c.match = best.id; used.add(best.id); }
     });
+    R.csv.forEach(c => { if (c.match) matchedIds.add(c.match); });
     const sd = val('#rc-date');
     const inPeriod = R.csv.filter(c => c.date <= sd);
-    inPeriod.forEach(c => { if (c.match) R.ticked.add(c.match); });
-    const unmatched = inPeriod.filter(c => !c.match);
-    $('#rc-csv').innerHTML = `<div class="panel flush"><h2>Statement lines (${inPeriod.length} up to ${dfmt(sd)}) · ${inPeriod.length - unmatched.length} matched · ${unmatched.length} unmatched
+    // Tick each match once (so unticking sticks). Recommended lines wait for the user, unless already reviewed.
+    inPeriod.forEach(c => {
+      if (!c.match || c.ticked) return;
+      const l = lineById[c.match];
+      if (l.rule_mode === 'recommend' && !l.reviewed) return;
+      R.ticked.add(c.match); c.ticked = true;
+    });
+    const skipped = inPeriod.filter(c => c.status === 'duplicate' && !c.match).length;
+    const auto = inPeriod.filter(c => c.status === 'auto' && c.match);
+    const review = inPeriod.filter(c => c.match && lineById[c.match].rule_mode === 'recommend' && !lineById[c.match].reviewed);
+    const matched = inPeriod.filter(c => c.match && c.status !== 'auto' && !review.includes(c));
+    const unmatched = inPeriod.filter(c => !c.match && c.status !== 'duplicate');
+    const dups = inPeriod.filter(c => c.possible_dup_line_id && c.match && lineById[c.possible_dup_line_id]);
+    const idx = c => R.csv.indexOf(c);
+    const amt = c => `<td class="num${c.amount < 0 ? ' neg' : ''}">${fmt(c.amount)}</td>`;
+    $('#rc-csv').innerHTML = `<div class="panel flush"><h2>Statement lines (${inPeriod.length} up to ${dfmt(sd)}) · ${auto.length} auto-applied · ${review.length} to review · ${matched.length} matched · ${unmatched.length} unmatched
         <button class="small" id="rc-csv-clear" style="float:right">Close statement</button></h2>
-      ${unmatched.length ? `<p class="muted" style="padding:0 18px">These statement lines have no matching transaction in numbr. Create one, or enter it properly (e.g. as a customer payment) and come back.</p>
+      ${skipped ? `<p class="muted" style="padding:0 18px">${skipped} line${skipped === 1 ? ' was' : 's were'} already in numbr and reconciled, so ${skipped === 1 ? 'it was' : 'they were'} skipped.</p>` : ''}
+      ${dups.map(c => { const o = lineById[c.possible_dup_line_id]; return `<div class="notice warn" style="margin:12px 18px">Possible double-up: the rule <b>${esc(c.rule_name)}</b> created
+        <a href="#/txn/${c.journal_id}">${esc(c.description)} ${$fmt(c.amount)} on ${dfmt(c.date)}</a>, and you also entered
+        <a href="${sourceHref(o.source, o.source_id, o.journal_id)}">${esc(o.description || o.memo || 'a transaction')} on ${dfmt(o.date)}</a> for the same amount. If they're the same, delete one.</div>`; }).join('')}
+      ${review.length ? `<h3 class="csv-sub">To review</h3><p class="muted" style="padding:0 18px">A recommend rule categorised these. Check the category, then tick them.</p>
+      <table><thead><tr><th>Date</th><th>Description</th><th>Categorised as</th><th class="num">Amount</th><th></th></tr></thead><tbody>
+      ${review.map(c => { const l = lineById[c.match]; return `<tr><td>${dfmt(c.date)}</td><td>${esc(c.description)}${rulePill(l)}</td><td>${esc(l.category || '')}</td>${amt(c)}
+        <td class="actions" style="justify-content:flex-end"><button class="small" data-open="${l.journal_id}">Change</button><button class="small primary" data-ok="${l.id}">${R.ticked.has(l.id) ? 'Ticked ✓' : 'Looks right, tick'}</button></td></tr>`; }).join('')}
+      </tbody></table>` : ''}
+      ${unmatched.length ? `<h3 class="csv-sub">Unmatched <button class="small" id="rc-rerun" style="float:right" title="Run your bank rules again over these lines, e.g. after making a new rule">Apply rules again</button></h3><p class="muted" style="padding:0 18px">These statement lines have no matching transaction in numbr. Create one, or enter it properly (e.g. as a customer payment) and come back. <b>Make a rule</b> handles lines like it automatically next time.</p>
       <table><thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead><tbody>
-      ${unmatched.map(c => `<tr><td>${dfmt(c.date)}</td><td>${esc(c.description)}</td><td class="num${c.amount < 0 ? ' neg' : ''}">${fmt(c.amount)}</td>
-        <td class="actions" style="justify-content:flex-end">${c.amount > 0 ? `<button class="small" data-pay="receipt" data-i="${R.csv.indexOf(c)}">Customer payment</button><button class="small" data-pay="contribution" data-i="${R.csv.indexOf(c)}">Partner contribution</button>` : `<button class="small" data-pay="payment" data-i="${R.csv.indexOf(c)}">Bill payment</button>`}
-        <button class="small primary" data-new="${R.csv.indexOf(c)}">${c.amount < 0 ? 'Spend money' : 'Receive money'}</button></td></tr>`).join('')}
+      ${unmatched.map(c => `<tr><td>${dfmt(c.date)}</td><td>${esc(c.description)}${c.status === 'locked' ? `<div class="muted" style="font-size:12px">Rule ${esc(c.rule_name)} matched, but this date is locked.</div>` : ''}${c.status === 'error' ? `<div class="neg" style="font-size:12px">Rule ${esc(c.rule_name)} matched but couldn't apply: ${esc(c.error)}</div>` : ''}</td>${amt(c)}
+        <td class="actions" style="justify-content:flex-end"><button class="small" data-rule="${idx(c)}">Make a rule</button>${c.amount > 0 ? `<button class="small" data-pay="receipt" data-i="${idx(c)}">Customer payment</button><button class="small" data-pay="contribution" data-i="${idx(c)}">Partner contribution</button>` : `<button class="small" data-pay="payment" data-i="${idx(c)}">Bill payment</button>`}
+        <button class="small" data-xfer="${idx(c)}">Transfer</button><button class="small primary" data-new="${idx(c)}">${c.amount < 0 ? 'Spend money' : 'Receive money'}</button></td></tr>`).join('')}
       </tbody></table>` : '<div class="notice good" style="margin:12px 18px">Every statement line matches a transaction in numbr.</div>'}</div>`;
     $('#rc-csv-clear').onclick = () => { R.csv = null; drawCsv(); drawLines(); };
+    const rb = $('#rc-rerun'); if (rb) rb.onclick = rerunRules;
+    $$('[data-open]').forEach(b => b.onclick = () => { RETURN_TO = `#/reconcile?account=${acc}`; go(`#/txn/${b.dataset.open}`); });
+    $$('[data-ok]').forEach(b => b.onclick = () => { R.ticked.add(+b.dataset.ok); drawCsv(); drawLines(); });
+    $$('[data-rule]').forEach(b => b.onclick = () => {
+      const c = R.csv[+b.dataset.rule];
+      const words = c.description.replace(/\d.*$/, '').trim() || c.description;
+      PREFILL = { rule: { name: words.slice(0, 40), text_op: 'contains', text_tokens: [{ t: 'text', v: words }], direction: c.amount < 0 ? 'out' : 'in',
+        account_ids: [], sample: c.description } };
+      RETURN_TO = `#/reconcile?account=${acc}`;
+      go('#/rules/new');
+    });
     $$('[data-new]').forEach(b => b.onclick = () => {
       const c = R.csv[+b.dataset.new];
       quickBankTxn(acc, { date: c.date, description: c.description, amount: Math.abs(c.amount), kind: c.amount < 0 ? 'spend' : 'receive' }, () => reconcilePage());
+    });
+    $$('[data-xfer]').forEach(b => b.onclick = () => {
+      const c = R.csv[+b.dataset.xfer];
+      quickBankTxn(acc, { date: c.date, description: c.description, amount: Math.abs(c.amount), kind: c.amount < 0 ? 'xfer-out' : 'xfer-in' }, () => reconcilePage());
     });
     $$('[data-pay]').forEach(b => b.onclick = () => {
       const c = R.csv[+b.dataset.i];
@@ -1091,14 +1159,35 @@ async function reconcilePage() {
     const txt = await f.text();
     const parsed = parseCSV(txt);
     if (parsed.length < 1) return toast('That file looks empty', true);
-    csvMapping(parsed, cc, lines => {
-      R.csv = lines;
-      const maxD = lines.reduce((m, l) => (l.date > m ? l.date : m), '');
-      if (maxD && (!R.statement_date || R.statement_date === S.today)) { R.statement_date = maxD; $('#rc-date').value = maxD; }
-      drawCsv(); drawLines();
-      toast(`Imported ${lines.length} statement lines`);
+    csvMapping(parsed, acc, async (lines, target, mapping) => {
+      try {
+        const res = await api('POST', '/api/reconcile/import', { account_id: target, lines, mapping });
+        const ta = acct(target); if (ta) ta.csv_map = mapping; // remembered for next time (saved on the account)
+        lines.forEach((l, i) => Object.assign(l, res.results[i]));
+        if (String(target) !== String(acc)) { R.account_id = target; R.ticked = new Set(); R.statement_balance = ''; R.statement_date = null; }
+        R.csv = lines;
+        const maxD = lines.reduce((m, l) => (l.date > m ? l.date : m), '');
+        if (maxD) R.statement_date = maxD;  // the statement runs up to its last line
+        const n = res.counts, parts = [];
+        if (n.auto) parts.push(`${n.auto} auto-applied`);
+        if (n.recommend) parts.push(`${n.recommend} to review`);
+        if (n.duplicate) parts.push(`${n.duplicate} already in numbr`);
+        toast(`Imported ${lines.length} statement lines into ${acct(target).name}${parts.length ? ': ' + parts.join(', ') : ''}`);
+        go(`#/reconcile?account=${target}`);
+      } catch (err) { fail(err); }
     });
     e.target.value = '';
+  };
+  // After making a rule from an unmatched line: run the rules again over the lines still unmatched.
+  const rerunRules = async () => {
+    const todo = R.csv.filter(c => !c.match && c.status !== 'duplicate');
+    try {
+      const res = await api('POST', '/api/reconcile/import', { account_id: acc, lines: todo.map(c => ({ date: c.date, amount: c.amount, description: c.description })) });
+      todo.forEach((c, i) => { delete c.error; Object.assign(c, res.results[i]); });
+      const hit = (res.counts.auto || 0) + (res.counts.recommend || 0);
+      toast(hit ? `Rules categorised ${hit} more line${hit === 1 ? '' : 's'}` : 'No rules matched the unmatched lines');
+      reconcilePage();
+    } catch (err) { fail(err); }
   };
   drawCsv();
   drawLines();
@@ -1108,24 +1197,47 @@ function quickBankTxn(bankId, pre, done) {
   const kind0 = pre.kind || 'spend';
   modal(`<h2>New bank transaction</h2>
     <div class="form-grid">
-      <div class="field"><label>Type</label><select id="q-kind"><option value="spend" ${kind0 === 'spend' ? 'selected' : ''}>Spend money (money out)</option><option value="receive" ${kind0 === 'receive' ? 'selected' : ''}>Receive money (money in)</option></select></div>
+      <div class="field"><label>Type</label><select id="q-kind">
+        <option value="spend" ${kind0 === 'spend' ? 'selected' : ''}>Spend money (money out)</option>
+        <option value="receive" ${kind0 === 'receive' ? 'selected' : ''}>Receive money (money in)</option>
+        <option value="xfer-out" ${kind0 === 'xfer-out' ? 'selected' : ''}>Transfer out (to another of my accounts)</option>
+        <option value="xfer-in" ${kind0 === 'xfer-in' ? 'selected' : ''}>Transfer in (from another of my accounts)</option></select></div>
       <div class="field"><label>Account</label><select id="q-bank">${bankOptions(bankId)}</select></div>
       <div class="field"><label>Date</label><input type="date" id="q-date" value="${pre.date || S.today}"></div>
       <div class="field"><label>Amount</label><input id="q-amt" class="num" value="${pre.amount ? fmt(pre.amount) : ''}"></div>
     </div>
     <div class="field"><label>Description</label><input id="q-desc" value="${esc(pre.description || '')}"></div>
-    <div class="field"><label>Allocate to account</label><select id="q-acct">${acctOptions('', a => postable(a) && !isBank(a))}</select></div>
-    <div class="hint">For a customer or supplier payment against an invoice or bill, use Receive payment / Pay bills instead so it clears what they owe.</div>
+    <div class="field" id="q-acctbox"><label>Allocate to account</label><select id="q-acct">${acctOptions('', a => postable(a) && !isBank(a))}</select></div>
+    <div class="field" id="q-otherbox"><label id="q-otherlabel">Other bank account</label><select id="q-other">${bankOptions('', 'Choose account…')}</select>
+      <div class="hint">When you import that account's statement, its side of the transfer is matched to this one.</div></div>
+    <div class="hint" id="q-payhint">For a customer or supplier payment against an invoice or bill, use Receive payment / Pay bills instead so it clears what they owe.</div>
     <div class="modal-foot"><button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
     const bankFee = S.accounts.find(a => a.code === '6-1200');
     if (bankFee && kind0 === 'spend' && (!pre.description || /\bfees?\b|charge/i.test(pre.description))) el.querySelector('#q-acct').value = bankFee.id;
+    const showKind = () => {
+      const k = val('#q-kind', el), xfer = k.startsWith('xfer');
+      el.querySelector('#q-acctbox').hidden = xfer; el.querySelector('#q-payhint').hidden = xfer;
+      el.querySelector('#q-otherbox').hidden = !xfer;
+      el.querySelector('#q-otherlabel').textContent = k === 'xfer-out' ? 'Transfer to' : 'Transfer from';
+    };
+    el.querySelector('#q-kind').onchange = showKind;
+    showKind();
     el.querySelector('[data-x=no]').onclick = closeModal;
     el.querySelector('[data-x=yes]').onclick = async () => {
       try {
         const amt = parseMoney(val('#q-amt', el)); if (isNaN(amt) || amt <= 0) throw new Error('Enter an amount');
-        if (!val('#q-acct', el)) throw new Error('Choose an account');
-        await api('POST', `/api/txn/${val('#q-kind', el)}`, { bank_account_id: val('#q-bank', el), date: val('#q-date', el), memo: val('#q-desc', el),
-          lines: [{ account_id: +val('#q-acct', el), description: val('#q-desc', el), amount: amt }] });
+        const k = val('#q-kind', el), bank = val('#q-bank', el);
+        if (k.startsWith('xfer')) {
+          const other = val('#q-other', el);
+          if (!other) throw new Error('Choose the other bank account');
+          if (other === bank) throw new Error('Choose a different account from the one the money is in');
+          const [from, to] = k === 'xfer-out' ? [bank, other] : [other, bank];
+          await api('POST', '/api/txn/transfer', { from_account_id: from, to_account_id: to, date: val('#q-date', el), amount: amt, memo: val('#q-desc', el) });
+        } else {
+          if (!val('#q-acct', el)) throw new Error('Choose an account');
+          await api('POST', `/api/txn/${k}`, { bank_account_id: bank, date: val('#q-date', el), memo: val('#q-desc', el),
+            lines: [{ account_id: +val('#q-acct', el), description: val('#q-desc', el), amount: amt }] });
+        }
         closeModal(); toast('Saved'); done && done();
       } catch (e) { fail(e); }
     };
@@ -1149,7 +1261,7 @@ function parseCSV(text) {
 }
 
 function parseAnyDate(s, fmtPref) {
-  s = s.trim().split(' ')[0];
+  s = s.trim().replace(/[\sT]+\d{1,2}:\d{2}.*$/, ''); // drop a trailing time, keep "07 Nov 26"
   let m;
   if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
   if ((m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/))) {
@@ -1165,7 +1277,8 @@ function parseAnyDate(s, fmtPref) {
   return null;
 }
 
-function csvMapping(rows, isCard, onDone) {
+function csvMapping(rows, accId, onDone) {
+  const isCard = (acct(accId) || {}).type === 'liability';
   const first = rows[0];
   const looksHeader = first.some(c => /date|amount|desc|narr|debit|credit|details|balance|transaction/i.test(c)) && !first.some(c => parseAnyDate(c));
   const ncol = Math.max(...rows.map(r => r.length));
@@ -1174,7 +1287,8 @@ function csvMapping(rows, isCard, onDone) {
   let gDate = guess(/date/i); if (gDate < 0) gDate = sample.findIndex(c => parseAnyDate(c));
   let gAmt = guess(/^amount$|amount/i);
   const gDr = guess(/debit|withdraw|money out/i), gCr = guess(/credit|deposit|money in/i);
-  let gDesc = guess(/desc|narr|details|particulars|transaction/i);
+  let gDesc = guess(/desc|narr|details|particulars/i);
+  if (gDesc < 0) gDesc = guess(/transaction/i);
   if (!looksHeader) { // e.g. CBA: date, amount, description, balance
     const numIdx = sample.map((c, i) => (!isNaN(parseMoney(c)) && c !== '' && i !== gDate ? i : -1)).filter(i => i >= 0);
     if (gAmt < 0 && numIdx.length) gAmt = numIdx[0];
@@ -1182,7 +1296,11 @@ function csvMapping(rows, isCard, onDone) {
   }
   const mode0 = gAmt >= 0 || gDr < 0 ? 'single' : 'split';
   const colOpts = sel => `<option value="-1">—</option>` + [...Array(ncol)].map((_, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${looksHeader ? esc(first[i] || `Column ${i + 1}`) : `Column ${i + 1}`}${!looksHeader && sample[i] ? ` (e.g. ${esc(sample[i].slice(0, 24))})` : ''}</option>`).join('');
-  modal(`<h2>Match up your statement columns</h2>
+  modal(`<h2>Import a bank statement</h2>
+    <div class="field"><label>Import into</label><select id="m-acc">${bankOptions(accId)}</select>
+      <div class="hint">Choose the account this statement is from. Its bank rules are applied, and lines already in it are skipped.</div></div>
+    <h3 style="margin:14px 0 8px">Match up your statement columns</h3>
+    <div class="hint" id="m-saved" hidden>Using the column choices from your last import into this account.</div>
     <label class="check"><input type="checkbox" id="m-head" ${looksHeader ? 'checked' : ''}> First row is a header</label>
     <div class="form-grid" style="margin-top:10px">
       <div class="field"><label>Date column</label><select id="m-date">${colOpts(gDate)}</select></div>
@@ -1216,10 +1334,37 @@ function csvMapping(rows, isCard, onDone) {
         <div class="hint">Money out should be negative, money in positive.</div>`;
       return out;
     };
+    const accSel = el.querySelector('#m-acc'), go_ = el.querySelector('[data-x=yes]');
+    const COLS = { date: '#m-date', desc: '#m-desc', amt: '#m-amt', dr: '#m-dr', cr: '#m-cr' };
+    const defaults = { head: looksHeader, df: 'dmy', mode: mode0, cols: { date: gDate, desc: gDesc, amt: gAmt, dr: gDr, cr: gCr } };
+    // A saved column is found by its header name first (in case the bank reorders columns), then by position.
+    const findCol = (c, head) => {
+      if (!c) return -1;
+      if (head && c.name) { const i = first.findIndex(h => h.toLowerCase() === c.name.toLowerCase()); if (i >= 0) return i; }
+      return c.i < ncol ? c.i : -1;
+    };
+    const applyAccount = () => {
+      const a = acct(accSel.value), m = a.csv_map;
+      go_.textContent = `Import into ${a.name}`;
+      el.querySelector('#m-saved').hidden = !m;
+      el.querySelector('#m-head').checked = m ? m.head : defaults.head;
+      el.querySelector('#m-df').value = m ? m.df : defaults.df;
+      el.querySelector('#m-mode').value = m ? m.mode : defaults.mode;
+      el.querySelector('#m-flip').checked = m ? m.flip : a.type === 'liability';
+      Object.entries(COLS).forEach(([k, sel]) => { el.querySelector(sel).value = m ? findCol(m.cols[k], m.head) : defaults.cols[k]; });
+    };
+    const mapping = () => {
+      const head = el.querySelector('#m-head').checked;
+      const cols = {};
+      Object.entries(COLS).forEach(([k, sel]) => { const i = g(sel); cols[k] = { i, name: head && i >= 0 ? first[i] || '' : '' }; });
+      return { head, df: el.querySelector('#m-df').value, mode: el.querySelector('#m-mode').value, flip: el.querySelector('#m-flip').checked, cols };
+    };
     el.querySelectorAll('select, input').forEach(x => { x.onchange = build; });
+    accSel.onchange = () => { applyAccount(); build(); };
+    applyAccount();
     build();
     el.querySelector('[data-x=no]').onclick = closeModal;
-    el.querySelector('[data-x=yes]').onclick = () => { const out = build(); if (!out.length) return toast('No usable lines found. Check the column choices.', true); closeModal(); onDone(out); };
+    go_.onclick = () => { const out = build(); if (!out.length) return toast('No usable lines found. Check the column choices.', true); closeModal(); onDone(out, accSel.value, mapping()); };
   });
 }
 
@@ -1309,6 +1454,240 @@ async function recurringForm(id) {
       try { const x = await api('POST', `/api/recurring/${r.id}/skip`); toast(`Next is now ${dfmt(x.next_date)}`); recurringForm(r.id); } catch (e) { fail(e); }
     };
   }
+}
+
+// ---------------------------------------------------------------- bank rules
+// Rules categorise statement lines when a bank CSV is imported on the Reconcile screen.
+// The text pattern is built from parts here; the server turns the parts into a regex.
+const RULE_MODE = { auto: 'Auto-apply', recommend: 'Recommend' };
+const TOKEN_LABEL = { text: 'Text', number: 'Number', letters: 'Letters', date: 'Date', any: 'Anything' };
+const DATE_FORMATS = ['DD/MM/YYYY', 'DD/MM/YY', 'DD/MM', 'DD-MM-YYYY', 'DDMMYY', 'DDMMYYYY', 'YYYY-MM-DD', 'DD MMM', 'DD MMM YYYY'];
+
+function tokenText(t) {
+  if (t.t === 'text') return `"${t.v || ''}"`;
+  if (t.t === 'number') return t.count ? `a ${t.count}-digit number` : 'a number';
+  if (t.t === 'letters') return t.count ? `${t.count} letters` : 'some letters';
+  if (t.t === 'date') return `a date (${t.fmt || '?'})`;
+  return 'anything';
+}
+function ruleSummary(r) {
+  const parts = [];
+  if (r.text_op) parts.push(`Text ${r.text_op === 'equals' ? 'is exactly' : 'contains'} ${r.text_tokens.map(tokenText).join(' then ')}`);
+  const dir = { out: 'Money out', in: 'Money in' }[r.direction] || '';
+  const op = { eq: 'of exactly', lt: 'under', gt: 'over' }[r.amount_op];
+  if (op) parts.push(`${dir || 'Amount'} ${op} ${$fmt(r.amount)}`);
+  else if (dir) parts.push(dir);
+  return parts.join(' · ');
+}
+// Badge for a transaction a rule created. Links to the rule.
+function rulePill(l) {
+  if (!l.rule_id) return '';
+  const review = l.rule_mode === 'recommend' && !l.reviewed;
+  const label = l.rule_mode === 'auto' ? 'Auto' : review ? 'Review' : 'Suggested';
+  const tip = l.rule_mode === 'auto' ? 'Categorised and ticked automatically by this rule' :
+    review ? 'Categorised by this rule. Check the category, then reconcile it.' : 'Categorised by this rule and since reviewed';
+  return ` <a class="pill ${l.rule_mode === 'auto' ? 'auto' : 'review'}" href="#/rules/${l.rule_id}" title="${esc(tip)}">${label} · ${esc(l.rule_name || 'rule')}</a>`;
+}
+
+async function rulesList() {
+  const list = await GET('/api/rules');
+  page('Bank rules', 'Categorise lines from an imported bank statement automatically. Rules are checked top to bottom and the first match wins.',
+    `<a class="btn" href="#/banking">Banking</a><a class="btn primary" href="#/rules/new">New rule</a>`,
+    `<div class="notice info"><b>Auto-apply</b> rules create the transaction and tick it for reconciliation. <b>Recommend</b> rules create the transaction but leave it unticked so you can check the category first. Rules run when you use <b>Import statement CSV</b> on the Reconcile screen.</div>
+    <div class="panel flush">${list.length ? `<div class="table-wrap"><table><thead><tr><th style="width:72px">Order</th><th>Name</th><th>When the bank line</th><th>Categorise as</th><th>Bank accounts</th><th>Mode</th><th class="num">Used</th><th></th></tr></thead><tbody>
+    ${list.map((r, i) => `<tr class="click" data-href="#/rules/${r.id}" data-i="${i}">
+      <td><span class="inline" style="gap:4px"><button class="small ru-up" ${i ? '' : 'disabled'} title="Move up" aria-label="Move up">↑</button><button class="small ru-down" ${i < list.length - 1 ? '' : 'disabled'} title="Move down" aria-label="Move down">↓</button></span></td>
+      <td>${esc(r.name)}</td><td>${esc(ruleSummary(r))}</td>
+      <td>${isBank(acct(r.target_account_id) || {}) ? 'Transfer: ' : ''}${esc(`${r.target_code} ${r.target_name}`)}${r.contact_name ? ` <span class="muted">· ${esc(r.contact_name)}</span>` : ''}</td>
+      <td>${r.account_ids.length ? esc(r.account_ids.map(id => (acct(id) || {}).name || '?').join(', ')) : '<span class="muted">All</span>'}</td>
+      <td><span class="pill ${r.mode === 'auto' ? 'auto' : 'review'}">${RULE_MODE[r.mode]}</span></td>
+      <td class="num">${r.used}</td><td>${r.active ? '' : '<span class="pill">Off</span>'}</td></tr>`).join('')}
+    </tbody></table></div>` : '<div class="empty">No rules yet. Create one, or use <b>Make a rule</b> next to an unmatched line after importing a statement.</div>'}</div>`);
+  $$('tr[data-href]').forEach(tr => tr.onclick = e => { if (!e.target.closest('button')) go(tr.dataset.href); });
+  const move = async (i, d) => {
+    const ids = list.map(r => r.id);
+    [ids[i], ids[i + d]] = [ids[i + d], ids[i]];
+    try { await api('POST', '/api/rules/reorder', { ids }); rulesList(); } catch (e) { fail(e); }
+  };
+  $$('.ru-up').forEach(b => b.onclick = () => move(+b.closest('tr').dataset.i, -1));
+  $$('.ru-down').forEach(b => b.onclick = () => move(+b.closest('tr').dataset.i, 1));
+}
+
+async function ruleForm(id) {
+  const r = id ? await GET(`/api/rules/${id}`) : null;
+  const pre = !r && PREFILL && PREFILL.rule ? PREFILL.rule : null;
+  if (pre) PREFILL = null;
+  const d = r || pre || {};
+  const st = { tokens: (d.text_tokens || []).map(t => ({ ...t })) };
+  const banks = S.accounts.filter(a => isBank(a) && (!a.archived || (d.account_ids || []).includes(a.id)));
+  const some = (d.account_ids || []).length > 0;
+  const mode = d.mode || 'recommend';
+  const isXfer = !!d.target_account_id && isBank(acct(d.target_account_id) || {});
+  const back = RETURN_TO || '#/rules';
+  page(r ? esc(r.name) : 'New bank rule', r ? `Used ${r.used} time${r.used === 1 ? '' : 's'}` : '',
+    `<a class="btn" href="${back}" id="ru-cancel">Cancel</a>${r ? '<button class="danger" id="ru-del">Delete</button>' : ''}<button class="primary" id="ru-save">Save rule</button>`,
+    `<div class="panel"><div class="form-grid">
+      <div class="field"><label>Rule name</label><input id="ru-name" value="${esc(d.name || '')}" placeholder="e.g. Coffee at Bean Cafe"></div></div>
+      <label class="check"><input type="checkbox" id="ru-active" ${!r || r.active ? 'checked' : ''}> Active</label></div>
+    <div class="panel"><h2>When a bank statement line…</h2>
+      <div class="form-grid"><div class="field"><label>Bank text</label><select id="ru-op">
+        <option value="" ${!d.text_op ? 'selected' : ''}>Any text (don't check)</option>
+        <option value="contains" ${d.text_op === 'contains' || (!r && !pre) ? 'selected' : ''}>Contains</option>
+        <option value="equals" ${d.text_op === 'equals' ? 'selected' : ''}>Is exactly</option></select></div></div>
+      <div id="ru-textbox">
+        <div id="ru-tokens" class="tokens"></div>
+        <div class="actions" style="margin:8px 0 4px"><span class="muted" style="font-size:12.5px">Add:</span>
+          ${Object.entries(TOKEN_LABEL).map(([k, v]) => `<button type="button" class="small ru-add" data-t="${k}">+ ${v}</button>`).join('')}</div>
+        <div class="hint">Parts are matched in order, one straight after the other (spaces between them are optional). Upper or lower case doesn't matter.
+          <b>Number</b> = digits, <b>Letters</b> = A–Z, <b>Anything</b> = any characters in between.</div>
+      </div>
+      <div class="form-grid" style="margin-top:14px">
+        <div class="field"><label>Direction</label><select id="ru-dir">
+          <option value="any" ${(d.direction || 'any') === 'any' ? 'selected' : ''}>Money in or out</option>
+          <option value="out" ${d.direction === 'out' || (!r && !pre) ? 'selected' : ''}>Money out</option>
+          <option value="in" ${d.direction === 'in' ? 'selected' : ''}>Money in</option></select></div>
+        <div class="field"><label>Amount</label><select id="ru-aop">
+          <option value="" ${!d.amount_op ? 'selected' : ''}>Any amount</option>
+          <option value="eq" ${d.amount_op === 'eq' ? 'selected' : ''}>Equal to</option>
+          <option value="lt" ${d.amount_op === 'lt' ? 'selected' : ''}>Less than</option>
+          <option value="gt" ${d.amount_op === 'gt' ? 'selected' : ''}>More than</option></select></div>
+        <div class="field" id="ru-amtbox"><label>Dollars</label><input id="ru-amt" class="num" inputmode="decimal" placeholder="0.00" value="${d.amount ? fmt(d.amount) : ''}"></div>
+      </div>
+      <div class="field"><label>In bank accounts</label>
+        <div class="inline" style="gap:18px"><label class="check"><input type="radio" name="ru-scope" value="all" ${some ? '' : 'checked'}> All bank accounts</label>
+        <label class="check"><input type="radio" name="ru-scope" value="some" ${some ? 'checked' : ''}> Only these:</label></div>
+        <div id="ru-banks" class="inline" style="gap:14px;flex-wrap:wrap;margin-top:6px">${banks.map(b => `<label class="check"><input type="checkbox" class="ru-bank" value="${b.id}" ${(d.account_ids || []).includes(b.id) ? 'checked' : ''}> ${esc(b.name)}</label>`).join('')}</div></div>
+    </div>
+    <div class="panel"><h2>Then</h2>
+      <div class="form-grid">
+        <div class="field"><label>Action</label><select id="ru-kind">
+          <option value="cat" ${isXfer ? '' : 'selected'}>Categorise it</option>
+          <option value="xfer" ${isXfer ? 'selected' : ''}>Transfer to/from another bank account</option></select></div>
+        <div class="field" id="ru-catbox"><label>Categorise as</label><select id="ru-target">${acctOptions(isXfer ? '' : d.target_account_id || '', a => postable(a) && !isBank(a) && !['re', 'hist'].includes(a.subtype))}</select></div>
+        <div class="field" id="ru-xferbox"><label>Other bank account</label><select id="ru-to">${bankOptions(isXfer ? d.target_account_id : '', 'Choose account…')}</select>
+          <div class="hint">Money out of the statement's account goes to this account; money in comes from it.</div></div>
+        <div class="field"><label>Contact (optional)</label><select id="ru-contact"></select></div>
+        <div class="field"><label>Memo (optional)</label><input id="ru-memo" value="${esc(d.memo || '')}" placeholder="Defaults to the bank text"></div>
+      </div>
+      <div class="field"><label>Mode</label>
+        <label class="check" style="margin-bottom:6px"><input type="radio" name="ru-mode" value="auto" ${mode === 'auto' ? 'checked' : ''}> <span><b>Auto-apply</b> – create the transaction and tick it for reconciliation</span></label>
+        <label class="check"><input type="radio" name="ru-mode" value="recommend" ${mode === 'recommend' ? 'checked' : ''}> <span><b>Recommend</b> – create the transaction but leave it unticked so I can check the category</span></label></div>
+    </div>
+    <div class="panel"><h2>Try it</h2>
+      <div class="field"><label>Example bank text</label><input id="ru-sample" value="${esc(pre ? pre.sample || '' : '')}" placeholder="Paste a line from your bank statement"></div>
+      <div id="ru-result"></div></div>`);
+  $('#ru-cancel').onclick = () => { RETURN_TO = null; };
+  if (r && r.archived) {
+    main.querySelector('.page-head').insertAdjacentHTML('afterend', '<div class="notice warn">This rule has been deleted. It\'s kept so the transactions it created still show where they came from.</div>');
+    ['#ru-save', '#ru-del'].forEach(s => { const b = $(s); if (b) b.remove(); });
+  }
+  const csel = $('#ru-contact');
+  csel.innerHTML = contactOptions(d.contact_id || '', null, 'None');
+  wireContactSelect(csel, 'supplier', () => {});
+
+  let timer;
+  const retest = () => { clearTimeout(timer); timer = setTimeout(runTest, 300); };
+  const drawTokens = () => {
+    const box = $('#ru-tokens');
+    box.innerHTML = st.tokens.length ? st.tokens.map((t, i) => `<div class="token-chip" data-i="${i}">
+      <span class="tk-kind">${i ? 'then ' : ''}${TOKEN_LABEL[t.t]}</span>
+      ${t.t === 'text' ? `<input class="tk-v" value="${esc(t.v || '')}" placeholder="e.g. BEAN CAFE" aria-label="Text to look for">` : ''}
+      ${t.t === 'number' || t.t === 'letters' ? `<label class="muted tk-sub">how many <input class="tk-count num" value="${t.count || ''}" placeholder="any" inputmode="numeric" aria-label="Exact count"></label>` : ''}
+      ${t.t === 'date' ? `<input class="tk-fmt" list="ru-datefmts" value="${esc(t.fmt || '')}" aria-label="Date format" title="Pick a format or type your own using DD, MM, MMM, YY, YYYY">` : ''}
+      <button type="button" class="tk-btn tk-left" ${i ? '' : 'disabled'} title="Move left" aria-label="Move left">←</button><button type="button" class="tk-btn tk-right" ${i < st.tokens.length - 1 ? '' : 'disabled'} title="Move right" aria-label="Move right">→</button><button type="button" class="tk-btn tk-rm" title="Remove" aria-label="Remove">×</button></div>`).join('')
+      + `<datalist id="ru-datefmts">${DATE_FORMATS.map(f => `<option value="${f}">`).join('')}</datalist>`
+      : '<div class="muted" style="font-size:13px">No parts yet. Add the text to look for, then a number, letters or a date if the bank adds one.</div>';
+    $$('.token-chip', box).forEach(ch => {
+      const i = +ch.dataset.i, t = st.tokens[i];
+      const v = ch.querySelector('.tk-v'), c = ch.querySelector('.tk-count'), f = ch.querySelector('.tk-fmt');
+      if (v) v.oninput = () => { t.v = v.value; retest(); };
+      if (c) c.oninput = () => { const n = c.value.trim(); t.count = n === '' ? null : +n; retest(); };
+      if (f) f.oninput = () => { t.fmt = f.value; retest(); };
+      ch.querySelector('.tk-left').onclick = () => { [st.tokens[i - 1], st.tokens[i]] = [st.tokens[i], st.tokens[i - 1]]; drawTokens(); retest(); };
+      ch.querySelector('.tk-right').onclick = () => { [st.tokens[i + 1], st.tokens[i]] = [st.tokens[i], st.tokens[i + 1]]; drawTokens(); retest(); };
+      ch.querySelector('.tk-rm').onclick = () => { st.tokens.splice(i, 1); drawTokens(); retest(); };
+    });
+  };
+  $$('.ru-add').forEach(b => b.onclick = () => {
+    const t = { t: b.dataset.t };
+    if (t.t === 'text') t.v = '';
+    if (t.t === 'date') t.fmt = 'DD/MM/YYYY';
+    st.tokens.push(t); drawTokens(); retest();
+    const last = $$('.token-chip').pop(); const inp = last && last.querySelector('input'); if (inp) inp.focus();
+  });
+  const showParts = () => {
+    $('#ru-textbox').hidden = !val('#ru-op');
+    $('#ru-amtbox').hidden = !val('#ru-aop');
+    $('#ru-banks').style.display = $('input[name=ru-scope][value=some]').checked ? 'flex' : 'none';
+    const xfer = val('#ru-kind') === 'xfer';
+    $('#ru-catbox').hidden = xfer; $('#ru-xferbox').hidden = !xfer;
+  };
+  $('#ru-kind').onchange = showParts;
+  ['#ru-op', '#ru-aop', '#ru-dir'].forEach(s => { $(s).onchange = () => { showParts(); retest(); }; });
+  $('#ru-amt').oninput = retest;
+  $('#ru-amt').onblur = () => { const v = parseMoney(val('#ru-amt')); if (!isNaN(v) && val('#ru-amt')) $('#ru-amt').value = fmt(v); };
+  $$('input[name=ru-scope], .ru-bank').forEach(x => { x.onchange = () => { showParts(); retest(); }; });
+  $('#ru-sample').oninput = retest;
+
+  // strict: refuse a missing amount (saving). Not strict: ignore the amount condition (testing while typing).
+  const conditions = (strict = true) => {
+    let amountOp = val('#ru-aop') || null;
+    let amount = null;
+    if (amountOp) {
+      amount = parseMoney(val('#ru-amt'));
+      if (isNaN(amount) || amount <= 0) {
+        if (strict) throw new Error('Enter the dollar amount to compare against');
+        amountOp = null; amount = null;
+      }
+    }
+    const textOp = val('#ru-op') || null;
+    return {
+      text_op: textOp, text_tokens: textOp ? st.tokens : [], direction: val('#ru-dir'), amount_op: amountOp, amount,
+      account_ids: $('input[name=ru-scope][value=some]').checked ? $$('.ru-bank').filter(x => x.checked).map(x => +x.value) : [],
+    };
+  };
+  async function runTest() {
+    const out = $('#ru-result');
+    if (!out) return;
+    const c = conditions(false);
+    if (!c.text_op && !c.amount_op) { out.innerHTML = '<div class="hint">Add a bank text pattern or an amount to see what the rule matches.</div>'; return; }
+    if (c.text_op && (!st.tokens.length || st.tokens.some(t => t.t === 'text' && !(t.v || '').trim()))) {
+      out.innerHTML = '<div class="hint">Type the text to look for to see what the rule matches.</div>'; return;
+    }
+    try {
+      const res = await api('POST', '/api/rules/test', { ...c, sample: val('#ru-sample') });
+      const sample = val('#ru-sample').trim();
+      const verdict = !c.text_op ? '<div class="hint">No text condition, so any bank text matches. The amount and direction still apply.</div>'
+        : !sample ? '<div class="hint">Type an example above to check the text pattern.</div>'
+        : res.sample_match ? '<div class="notice good" style="margin:0 0 10px">✓ This text matches the pattern.</div>'
+        : '<div class="notice warn" style="margin:0 0 10px">✗ This text doesn\'t match the pattern.</div>';
+      out.innerHTML = `${verdict}
+        ${res.recent.length ? `<div class="hint" style="margin:10px 0 4px">Recent imported lines this rule would have caught:</div>
+          <table><tbody>${res.recent.map(l => `<tr><td>${dfmt(l.date)}</td><td class="muted">${esc(l.account_name)}</td><td>${esc(l.bank_text)}</td><td class="num${l.amount < 0 ? ' neg' : ''}">${fmt(l.amount)}</td></tr>`).join('')}</tbody></table>`
+          : '<div class="hint">None of your recently imported lines match.</div>'}
+        ${res.regex ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12.5px">Advanced: the pattern numbr uses</summary><code class="regex">${esc(res.regex)}</code></details>` : ''}`;
+    } catch (e) { out.innerHTML = `<div class="notice warn" style="margin:0">${esc(e.message)}</div>`; }
+  }
+  if (!r && !pre) st.tokens.push({ t: 'text', v: '' });
+  drawTokens(); showParts(); runTest();
+
+  $('#ru-save').onclick = async () => {
+    try {
+      const c = conditions();
+      if (c.account_ids.length === 0 && $('input[name=ru-scope][value=some]').checked) throw new Error('Tick at least one bank account, or choose All bank accounts');
+      const xfer = val('#ru-kind') === 'xfer';
+      const b = { ...c, name: val('#ru-name'), mode: $('input[name=ru-mode]:checked').value, target_account_id: val(xfer ? '#ru-to' : '#ru-target') || null,
+        contact_id: csel.value || null, memo: val('#ru-memo'), active: $('#ru-active').checked };
+      if (!b.target_account_id) throw new Error(xfer ? 'Choose the bank account the money moves to or from' : 'Choose the account to categorise these lines as');
+      r ? await api('PUT', `/api/rules/${r.id}`, b) : await api('POST', '/api/rules', b);
+      toast('Rule saved'); afterSave('#/rules');
+    } catch (e) { fail(e); }
+  };
+  const del = $('#ru-del');
+  if (del) del.onclick = async () => {
+    if (!await confirmBox(`Delete the rule <b>${esc(r.name)}</b>? Transactions it already created are kept and still show the rule's name.`, 'Delete', true)) return;
+    try { await api('DELETE', `/api/rules/${r.id}`); toast('Rule deleted'); go('#/rules'); } catch (e) { fail(e); }
+  };
 }
 
 // ---------------------------------------------------------------- reports

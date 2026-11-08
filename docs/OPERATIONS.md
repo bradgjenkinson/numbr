@@ -7,11 +7,17 @@ How the books are run day to day with numbr. For installing it, see `README.md`.
 1. **Enter what's happened:** new invoices (Sales → New invoice), supplier bills (Purchases → New bill), customer payments (Receive payment), bill payments (Pay bills).
 2. **Reconcile each bank account and credit card** (Reconcile):
    - Choose the account, set the statement date, and type the closing balance from the bank (for a credit card, the amount owed).
-   - Optionally *Import statement CSV* from internet banking. Matching lines (same amount, within 7 days) are ticked automatically, and statement lines with no match are listed.
+   - Optionally *Import statement CSV* from internet banking and confirm which account it's for. The column choices are remembered per account, so after the first import you normally just click Import. Then:
+     - lines already in numbr (same date, amount and text) are skipped, so overlapping statements are safe to import;
+     - **bank rules** categorise what they recognise. *Auto-apply* rules tick the line; *Recommend* rules list it under **To review**, so check the category (**Change** if needed) and tick it;
+     - other lines matching an existing item (same amount, within 7 days) are ticked, and the rest are listed as unmatched.
+   - If you see a *Possible double-up* warning, a rule created a transaction you'd also entered by hand. Delete one.
    - For each unmatched line:
      - customer money in → **Customer payment**
      - supplier payment out → **Bill payment**
-     - anything else (fees, interest, direct debits) → **Spend/Receive money**
+     - money moved to or from another of your accounts → **Transfer** (when you import that account's statement, its side is matched)
+     - a partner's share arriving → **Partner contribution**
+     - anything else (fees, interest, direct debits) → **Spend/Receive money**, or **Make a rule** so it's handled next time (then **Apply rules again**)
    - When *Out by* shows $0.00, click **Reconcile**.
 3. Check the Dashboard for overdue invoices and anything recurring that was skipped.
 
@@ -48,6 +54,12 @@ For a bill or invoice you only partly own (e.g. rent split with someone else), s
 When a partner is due to put money into an account you track (e.g. their weekly share into the joint account), record it under **Partner** as a partner contribution, or set up a recurring one (Recurring → Creates a *Partner contribution*). A contribution is only a reminder: it isn't income, isn't money owed to you, and doesn't touch the P&L or balance sheet. When the money arrives, click **Mark paid** (or *Partner contribution* on an unmatched statement line when reconciling). The deposit then counts as the other owners' share: your share of the bank goes up, and *Other owners' share* under Equity goes up by the same amount, so your own net worth doesn't change.
 
 Don't record a partner's deposit as a customer invoice: that makes it income or a receivable. If you already have, open the invoice and click **Convert to partner contribution**. That works even when its payments are reconciled (only the non-bank side of each payment changes). It's refused for opening items, for invoices in a locked period, and when one payment covers several invoices.
+
+## Bank rules
+
+**Bank rules** (in the menu, or from Banking) categorise statement lines when you import a CSV. A rule checks the bank text (contains / is exactly a pattern built from text, a number, letters, a date or "anything"), and/or the amount (money in or out; equal to, less than or more than a figure), in all bank accounts or only some. It then either categorises the line, or (Action: *Transfer to/from another bank account*) records a transfer to or from another of your accounts. When you later import that other account's statement, its side of the transfer is recognised as already in numbr and ticked, not entered twice. Use **Try it** to test the pattern against a line from your statement. Rules run top to bottom and the first match wins, so put specific rules (e.g. *Bean Cafe under $10 → coffee*) above general ones (*Bean Cafe → meals*).
+
+In Banking, transactions a rule made show a badge with the rule's name: **Auto** (applied and ticked) or **Review** (recommended, not yet checked; it becomes *Suggested* once you edit or reconcile it). Use *Show* to list only rule transactions, and click a badge to open the rule. If a rule put something in the wrong category, change the transaction and fix the rule. Deleting a rule keeps the transactions it made.
 
 ## Fixing mistakes
 

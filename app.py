@@ -49,6 +49,11 @@ PL_TYPES = ('income', 'cos', 'expense')
 FREQS = ('weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly')
 SYSTEM_SUBTYPES = ('ar', 'ap', 're', 'hist', 'partner')
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
+# For a bank line a rule created: the account(s) on the other side, so the user can see how it was categorised.
+RULE_CATEGORY_SQL = ("CASE WHEN j.rule_id IS NOT NULL THEN (CASE WHEN j.source='transfer' THEN 'Transfer: ' ELSE '' END) || "
+                     "(SELECT GROUP_CONCAT(a2.code || ' ' || a2.name, ', ') "
+                     'FROM journal_lines l2 JOIN accounts a2 ON a2.id=l2.account_id '
+                     'WHERE l2.journal_id=j.id AND l2.id<>l.id) END AS category')
 SHARE_FULL = 10000          # share_bp of an account the user owns outright
 PARTNER = 0                 # pseudo account id for other owners' share of shared bank accounts
 PARTNER_NAME = "Other owners' share"
@@ -72,7 +77,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   type TEXT NOT NULL CHECK (type IN ('asset','liability','equity','income','cos','expense')),
   subtype TEXT NOT NULL DEFAULT 'other',
   archived INTEGER NOT NULL DEFAULT 0,
-  share_bp INTEGER NOT NULL DEFAULT 10000   -- shared bank accounts: user's share in basis points (10000 = 100%)
+  share_bp INTEGER NOT NULL DEFAULT 10000,  -- shared bank accounts: user's share in basis points (10000 = 100%)
+  csv_map TEXT                              -- bank accounts: JSON column choices from the last statement CSV import
 );
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY,
@@ -173,6 +179,24 @@ CREATE TABLE IF NOT EXISTS recurring (
   active INTEGER NOT NULL DEFAULT 1,
   share_bp INTEGER NOT NULL DEFAULT 10000,  -- sale/bill templates: user's share of each invoice/bill it creates
   partner INTEGER NOT NULL DEFAULT 0,       -- 1 = creates partner contributions (kind 'sale')
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bank_rules (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  priority INTEGER NOT NULL,                -- lower runs first; the first matching rule wins
+  mode TEXT NOT NULL CHECK (mode IN ('auto','recommend')),
+  text_op TEXT CHECK (text_op IN ('contains','equals')),  -- NULL = no text condition
+  text_tokens TEXT,                         -- JSON pattern tokens from the rule builder (compiled to a regex)
+  direction TEXT NOT NULL DEFAULT 'any' CHECK (direction IN ('any','out','in')),
+  amount_op TEXT CHECK (amount_op IN ('eq','lt','gt')),   -- NULL = no amount condition; compares the size of the amount
+  amount INTEGER,
+  account_ids TEXT,                         -- JSON list of bank account ids; NULL = all bank accounts
+  target_account_id INTEGER NOT NULL REFERENCES accounts(id),
+  contact_id INTEGER REFERENCES contacts(id),
+  memo TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  archived INTEGER NOT NULL DEFAULT 0,      -- deleted rules that created transactions are archived so history keeps the name
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -368,12 +392,26 @@ def init_db():
     cols = {r[1] for r in db.execute('PRAGMA table_info(accounts)')}
     if 'share_bp' not in cols:
         db.execute('ALTER TABLE accounts ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
+    if 'csv_map' not in cols:
+        db.execute('ALTER TABLE accounts ADD COLUMN csv_map TEXT')
     for table in ('invoices', 'recurring'):
         tcols = {r[1] for r in db.execute(f'PRAGMA table_info({table})')}
         if 'share_bp' not in tcols:
             db.execute(f'ALTER TABLE {table} ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 10000')
         if 'partner' not in tcols:
             db.execute(f'ALTER TABLE {table} ADD COLUMN partner INTEGER NOT NULL DEFAULT 0')
+    jcols = {r[1] for r in db.execute('PRAGMA table_info(journals)')}
+    if 'rule_id' not in jcols:
+        db.execute('ALTER TABLE journals ADD COLUMN rule_id INTEGER')
+    if 'rule_mode' not in jcols:
+        db.execute('ALTER TABLE journals ADD COLUMN rule_mode TEXT')
+    if 'reviewed' not in jcols:
+        db.execute('ALTER TABLE journals ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0')
+    lcols = {r[1] for r in db.execute('PRAGMA table_info(journal_lines)')}
+    if 'bank_text' not in lcols:
+        db.execute('ALTER TABLE journal_lines ADD COLUMN bank_text TEXT')
+    if 'bank_date' not in lcols:  # the statement line's date, when it differs from the transaction date
+        db.execute('ALTER TABLE journal_lines ADD COLUMN bank_date TEXT')
     db.execute('BEGIN')
     for k, v in DEFAULT_SETTINGS.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)', (k, v))
@@ -488,10 +526,10 @@ def check_lines(db, lines):
 
 def insert_lines(db, jid, lines, contact_id):
     for l in lines:
-        db.execute('INSERT INTO journal_lines(journal_id, account_id, amount, description, contact_id, role) '
-                   'VALUES (?,?,?,?,?,?)',
+        db.execute('INSERT INTO journal_lines(journal_id, account_id, amount, description, contact_id, role, bank_text, bank_date) '
+                   'VALUES (?,?,?,?,?,?,?,?)',
                    (jid, l['account_id'], l['amount'], l.get('description') or None,
-                    l.get('contact_id', contact_id), l.get('role')))
+                    l.get('contact_id', contact_id), l.get('role'), l.get('bank_text') or None, l.get('bank_date') or None))
 
 
 def post_journal(db, date, source, lines, memo=None, reference=None, contact_id=None,
@@ -570,6 +608,10 @@ def list_accounts(db):
         a['balance'] = SIGN[a['type']] * (bal.get(a['id']) or 0)
         a['used'] = a['id'] in used
         a['system'] = a['subtype'] in SYSTEM_SUBTYPES
+        try:
+            a['csv_map'] = json.loads(a['csv_map']) if a.get('csv_map') else None
+        except ValueError:
+            a['csv_map'] = None
     return accts
 
 
@@ -1293,7 +1335,8 @@ def create_txn(db, source, body, recurring_id=None):
 
 
 def get_txn(db, jid):
-    j = one(db.execute('SELECT j.*, c.name AS contact_name FROM journals j LEFT JOIN contacts c ON c.id=j.contact_id '
+    j = one(db.execute('SELECT j.*, c.name AS contact_name, r.name AS rule_name FROM journals j '
+                       'LEFT JOIN contacts c ON c.id=j.contact_id LEFT JOIN bank_rules r ON r.id=j.rule_id '
                        'WHERE j.id=?', (as_int(jid),)))
     if not j:
         raise ApiError('Transaction not found', 404)
@@ -1301,6 +1344,7 @@ def get_txn(db, jid):
                             'FROM journal_lines l JOIN accounts a ON a.id=l.account_id WHERE journal_id=? ORDER BY l.id',
                             (j['id'],)))
     j['lines'] = lines
+    j['bank_text'] = next((l['bank_text'] for l in lines if l['bank_text']), None)
     j['reconciled'] = any(l['recon_id'] for l in lines)
     j['locked'] = bool(get_setting(db, 'lock_date') and j['date'] <= get_setting(db, 'lock_date'))
     j['editable'] = j['source'] in EDITABLE_SOURCES and not j['reconciled'] and not j['locked']
@@ -1364,7 +1408,19 @@ def api_journal_update(db, q, body, jid):
     p = build_txn(db, j['source'], body)
     check_lock(db, p['date'])
     lines = check_lines(db, p['lines'])
-    db.execute('UPDATE journals SET date=?, memo=?, reference=?, contact_id=? WHERE id=?',
+    # Keep the statement text an imported line came with, so re-importing the statement still sees it as a duplicate.
+    # Matched by bank account, so both sides of a transfer keep their own text.
+    btext = {r[0]: (r[1], r[2]) for r in db.execute("SELECT account_id, bank_text, bank_date FROM journal_lines "
+                                                    "WHERE journal_id=? AND role='bank' AND bank_text IS NOT NULL", (j['id'],))}
+    for l in lines:
+        if l.get('role') == 'bank' and l['account_id'] in btext:
+            l['bank_text'], l['bank_date'] = btext.pop(l['account_id'])
+    if len(btext) == 1:  # the bank account itself changed: keep the text on the new bank line
+        bl = [l for l in lines if l.get('role') == 'bank' and not l.get('bank_text')]
+        if len(bl) == 1:
+            bl[0]['bank_text'], bl[0]['bank_date'] = btext.popitem()[1]
+    db.execute('UPDATE journals SET date=?, memo=?, reference=?, contact_id=?, '
+               'reviewed=CASE WHEN rule_id IS NULL THEN reviewed ELSE 1 END WHERE id=?',
                (p['date'], p['memo'] or None, p['reference'] or None, p['contact_id'], j['id']))
     db.execute('DELETE FROM journal_lines WHERE journal_id=?', (j['id'],))
     insert_lines(db, j['id'], lines, p['contact_id'])
@@ -1392,9 +1448,12 @@ def api_register(db, q, body):
         frm = as_date(frm)
         opening = s * scalar(db, 'SELECT COALESCE(SUM(l.amount),0) FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
                                  'WHERE l.account_id=? AND j.date<?', (a['id'], frm))
-    sql = ('SELECT l.id, l.amount, l.description, l.recon_id, j.id AS journal_id, j.date, j.memo, j.reference, '
-           'j.source, j.source_id, c.name AS contact_name FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
-           'LEFT JOIN contacts c ON c.id=COALESCE(l.contact_id, j.contact_id) WHERE l.account_id=?')
+    sql = ('SELECT l.id, l.amount, l.description, l.recon_id, l.bank_text, j.id AS journal_id, j.date, j.memo, j.reference, '
+           'j.source, j.source_id, j.rule_id, j.rule_mode, j.reviewed, r.name AS rule_name, c.name AS contact_name, '
+           f'{RULE_CATEGORY_SQL} '
+           'FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
+           'LEFT JOIN contacts c ON c.id=COALESCE(l.contact_id, j.contact_id) LEFT JOIN bank_rules r ON r.id=j.rule_id '
+           'WHERE l.account_id=?')
     args = [a['id']]
     if frm:
         sql += ' AND j.date>=?'
@@ -1446,9 +1505,12 @@ def api_reconcile_get(db, q, body):
                           (a['id'],)))
     cleared = s * scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=? AND recon_id IS NOT NULL',
                          (a['id'],))
-    lines = rows(db.execute('SELECT l.id, l.amount, l.description, j.id AS journal_id, j.date, j.memo, j.reference, j.source, '
-                            'j.source_id, c.name AS contact_name FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
+    lines = rows(db.execute('SELECT l.id, l.amount, l.description, l.bank_text, j.id AS journal_id, j.date, j.memo, j.reference, '
+                            'j.source, j.source_id, j.rule_id, j.rule_mode, j.reviewed, r.name AS rule_name, '
+                            f'{RULE_CATEGORY_SQL}, '
+                            'c.name AS contact_name FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
                             'LEFT JOIN contacts c ON c.id=COALESCE(l.contact_id, j.contact_id) '
+                            'LEFT JOIN bank_rules r ON r.id=j.rule_id '
                             'WHERE l.account_id=? AND l.recon_id IS NULL ORDER BY j.date, j.id', (a['id'],)))
     history = rows(db.execute('SELECT r.*, (SELECT COUNT(*) FROM journal_lines WHERE recon_id=r.id) AS line_count '
                               'FROM reconciliations r WHERE account_id=? ORDER BY statement_date DESC, id DESC LIMIT 24',
@@ -1487,6 +1549,20 @@ def api_reconcile_post(db, q, body):
     rid = cur.lastrowid
     if ids:
         db.execute('UPDATE journal_lines SET recon_id=? WHERE id IN (%s)' % ','.join('?' * len(ids)), [rid] + ids)
+        db.execute('UPDATE journals SET reviewed=1 WHERE rule_id IS NOT NULL AND id IN '
+                   '(SELECT journal_id FROM journal_lines WHERE recon_id=?)', (rid,))
+    # Statement text of the CSV lines these items were matched to. A later import of the same statement
+    # then recognises them as already in numbr.
+    # Each value is the text, or {text, date} with the statement line's date.
+    texts = body.get('bank_text') or {}
+    if isinstance(texts, dict):
+        idset = set(ids)
+        for k, v in texts.items():
+            lid = as_int(k, 'Line')
+            t = text(v.get('text') if isinstance(v, dict) else v)[:500]
+            d = as_date(v['date'], 'Statement date') if isinstance(v, dict) and v.get('date') else None
+            if lid in idset and t:
+                db.execute('UPDATE journal_lines SET bank_text=?, bank_date=? WHERE id=? AND bank_text IS NULL', (t, d, lid))
     audit(db, 'reconcile', 'account', a['id'], {'statement_date': sdate, 'statement_balance': sbal, 'lines': len(ids)})
     return {'id': rid}
 
@@ -1502,6 +1578,387 @@ def api_reconcile_undo(db, q, body):
     db.execute('DELETE FROM reconciliations WHERE id=?', (last['id'],))
     audit(db, 'reconcile_undo', 'account', a['id'], last)
     return {'ok': True}
+
+
+# ----------------------------------------------------------------------------
+# Bank rules: categorise imported statement lines
+# ----------------------------------------------------------------------------
+
+RULE_MAX_TOKENS = 12
+DATE_PARTS = (('YYYY', r'\d{4}'), ('MMM', r'[A-Za-z]{3}'), ('YY', r'\d{2}'), ('DD', r'\d{1,2}'), ('MM', r'\d{1,2}'),
+              ('D', r'\d{1,2}'), ('M', r'\d{1,2}'))
+
+
+def norm_text(t):
+    return ' '.join((t or '').split()).lower()
+
+
+def date_regex(fmt):
+    f = (fmt or '').strip().upper()
+    if not f or len(f) > 20 or not any(c in f for c in 'DMY'):
+        raise ApiError('Choose a date format such as DD/MM/YYYY')
+    out, i = '', 0
+    while i < len(f):
+        for tok, rx in DATE_PARTS:
+            if f.startswith(tok, i):
+                out += rx
+                i += len(tok)
+                break
+        else:
+            out += r'\s*' if f[i].isspace() else re.escape(f[i])
+            i += 1
+    return out
+
+
+def token_regex(t, i):
+    if not isinstance(t, dict):
+        raise ApiError(f'Pattern part {i} is not valid')
+    kind = t.get('t')
+    if kind == 'text':
+        v = text(t.get('v'))
+        if not v:
+            raise ApiError(f'Pattern part {i}: type the text to look for')
+        if len(v) > 100:
+            raise ApiError(f'Pattern part {i}: the text is too long (100 characters at most)')
+        return r'\s+'.join(re.escape(w) for w in v.split())
+    if kind in ('number', 'letters'):
+        n = t.get('count')
+        base = r'\d' if kind == 'number' else '[A-Za-z]'
+        if n in (None, '', 0):
+            return base + '+'
+        n = as_int(n, f'Pattern part {i} count')
+        if not 1 <= n <= 30:
+            raise ApiError(f'Pattern part {i}: the count must be between 1 and 30')
+        return base + '{%d}' % n
+    if kind == 'date':
+        return date_regex(t.get('fmt'))
+    if kind == 'any':
+        return '.*?'
+    raise ApiError(f'Pattern part {i} is not a known type')
+
+
+def compile_rule_regex(text_op, tokens):
+    """Turn the rule builder's pattern parts into a regex. Parts follow each other, with optional spaces between."""
+    if not text_op:
+        return None
+    if not isinstance(tokens, list) or not tokens:
+        raise ApiError('Add at least one part to the bank text pattern')
+    if len(tokens) > RULE_MAX_TOKENS:
+        raise ApiError(f'A pattern can have at most {RULE_MAX_TOKENS} parts')
+    body = r'\s*'.join(token_regex(t, i) for i, t in enumerate(tokens, 1))
+    if all(t.get('t') == 'any' for t in tokens):
+        raise ApiError('The pattern needs some text, a number, letters or a date, not just "anything"')
+    rx = r'^\s*' + body + r'\s*$' if text_op == 'equals' else body
+    try:
+        return re.compile(rx, re.IGNORECASE)
+    except re.error:
+        raise ApiError('That pattern could not be used. Try simplifying it.')
+
+
+def load_rule(r):
+    r = dict(r)
+    r['text_tokens'] = json.loads(r['text_tokens']) if r.get('text_tokens') else []
+    r['account_ids'] = json.loads(r['account_ids']) if r.get('account_ids') else []
+    return r
+
+
+def rule_regex(r):
+    return compile_rule_regex(r['text_op'], r['text_tokens'])
+
+
+def rule_matches(r, rx, bank_id, amount, desc):
+    if r['account_ids'] and bank_id not in r['account_ids']:
+        return False
+    if r.get('target_account_id') == bank_id:  # a transfer rule never applies to the account it transfers to
+        return False
+    if (r['direction'] == 'out' and amount >= 0) or (r['direction'] == 'in' and amount <= 0):
+        return False
+    if r['amount_op']:
+        size = abs(amount)
+        if ((r['amount_op'] == 'eq' and size != r['amount']) or (r['amount_op'] == 'lt' and size >= r['amount'])
+                or (r['amount_op'] == 'gt' and size <= r['amount'])):
+            return False
+    if rx is not None and not rx.search(desc or ''):
+        return False
+    return True
+
+
+def rule_payload(db, body):
+    name = text(body.get('name'))
+    if not name:
+        raise ApiError('Give the rule a name')
+    mode = body.get('mode')
+    if mode not in ('auto', 'recommend'):
+        raise ApiError('Choose whether the rule auto-applies or recommends')
+    text_op = body.get('text_op') or None
+    if text_op not in (None, 'contains', 'equals'):
+        raise ApiError('Choose how the bank text should match')
+    tokens = (body.get('text_tokens') or []) if text_op else []
+    compile_rule_regex(text_op, tokens)
+    tokens = [{k: v for k, v in t.items() if k in ('t', 'v', 'count', 'fmt')} for t in tokens]
+    direction = body.get('direction') or 'any'
+    if direction not in ('any', 'out', 'in'):
+        raise ApiError('Choose money in, money out or either')
+    amount_op = body.get('amount_op') or None
+    if amount_op not in (None, 'eq', 'lt', 'gt'):
+        raise ApiError('Choose how the amount should compare')
+    amt = None
+    if amount_op:
+        amt = as_cents(req(body, 'amount', 'Rule amount'), 'Rule amount')
+        if amt <= 0:
+            raise ApiError('The rule amount must be more than zero')
+    if not text_op and not amount_op:
+        raise ApiError('A rule needs a bank text pattern, an amount condition, or both')
+    ids = []
+    for aid in body.get('account_ids') or []:
+        b = bank_account(db, aid)
+        if b['id'] not in ids:
+            ids.append(b['id'])
+    target = account(db, as_int(req(body, 'target_account_id', 'Category account'), 'Category account'))
+    if target['subtype'] in ('ar', 'ap', 're', 'hist'):
+        raise ApiError(f'{target["name"]} can\'t be used by a rule. Choose an income, expense or other account, '
+                       'or a bank account to transfer to.')
+    if target['subtype'] == 'bank' and target['id'] in ids and len(ids) == 1:
+        raise ApiError(f'This rule only applies to {target["name"]}, so it can\'t transfer to it. '
+                       'Choose a different account to transfer to.')
+    if target['archived']:
+        raise ApiError(f'{target["name"]} is archived')
+    cid = contact(db, body['contact_id'])['id'] if body.get('contact_id') else None
+    return {'name': name, 'mode': mode, 'text_op': text_op, 'text_tokens': json.dumps(tokens) if text_op else None,
+            'direction': direction, 'amount_op': amount_op, 'amount': amt, 'account_ids': json.dumps(ids) if ids else None,
+            'target_account_id': target['id'], 'contact_id': cid, 'memo': text(body.get('memo')) or None,
+            'active': 0 if body.get('active') is False else 1}
+
+
+def get_rule(db, rid):
+    r = one(db.execute('SELECT * FROM bank_rules WHERE id=? AND archived=0', (as_int(rid, 'Rule'),)))
+    if not r:
+        raise ApiError('Rule not found', 404)
+    return load_rule(r)
+
+
+def regex_text(r):
+    try:
+        rx = rule_regex(r)
+    except ApiError:
+        return ''
+    return rx.pattern if rx else ''
+
+
+@route('GET', '/api/rules')
+def api_rules(db, q, body):
+    out = []
+    for r in db.execute('SELECT r.*, a.code AS target_code, a.name AS target_name, c.name AS contact_name, '
+                        '(SELECT COUNT(*) FROM journals WHERE rule_id=r.id) AS used FROM bank_rules r '
+                        'JOIN accounts a ON a.id=r.target_account_id LEFT JOIN contacts c ON c.id=r.contact_id '
+                        'WHERE r.archived=0 ORDER BY r.priority, r.id'):
+        r = load_rule(r)
+        r['regex'] = regex_text(r)
+        out.append(r)
+    return out
+
+
+@route('GET', '/api/rules/:rid')
+def api_rule_get(db, q, body, rid):
+    # Deleted (archived) rules can still be viewed, so a transaction's rule badge always leads somewhere.
+    r = one(db.execute('SELECT * FROM bank_rules WHERE id=?', (as_int(rid, 'Rule'),)))
+    if not r:
+        raise ApiError('Rule not found', 404)
+    r = load_rule(r)
+    r['regex'] = regex_text(r)
+    r['used'] = scalar(db, 'SELECT COUNT(*) FROM journals WHERE rule_id=?', (r['id'],))
+    return r
+
+
+@route('POST', '/api/rules')
+def api_rule_create(db, q, body):
+    p = rule_payload(db, body)
+    p['priority'] = (scalar(db, 'SELECT MAX(priority) FROM bank_rules WHERE archived=0') or 0) + 1
+    p['created_at'] = now()
+    cur = db.execute('INSERT INTO bank_rules(%s) VALUES (%s)' % (','.join(p), ','.join('?' * len(p))), list(p.values()))
+    audit(db, 'rule_create', 'rule', cur.lastrowid, {'name': p['name']})
+    return {'id': cur.lastrowid}
+
+
+@route('PUT', '/api/rules/:rid')
+def api_rule_update(db, q, body, rid):
+    r = get_rule(db, rid)
+    p = rule_payload(db, body)
+    db.execute('UPDATE bank_rules SET %s WHERE id=?' % ','.join(f'{k}=?' for k in p), list(p.values()) + [r['id']])
+    audit(db, 'rule_update', 'rule', r['id'], {'name': p['name']})
+    return {'id': r['id']}
+
+
+@route('DELETE', '/api/rules/:rid')
+def api_rule_delete(db, q, body, rid):
+    r = get_rule(db, rid)
+    if scalar(db, 'SELECT 1 FROM journals WHERE rule_id=?', (r['id'],)):
+        # Keep it (hidden) so transactions it created still show which rule made them.
+        db.execute('UPDATE bank_rules SET archived=1, active=0 WHERE id=?', (r['id'],))
+    else:
+        db.execute('DELETE FROM bank_rules WHERE id=?', (r['id'],))
+    audit(db, 'rule_delete', 'rule', r['id'], {'name': r['name']})
+    return {'ok': True}
+
+
+@route('POST', '/api/rules/reorder')
+def api_rules_reorder(db, q, body):
+    ids = [as_int(i, 'Rule') for i in body.get('ids') or []]
+    for n, rid in enumerate(ids, 1):
+        db.execute('UPDATE bank_rules SET priority=? WHERE id=? AND archived=0', (n, rid))
+    audit(db, 'rule_reorder', 'rule', None, {'ids': ids})
+    return {'ok': True}
+
+
+@route('POST', '/api/rules/test')
+def api_rules_test(db, q, body):
+    """Preview a draft rule: the regex it compiles to, whether a sample matches, and past statement lines it would catch."""
+    text_op = body.get('text_op') or None
+    rx = compile_rule_regex(text_op, (body.get('text_tokens') or []) if text_op else [])
+    amount_op = body.get('amount_op') or None
+    amt = body.get('amount')
+    if amount_op and (not isinstance(amt, int) or isinstance(amt, bool) or amt <= 0):
+        amount_op = None
+    draft = {'account_ids': [as_int(i) for i in body.get('account_ids') or []], 'direction': body.get('direction') or 'any',
+             'amount_op': amount_op, 'amount': amt}
+    sample = text(body.get('sample'))
+    res = {'regex': rx.pattern if rx else '', 'sample_match': bool(rx.search(sample)) if (rx and sample) else None,
+           'recent': []}
+    if not rx and not amount_op:
+        return res
+    for l in db.execute('SELECT l.account_id, l.amount, l.bank_text, j.date, a.name AS account_name FROM journal_lines l '
+                        'JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id '
+                        'WHERE l.bank_text IS NOT NULL ORDER BY l.id DESC LIMIT 500'):
+        if rule_matches(draft, rx, l['account_id'], l['amount'], l['bank_text']):
+            res['recent'].append(dict(l))
+            if len(res['recent']) >= 20:
+                break
+    return res
+
+
+CSV_MAP_COLS = ('date', 'desc', 'amt', 'dr', 'cr')
+
+
+def csv_mapping_json(m):
+    """Validate the column choices from the CSV import screen and return them as JSON to store on the account.
+    Each column is kept by position and by header name, so a bank that reorders its columns still maps."""
+    if not isinstance(m, dict):
+        raise ApiError('The column choices are not valid')
+    cols = m.get('cols') if isinstance(m.get('cols'), dict) else {}
+    out = {'head': bool(m.get('head')), 'df': 'mdy' if m.get('df') == 'mdy' else 'dmy',
+           'mode': 'split' if m.get('mode') == 'split' else 'single', 'flip': bool(m.get('flip')), 'cols': {}}
+    for k in CSV_MAP_COLS:
+        c = cols.get(k) if isinstance(cols.get(k), dict) else {}
+        i = c.get('i')
+        out['cols'][k] = {'i': i if isinstance(i, int) and not isinstance(i, bool) and -1 <= i < 500 else -1,
+                          'name': text(c.get('name'))[:100]}
+    return json.dumps(out)
+
+
+@route('POST', '/api/reconcile/import')
+def api_reconcile_import(db, q, body):
+    """Process statement lines from a CSV for one bank account. For each line, in order:
+    1. duplicate: same date, amount and statement text as a line already in this account, so it's skipped
+    2. rule: the first matching active rule creates a spend/receive transaction (rules win over hand-entered items;
+       a similar hand-entered item is reported as a possible double-up)
+    3. none: left for the screen to match against existing items, or for the user to enter."""
+    a = bank_account(db, req(body, 'account_id', 'Bank account'))
+    raw = body.get('lines')
+    if not isinstance(raw, list) or not raw:
+        raise ApiError('The statement has no lines to import')
+    if len(raw) > 5000:
+        raise ApiError('That statement is too big. Import 5,000 lines or fewer at a time.')
+    items = []
+    for i, l in enumerate(raw, 1):
+        if not isinstance(l, dict):
+            raise ApiError(f'Statement line {i} is not valid')
+        amt = as_cents(l.get('amount'), f'Statement line {i} amount')
+        if amt == 0:
+            raise ApiError(f'Statement line {i} has a zero amount')
+        items.append({'date': as_date(l.get('date'), f'Statement line {i} date'), 'amount': amt,
+                      'description': text(l.get('description'))[:500]})
+    if body.get('mapping') is not None:
+        db.execute('UPDATE accounts SET csv_map=? WHERE id=?', (csv_mapping_json(body['mapping']), a['id']))
+    seen = {}
+    for r in db.execute('SELECT l.id, COALESCE(l.bank_date, j.date) AS date, l.amount, l.bank_text, l.recon_id FROM journal_lines l '
+                        'JOIN journals j ON j.id=l.journal_id WHERE l.account_id=? AND l.bank_text IS NOT NULL '
+                        'ORDER BY l.id', (a['id'],)):
+        seen.setdefault((r['date'], r['amount'], norm_text(r['bank_text'])), []).append(r)
+    rules = []
+    for r in db.execute('SELECT * FROM bank_rules WHERE active=1 AND archived=0 ORDER BY priority, id'):
+        r = load_rule(r)
+        rules.append((r, rule_regex(r)))
+    manual = rows(db.execute('SELECT l.id, l.amount, j.date FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
+                             'WHERE l.account_id=? AND l.recon_id IS NULL AND l.bank_text IS NULL AND j.rule_id IS NULL',
+                             (a['id'],)))
+    # The other side of a transfer already in numbr (entered by hand, or made by a transfer rule while importing the
+    # other account's statement). A transfer rule claims it instead of creating the transfer a second time.
+    pending_transfers = rows(db.execute(
+        "SELECT l.id, l.amount, j.date, o.account_id AS other_id FROM journal_lines l JOIN journals j ON j.id=l.journal_id "
+        "JOIN journal_lines o ON o.journal_id=j.id AND o.id<>l.id AND o.role='bank' "
+        "WHERE l.account_id=? AND j.source='transfer' AND l.recon_id IS NULL AND l.bank_text IS NULL ORDER BY j.date, l.id",
+        (a['id'],)))
+    bank_ids = {r[0] for r in db.execute("SELECT id FROM accounts WHERE subtype='bank'")}
+    flagged = set()
+    lock = get_setting(db, 'lock_date')
+    out, counts = [], {}
+    for it in items:
+        res = {'status': 'none'}
+        k = (it['date'], it['amount'], norm_text(it['description']))
+        rule = next((r for r, rx in rules if rule_matches(r, rx, a['id'], it['amount'], it['description'])), None)
+        if seen.get(k):
+            # Already in numbr. Report which line, so the screen can still tick it if it isn't reconciled yet.
+            dup = seen[k].pop(0)
+            res = {'status': 'duplicate', 'line_id': dup['id'], 'reconciled': bool(dup['recon_id'])}
+        elif rule:
+            res = {'rule_id': rule['id'], 'rule_name': rule['name']}
+            transfer = rule['target_account_id'] in bank_ids
+            other = None
+            if transfer:
+                near = [p for p in pending_transfers if p['other_id'] == rule['target_account_id']
+                        and p['amount'] == it['amount'] and abs((D(p['date']) - D(it['date'])).days) <= 7]
+                other = min(near, key=lambda p: abs((D(p['date']) - D(it['date'])).days)) if near else None
+            if other:
+                # Already in numbr from the other account's side: treat as a duplicate, and keep this statement text
+                # on it so the next import of this statement skips it.
+                pending_transfers.remove(other)
+                flagged.add(other['id'])  # so it isn't also reported as a possible double-up
+                db.execute('UPDATE journal_lines SET bank_text=?, bank_date=? WHERE id=?',
+                           (it['description'] or None, it['date'], other['id']))
+                res = {'status': 'duplicate', 'line_id': other['id'], 'reconciled': False, 'transfer': True}
+            elif lock and it['date'] <= lock:
+                res.update(status='locked')
+            else:
+                desc = it['description'] or rule['name']
+                memo = rule['memo'] or desc
+                lines = [{'account_id': a['id'], 'amount': it['amount'], 'role': 'bank', 'description': memo,
+                          'bank_text': it['description'] or None, 'bank_date': it['date']},
+                         {'account_id': rule['target_account_id'], 'amount': -it['amount'], 'description': desc,
+                          'role': 'bank' if transfer else None}]
+                source = 'transfer' if transfer else 'spend' if it['amount'] < 0 else 'receive'
+                db.execute('SAVEPOINT rule_line')
+                try:
+                    jid = post_journal(db, it['date'], source, lines, memo=memo, contact_id=rule['contact_id'])
+                    db.execute('UPDATE journals SET rule_id=?, rule_mode=? WHERE id=?', (rule['id'], rule['mode'], jid))
+                    db.execute('RELEASE rule_line')
+                except ApiError as e:
+                    db.execute('ROLLBACK TO rule_line')
+                    db.execute('RELEASE rule_line')
+                    res.update(status='error', error=str(e))
+                else:
+                    lid = scalar(db, "SELECT id FROM journal_lines WHERE journal_id=? AND role='bank' AND account_id=?",
+                                 (jid, a['id']))
+                    res.update(status=rule['mode'], journal_id=jid, line_id=lid)
+                    near = [m for m in manual if m['id'] not in flagged and m['amount'] == it['amount']
+                            and abs((D(m['date']) - D(it['date'])).days) <= 7]
+                    if near:
+                        m = min(near, key=lambda m: abs((D(m['date']) - D(it['date'])).days))
+                        flagged.add(m['id'])
+                        res.update(possible_dup_line_id=m['id'], possible_dup_date=m['date'])
+        counts[res['status']] = counts.get(res['status'], 0) + 1
+        out.append(res)
+    audit(db, 'bank_import', 'account', a['id'], {'lines': len(items), **counts})
+    return {'results': out, 'counts': counts}
 
 
 # ----------------------------------------------------------------------------
