@@ -2694,15 +2694,14 @@ def actuals_by_month(db, frm, to):
 
 
 def history_figures(hist, window):
-    """(average per month, last month's value, that month) for one account's actuals."""
+    """(average per month, last month's value, that month) for one account's actuals. "Last month" is
+    always the final month of the history window (the month before this one), even when it is $0."""
     if not window:
         return 0, 0, None
     months = months_between(*window)
     avg = round_div(sum(hist.get(m, 0) for m in months), len(months))
-    for m in reversed(months):
-        if hist.get(m):
-            return avg, hist[m], m
-    return avg, 0, None
+    last = months[-1]
+    return avg, hist.get(last, 0), last
 
 
 def budget_config(method, raw, months):

@@ -779,9 +779,10 @@ try:
     for aid, vals in actual.items():
         if aid not in ba:
             continue
-        exp_last = next((v for v in reversed(vals) if v), 0)
+        exp_last = vals[-1]  # the window's final month, even when it is $0
         a = ba[aid]
-        if a['average'] != half_away(sum(vals), len(hm)) or a['last'] != exp_last or a['method'] != 'average':
+        if (a['average'] != half_away(sum(vals), len(hm)) or a['last'] != exp_last
+                or a['last_month'] != h_to or a['method'] != 'average'):
             ok_hist = False
             print('  history mismatch', a, vals)
     check(ok_hist and actual, 'builder average and last month match the P&L for the history window (shared cut included)')
