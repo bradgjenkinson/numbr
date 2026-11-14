@@ -1852,7 +1852,9 @@ function wireMonthRange(key, redraw) {
 
 async function reportPL() {
   const r = monthRangeState('pl');
-  const d = await GET(`/api/reports/pl?from=${r.from}&to=${r.to}`);
+  let d = await GET(`/api/reports/pl?from=${r.from}&to=${r.to}`);
+  // Budget vs actual needs a budget for every month (budget_cover); otherwise the actual P&L shows.
+  if (r.view && r.view !== 'actual' && d.budget_cover.available) return plBudgetView(await GET(`/api/reports/pl?from=${r.from}&to=${r.to}&budget=1`), r);
   const multi = d.months.length > 1;
   const cols = d.months.length + (multi ? 1 : 0);
   const head = `<tr><th></th>${multi ? d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('') : ''}<th class="num">${multi ? 'Total' : monthLabel(d.months[0])}</th></tr>`;
@@ -1873,11 +1875,11 @@ async function reportPL() {
   });
   rowsHtml += valsRow('Net profit', d.net_profit, d.net_profit_total, 'grand');
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
-    `${monthRangeFilters('pl', hasGroups)}
-    <div class="report">${reportHead('Profit &amp; Loss', d.months.length === 1 ? monthLong(d.months[0]) : `${monthLong(d.months[0])} to ${monthLong(d.months[d.months.length - 1])}`)}
+    `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, 'actual')}
+    <div class="report">${reportHead('Profit &amp; Loss', plPeriod(d))}
       ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
-  wireMonthRange('pl', reportPL);
+  wireMonthRange('pl', reportPL); wirePlView(r);
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Profit & Loss'], [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
     d.sections.forEach(s => {
@@ -1887,6 +1889,116 @@ async function reportPL() {
     });
     out.push(['Net profit', ...(multi ? d.net_profit.map(c2d) : []), c2d(d.net_profit_total)]);
     download(`Profit-and-Loss-${r.from}-to-${r.to}.csv`, out);
+  };
+}
+
+// ---- Budget vs actual (P&L). Budgets are planning figures only; this compares them with the ledger.
+// Two views: 'budget' (YTD accumulative: one set of totals for the range) and 'monthly' (month by month).
+const PL_VIEWS = { actual: 'Actual', budget: 'YTD accumulative', monthly: 'Month by month' };
+const plPeriod = d => d.months.length === 1 ? monthLong(d.months[0]) : `${monthLong(d.months[0])} to ${monthLong(d.months[d.months.length - 1])}`;
+const monthSpan = ms => ms.length === 1 ? monthLabel(ms[0]) : `${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}`;
+// The view switch. The budget views are only offered when every month has a budget.
+function plViewSwitch(d, view) {
+  const c = d.budget_cover;
+  return `<div class="seg-row no-print"><div class="segbtn" role="group" aria-label="Report view">
+      ${Object.entries(PL_VIEWS).map(([k, l]) => `<button data-view="${k}" class="${view === k ? 'on' : ''}" aria-pressed="${view === k}"
+        ${k === 'actual' || c.available ? '' : 'disabled title="There is no budget for some of these months"'}>${l}</button>`).join('')}</div>
+    ${!c.available ? `<span class="muted seg-hint">No budget for ${monthSpan(c.missing)}. Choose months that have a budget, or <a href="#/budgets/new">build a budget</a>.</span>` : ''}</div>`;
+}
+function wirePlView(r) { $$('[data-view]').forEach(b => b.onclick = () => { r.view = b.dataset.view; reportPL(); }); }
+
+// dir: +1 when more is better (income, profit), -1 when less is better (costs).
+const PL_DIR = { income: 1, cos: -1, expense: -1 };
+const varPct = (a, b) => (b ? (a - b) / Math.abs(b) * 100 : null);
+const pctTxt = p => `${p > 0 ? '+' : p < 0 ? '−' : ''}${Math.abs(p).toFixed(1)}%`;
+const favClass = (a, b, dir) => (a === b ? '' : (a - b) * dir > 0 ? 'good' : 'bad');
+// Whole dollars for the compact month grid; negatives in brackets like the other reports.
+const dollars = c => { const s = Math.round(Math.abs(c) / 100).toLocaleString('en-AU'); return c < 0 ? `(${s})` : s; };
+// Actual as a share of budget: the marker is the budget, the fill runs to 140%.
+function vbar(a, b, dir) {
+  if (b <= 0) return '';
+  const ratio = a / b, w = Math.max(0, Math.min(ratio, 1.4)) / 1.4 * 100;
+  return `<div class="vbar" title="${Math.round(ratio * 100)}% of budget"><i class="${favClass(a, b, dir) || 'even'}" style="width:${w.toFixed(1)}%"></i><b></b></div>`;
+}
+function varCells(a, b, dir) {
+  const cls = favClass(a, b, dir), p = varPct(a, b);
+  const pct = p === null ? (a ? '<span class="pill">Not budgeted</span>' : '–') : pctTxt(p);
+  return `<td class="num var ${cls}">${fmt(a - b, { paren: true, dashZero: true })}</td><td class="num var ${cls}">${pct}</td><td class="vb">${vbar(a, b, dir)}</td>`;
+}
+// Month by month, laid out like a budget spreadsheet: Budget | Actual | Difference for each month.
+// Whole dollars; zero shows blank. Difference is signed so positive is good (spent less, or earned more than
+// planned) and works from the rounded figures shown, so the three columns always agree. Worse than budget is red.
+function mmCells(a, b, dir, extra = '') {
+  const ra = Math.round(a / 100), rb = Math.round(b / 100), diff = (ra - rb) * dir, p = varPct(a, b);
+  const z = c => (c ? dollars(c) : '');
+  const tip = `Budget ${$fmt(b)}&#10;Actual ${$fmt(a)}&#10;${a === b ? 'On budget' : `${$fmt(Math.abs(a - b))} ${(a - b) * dir > 0 ? 'better' : 'worse'} than budget${p === null ? ' (not budgeted)' : ` (${pctTxt(p)})`}`}`;
+  return `<td class="num mm mb${extra}">${z(b)}</td><td class="num mm${extra}">${z(a)}</td>` +
+    `<td class="num mm md${diff < 0 ? ' bad' : ''}${extra}" title="${tip}">${diff ? `${diff < 0 ? '−' : ''}${Math.abs(diff).toLocaleString('en-AU')}` : ''}</td>`;
+}
+
+async function plBudgetView(d, r) {
+  const monthly = r.view === 'monthly', n = d.months.length;
+  const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
+  // Rows carry [actuals..., budgets...] (YTD view: [actual total, budget total]) so groupTree adds
+  // group subtotals for both at once.
+  const pack = x => (monthly ? [...x.values, ...x.budget] : [x.total, x.budget_total]);
+  const lines = s => treeLines(groupTree(s.type, s.rows.map(x => ({ ...x, values: pack(x) }))), hasGroups && !!r.groupsOnly);
+  const k = monthly ? n : 1;
+  const split = v => [v.slice(0, k), v.slice(k)];
+  const sum = v => v.reduce((t, x) => t + x, 0);
+  // A line of the report from per-month (or single) actual and budget arrays.
+  const row = (label, A, B, dir, cls = '', href = '', tdAttr = '') => {
+    const cells = monthly ? A.map((a, i) => mmCells(a, B[i], dir)).join('') + (n > 1 ? mmCells(sum(A), sum(B), dir, ' mtot') : '')
+      : `${repCell(A[0])}${repCell(B[0])}${varCells(A[0], B[0], dir)}`;
+    return `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${cells}</tr>`;
+  };
+  const tot = (s, which) => (monthly ? s[which === 'a' ? 'totals' : 'budget_totals'] : [s[which === 'a' ? 'total' : 'budget_total']]);
+  const prof = (key) => (monthly ? [d[key], d[`${key}_budget`]] : [[d[`${key}_total`]], [d[`${key}_budget_total`]]]);
+  const cols = monthly ? 3 * (n + (n > 1 ? 1 : 0)) : 5;
+  let rowsHtml = '';
+  d.sections.forEach(s => {
+    if (!s.rows.length && s.type === 'cos') return;
+    rowsHtml += repLabelRow(s.title, cols, 'sechead');
+    lines(s).forEach(l => {
+      const href = l.kind === 'row' ? `#/register/${l.row.account_id}?from=${d.from}&to=${d.to}` : '';
+      rowsHtml += row(esc(l.kind === 'row' ? l.row.name : l.group.name), ...split(l.kind === 'row' ? l.row.values : l.values),
+        PL_DIR[s.type], l.kind === 'row' ? 'sub' : `sub ${headClass(l)}`, href, treeCell(l, 28));
+    });
+    if (!s.rows.length) rowsHtml += repLabelRow('None', cols, 'sub', 'muted');
+    rowsHtml += row(`Total ${s.title.toLowerCase()}`, tot(s, 'a'), tot(s, 'b'), PL_DIR[s.type], 'total');
+    if (s.type === 'cos' && s.rows.length) rowsHtml += row('Gross profit', ...prof('gross_profit'), 1, 'total');
+  });
+  rowsHtml += row('Net profit', ...prof('net_profit'), 1, 'grand');
+  const head = monthly
+    ? `<tr><th rowspan="2"></th>${d.months.map(m => `<th colspan="3" class="mgrp">${monthLabel(m)}</th>`).join('')}${n > 1 ? '<th colspan="3" class="mgrp mtot">Total</th>' : ''}</tr>
+       <tr>${'<th class="num mb">Budget</th><th class="num">Actual</th><th class="num">Difference</th>'.repeat(n)}${n > 1 ? '<th class="num mb mtot">Budget</th><th class="num mtot">Actual</th><th class="num mtot">Difference</th>' : ''}</tr>`
+    : `<tr><th></th><th class="num">Actual</th><th class="num">Budget</th><th class="num">Variance</th><th class="num">Var %</th><th class="vb">Against budget</th></tr>`;
+  const names = d.budget_cover.budgets.map(b => b.name).join(' and ');
+  const title = monthly ? 'Budget vs Actual, Month by Month' : 'Budget vs Actual, YTD Accumulative';
+  page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
+    `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, r.view)}
+    <div class="report bva${monthly ? ' bva-mm' : ''}">${reportHead(title, `${plPeriod(d)} · compared with ${esc(names)}`)}
+      ${monthly ? `<div class="mm-key no-print">Whole dollars. A positive difference is better than budget (spent less, or earned more). <span class="bad">Red</span> is worse than budget: over spent, or income short. Hover a difference for the exact figures.</div>` : ''}
+      ${repTable(head, rowsHtml)}</div>`);
+  $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
+  wireMonthRange('pl', reportPL); wirePlView(r);
+  $('#x-csv').onclick = () => {
+    const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Actual`, `${m} Budget`, `${m} Variance`]), 'Total Actual', 'Total Budget', 'Total Variance']
+      : ['Account', 'Actual', 'Budget', 'Variance', 'Variance %'];
+    const out = [[S.settings.business_name], [title], [`${plPeriod(d)}, compared with ${names}`], [], hdr];
+    const line = (label, A, B) => {
+      if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(a), c2d(B[i]), c2d(a - B[i])]), c2d(sum(A)), c2d(sum(B)), c2d(sum(A) - sum(B))]);
+      else { const p = varPct(A[0], B[0]); out.push([label, c2d(A[0]), c2d(B[0]), c2d(A[0] - B[0]), p === null ? '' : p.toFixed(1)]); }
+    };
+    d.sections.forEach(s => {
+      if (!s.rows.length && s.type === 'cos') return;
+      out.push([s.title]);
+      lines(s).forEach(l => line(l.kind === 'row' ? l.row.name : l.group.name, ...split(l.kind === 'row' ? l.row.values : l.values)));
+      line(`Total ${s.title}`, tot(s, 'a'), tot(s, 'b'));
+      if (s.type === 'cos' && s.rows.length) line('Gross profit', ...prof('gross_profit'));
+    });
+    line('Net profit', ...prof('net_profit'));
+    download(`Budget-vs-Actual-${monthly ? 'monthly' : 'YTD'}-${r.from}-to-${r.to}.csv`, out);
   };
 }
 

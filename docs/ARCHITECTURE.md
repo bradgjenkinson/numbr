@@ -100,6 +100,8 @@ The builder has three steps: year, a method per account, review. The builder dat
 
 All the maths is server-side (`POST /budgets/preview` while building, the same code on `POST /budgets`). Saving stores the choices in `budget_methods` and the resulting figures in `budget_amounts`. **From then on the figures are only changed by hand** (`PUT /budgets/:id`), and the choices are never re-applied. They exist so the next year's builder starts the same way: it takes the latest earlier budget's choices and rolls them forward (`roll_config()`: monthly and yearly segments move by the gap in months; weekly/fortnightly start dates move to the same point in the original series, keeping the weekday; typed months are copied as typed, not as later edited). Accounts with no earlier choice default to `average` when they have history, else `none`. Deleting a budget removes its choices too. An account in a budget can't be deleted (archive it); one only marked `none` can.
 
+**Budget vs actual.** The P&L has a view switch: Actual, YTD accumulative and Month by month. Every `GET /reports/pl` response carries `budget_cover` (`available`, `missing` months, the `budgets` that cover the range); the two budget views are only offered when every month in the range has a budget, which may mean two financial years' budgets together. With `budget=1` each account row also carries `budget` (per month) and `budget_total`, sections carry `budget_totals`/`budget_total`, and the response adds `gross_profit_budget(_total)` and `net_profit_budget(_total)`. Accounts with a budget but no actuals are included. Budget figures come straight from `budget_amounts`; the actual figures are identical to the plain P&L. YTD accumulative shows one set of totals for the range (actual, budget, variance, variance %, a bar against budget). Month by month is laid out like a budget spreadsheet: Budget, Actual and Difference columns under each month (and a range Total), in whole dollars with zeros left blank. The difference is signed so positive is better than budget (actual less budget for income, budget less actual for costs) and is worked from the rounded figures shown; worse than budget is red.
+
 ## API reference
 
 All endpoints are under `/api`, take and return JSON, and require header `X-Ledger: 1`. Money is integer cents.
@@ -122,7 +124,7 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `POST /reconcile/import` | Statement lines for one account: skip duplicates, apply bank rules (`{account_id, lines: [{date, amount, description}], mapping?}`; `mapping` = the column choices, saved on the account and returned as `csv_map` in `/state`) |
 | `GET/POST /rules`, `GET/PUT/DELETE /rules/:id`, `POST /rules/reorder`, `POST /rules/test` | Bank rules; delete archives a rule that has created transactions; test returns the regex, a sample match and recent matching lines |
 | `GET/POST /recurring`, `GET/PUT/DELETE /recurring/:id`, `POST /recurring/:id/skip`, `POST /recurring/run` | Recurring templates |
-| `GET /reports/pl?from=YYYY-MM&to=YYYY-MM` | Profit & Loss by month |
+| `GET /reports/pl?from=YYYY-MM&to=YYYY-MM[&budget=1]` | Profit & Loss by month, with `budget_cover`. `budget=1` adds budget figures and fails (400) unless every month has a budget |
 | `GET /reports/bs?from=YYYY-MM&to=YYYY-MM` | Balance sheet, one month-end column per month (max 36). Older form `?to=YYYY-MM&count=N` still works |
 | `GET /reports/aged?kind=sale\|bill&as_at=` | Aged receivables/payables |
 | `GET /reports/tb?as_at=` | Trial balance |

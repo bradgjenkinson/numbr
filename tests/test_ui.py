@@ -402,6 +402,42 @@ try:
         assert '1,330.00' in page.inner_text(f'tr[data-a="{rent}"]')
         assert len(errors) == n_err, errors
 
+        # budget vs actual on the P&L: YTD accumulative totals, then month by month; refused for months with no budget
+        bfy = page.evaluate("fyStartYM(S.today)")
+        bend = page.evaluate(f"addMonthsYM('{bfy}', 11)")
+        page.goto(URL + '#/reports/pl'); page.wait_for_selector('[data-view="budget"]')
+        page.fill('#f-from', bfy); page.dispatch_event('#f-from', 'change'); page.wait_for_timeout(300)
+        page.fill('#f-to', bend); page.dispatch_event('#f-to', 'change'); page.wait_for_selector('[data-view="budget"]')
+        assert not page.is_disabled('[data-view="budget"]') and not page.is_disabled('[data-view="monthly"]')
+        page.click('[data-view="budget"]'); page.wait_for_selector('.report.bva')
+        assert 'YTD Accumulative' in page.inner_text('.report-title') and 'Rent' in page.inner_text('.rep-grid')
+        want = page.evaluate("(async () => { const d = await GET(`/api/reports/pl?from=" + bfy + "&to=" + bend + "&budget=1`); return [fmt(d.net_profit_total, {paren:true, dashZero:true}), fmt(d.net_profit_budget_total, {paren:true, dashZero:true}), d.net_profit, d.net_profit_budget]; })()")
+        np_cells = page.locator('.rep-grid tr.grand td')
+        assert [np_cells.nth(1).inner_text(), np_cells.nth(2).inner_text()] == want[:2], want
+        shot(page, '22-budget-vs-actual-ytd')
+        page.click('[data-view="monthly"]'); page.wait_for_selector('.bva-mm td.mm')
+        # each month is Budget | Actual | Difference in whole dollars; difference is positive when better than budget
+        np_cells = page.locator('.rep-grid tr.grand td.mm')
+        assert np_cells.count() == 39, np_cells.count()
+        dol = lambda c: '' if not round(c / 100) else (f'({abs(round(c / 100)):,})' if c < 0 else f'{round(c / 100):,}')
+        for i in range(12):
+            bt, ac, df = (np_cells.nth(3 * i + k).inner_text() for k in range(3))
+            diff = round(want[2][i] / 100) - round(want[3][i] / 100)
+            assert (bt, ac) == (dol(want[3][i]), dol(want[2][i])), (i, bt, ac)
+            assert df == ('' if not diff else f"{'−' if diff < 0 else ''}{abs(diff):,}"), (i, df, diff)
+            assert ('bad' in np_cells.nth(3 * i + 2).get_attribute('class')) == (diff < 0)
+        exp_row = page.locator('.rep-grid tr.total', has_text='Total expenses').locator('td.mm')
+        eb, ea, ed = (exp_row.nth(k).inner_text() for k in range(3))
+        assert ed == '' or (ed.startswith('−') == (int(ea.replace(',', '') or 0) > int(eb.replace(',', '') or 0))), (eb, ea, ed)
+        assert 'Month by Month' in page.inner_text('.report-title')
+        shot(page, '22b-budget-vs-actual-monthly')
+        nxt = page.evaluate(f"addMonthsYM('{bend}', 2)")
+        page.fill('#f-to', nxt); page.dispatch_event('#f-to', 'change'); page.wait_for_selector('.seg-hint')
+        assert page.is_disabled('[data-view="budget"]') and page.is_disabled('[data-view="monthly"]') and page.locator('.report.bva').count() == 0
+        assert 'No budget for' in page.inner_text('.seg-hint')
+        page.click('[data-view="actual"]')
+        assert len(errors) == n_err, errors
+
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
         for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/partner', '#/banking/transfer', '#/dashboard']:

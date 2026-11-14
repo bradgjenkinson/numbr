@@ -248,6 +248,51 @@ td.bcell input.changed { background: #fff8e1; border-color: #f0d9a0; }
 td.bcell input.bad { border-color: var(--bad); color: var(--bad); }
 .print-only { display: none; }
 
+/* Budget vs actual (P&L) */
+.seg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: -4px 0 16px; }
+.seg-hint { font-size: 13px; }
+.segbtn { display: inline-flex; background: var(--line-2); border-radius: 8px; padding: 3px; gap: 2px; }
+.segbtn button { border: 0; background: none; color: var(--ink-2); padding: 6px 14px; border-radius: 6px; font-weight: 500; }
+.segbtn button:hover:not(:disabled) { color: var(--ink); }
+.segbtn button.on { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(15,23,38,.12), 0 0 0 1px var(--line); }
+.segbtn.small button { padding: 3px 10px; font-size: 12.5px; }
+td.var.good { color: var(--good); }
+td.var.bad { color: var(--bad); }
+td.vb, th.vb { width: 150px; min-width: 120px; }
+th.vb { text-align: left; font-size: 12px; }
+/* Fill = actual as a share of budget, up to 140%. The dark tick at 1/1.4 of the width is the budget. */
+.vbar { position: relative; width: 130px; height: 7px; background: var(--line-2); border-radius: 99px; }
+.vbar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--ink-3); }
+.vbar i.good { background: var(--good); }
+.vbar i.bad { background: var(--bad); }
+.vbar i.even { background: var(--accent); }
+.vbar b { position: absolute; left: 71.43%; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
+tr.total .vbar, tr.grand .vbar { height: 9px; }
+/* Month by month: Budget | Actual | Difference under each month, like a budget spreadsheet.
+   Account column and both header rows stay put while the months scroll sideways. */
+.bva-mm { padding: 20px 18px; }
+.bva-mm .rep-grid table { font-size: 12.5px; }
+.bva-mm .rep-grid td, .bva-mm .rep-grid th { padding: 4px 8px; white-space: nowrap; }
+.bva-mm .rep-grid thead th { line-height: 18px; font-size: 11px; }
+.bva-mm .rep-grid thead tr + tr th { top: 26px; }
+/* The second header row's first cell is a Budget heading, not the account column: don't pin it left. */
+.bva-mm .rep-grid thead tr + tr > th:first-child { left: auto; min-width: 0; z-index: 2; box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line); }
+.bva-mm .rep-grid tr > :first-child { min-width: 170px; max-width: 220px; white-space: normal; }
+th.mgrp { text-align: center; color: var(--ink); font-size: 12px; box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line-2) !important; }
+td.mm { font-variant-numeric: tabular-nums; min-width: 58px; }
+td.mb, th.mb { box-shadow: inset 1px 0 var(--line); }
+.rep-grid thead th.mb { box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line); }
+td.md { font-weight: 600; }
+td.md.bad { color: var(--bad); background-color: var(--bad-soft); }
+td.mtot, th.mtot { background-color: #f6f8fb; }
+.bva-mm .rep-grid tr.total td.mtot, .bva-mm .rep-grid tr.grand td.mtot { background-color: var(--total-bg); }
+.mm-key .bad { color: var(--bad); font-weight: 600; }
+/* Budget vs actual (both views): value columns centred. */
+.bva .rep-grid td.num, .bva .rep-grid th.num, .bva .rep-grid th.vb { text-align: center; }
+.bva .rep-grid td.vb .vbar { margin: 0 auto; }
+.mm-key { font-size: 12px; color: var(--ink-2); margin: -8px 0 10px; text-align: center; }
+@media (max-width: 700px) { td.vb, th.vb { display: none; } }
+
 /* Account picker: a text box over the (invisible) account <select>, with a filtered list.
    The list is position:fixed (placed by JS) so scrolling tables and modals don't clip it. */
 .acct-pick-wrap { position: relative; display: block; }
@@ -274,4 +319,6 @@ td.bcell input.bad { border-color: var(--bad); color: var(--bad); }
   .rep-grid tr > :first-child { position: relative; box-shadow: none; }
   td.bcell input { display: none; }
   .print-only { display: inline; }
+  .vbar, .vbar *, td.mm { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bva-mm .rep-grid table { font-size: 10px; }
 }

@@ -2447,23 +2447,70 @@ def api_report_pl(db, q, body):
         if typ in PL_TYPES:
             data.setdefault(aid, [0] * len(months))[idx[date[:7]]] += SIGN[typ] * amt
     n = len(months)
+    cover = budget_cover(db, months)
+    bud = None
+    if q.get('budget') == '1':
+        if not cover['available']:
+            raise ApiError(f'No budget covers {month_span(cover["missing"])}. Build one under Budgets, '
+                           'or choose months that have a budget.')
+        # Budgets are planning figures in natural sign: read straight from budget_amounts, never the ledger.
+        bud = {}
+        marks = ','.join('?' * n)
+        for aid, m, amt in db.execute(f'SELECT account_id, month, amount FROM budget_amounts WHERE month IN ({marks})', months):
+            if aid in accts:
+                bud.setdefault(aid, [0] * n)[idx[m]] += amt
 
     def section(typ, title):
         rs = []
         for aid, a in accts.items():
-            if a['type'] == typ and aid in data and any(data[aid]):
-                vals = data[aid]
-                rs.append({'account_id': aid, 'code': a['code'], 'name': a['name'], 'values': vals, 'total': sum(vals),
-                           'group_id': a['group_id']})
+            if a['type'] != typ:
+                continue
+            vals = data.get(aid) or [0] * n
+            bvals = (bud or {}).get(aid) or [0] * n
+            if not any(vals) and not any(bvals):
+                continue
+            r = {'account_id': aid, 'code': a['code'], 'name': a['name'], 'values': vals, 'total': sum(vals),
+                 'group_id': a['group_id']}
+            if bud is not None:
+                r['budget'], r['budget_total'] = bvals, sum(bvals)
+            rs.append(r)
         tot = [sum(r['values'][i] for r in rs) for i in range(n)]
-        return {'type': typ, 'title': title, 'rows': rs, 'totals': tot, 'total': sum(tot)}
+        s = {'type': typ, 'title': title, 'rows': rs, 'totals': tot, 'total': sum(tot)}
+        if bud is not None:
+            bt = [sum(r['budget'][i] for r in rs) for i in range(n)]
+            s['budget_totals'], s['budget_total'] = bt, sum(bt)
+        return s
 
     inc, cos, exp = section('income', 'Income'), section('cos', 'Cost of Sales'), section('expense', 'Expenses')
     gp = [inc['totals'][i] - cos['totals'][i] for i in range(n)]
     np_ = [gp[i] - exp['totals'][i] for i in range(n)]
-    return {'months': months, 'from': start, 'to': end, 'sections': [inc, cos, exp],
-            'gross_profit': gp, 'gross_profit_total': sum(gp), 'net_profit': np_, 'net_profit_total': sum(np_),
-            'business_name': get_setting(db, 'business_name')}
+    out = {'months': months, 'from': start, 'to': end, 'sections': [inc, cos, exp],
+           'gross_profit': gp, 'gross_profit_total': sum(gp), 'net_profit': np_, 'net_profit_total': sum(np_),
+           'business_name': get_setting(db, 'business_name'), 'budget_cover': cover}
+    if bud is not None:
+        bgp = [inc['budget_totals'][i] - cos['budget_totals'][i] for i in range(n)]
+        bnp = [bgp[i] - exp['budget_totals'][i] for i in range(n)]
+        out.update({'gross_profit_budget': bgp, 'gross_profit_budget_total': sum(bgp),
+                    'net_profit_budget': bnp, 'net_profit_budget_total': sum(bnp)})
+    return out
+
+
+def budget_cover(db, months):
+    """Which budgets cover these months, and which months have none. Budget vs actual needs every month covered."""
+    want, used, covered = set(months), [], set()
+    for b in rows(db.execute('SELECT id, name, fy_start FROM budgets ORDER BY fy_start')):
+        hit = want & set(budget_months(b['fy_start']))
+        if hit:
+            covered |= hit
+            used.append({'id': b['id'], 'name': b['name'], 'label': fy_label(b['fy_start'])})
+    missing = [m for m in months if m not in covered]
+    return {'available': not missing, 'missing': missing, 'budgets': used}
+
+
+def month_span(months):
+    """'Jul 2027' or 'Jul 2027 to Sep 2027' for error messages (assumes a run of months)."""
+    lbl = lambda m: month_start(m).strftime('%b %Y')
+    return lbl(months[0]) if len(months) == 1 else f'{lbl(months[0])} to {lbl(months[-1])}'
 
 
 @route('GET', '/api/reports/bs')

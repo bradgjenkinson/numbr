@@ -894,6 +894,33 @@ try:
     call('DELETE', f'/api/accounts/{not_budgeted}')
     check(not_budgeted not in [a['id'] for a in call('GET', '/api/accounts')], 'an unused account marked not budgeted can be deleted')
 
+    # budget vs actual on the P&L: only when every month has a budget; actual figures never change
+    rng = f'from={fy}&to={fy_months[-1]}'
+    plain = call('GET', f'/api/reports/pl?{rng}')
+    check(plain['budget_cover']['available'] and plain['budget_cover']['budgets'][0]['id'] == bid,
+          'P&L says a budget covers the financial year')
+    check('net_profit_budget' not in plain, 'plain P&L carries no budget figures')
+    bva = call('GET', f'/api/reports/pl?{rng}&budget=1')
+    cur = call('GET', f'/api/budgets/{bid}')
+    want = {r['account_id']: r for s in cur['sections'] for r in s['rows']}
+    got = {r['account_id']: r for s in bva['sections'] for r in s['rows']}
+    check(all(got[a]['budget'] == w['values'] for a, w in want.items() if any(w['values'])),
+          'budget vs actual shows each account\'s budget by month')
+    check(bva['net_profit_budget'] == cur['net_profit'] and bva['net_profit_budget_total'] == cur['net_profit_total'],
+          'budget vs actual net profit budget matches the budget')
+    check(bva['net_profit'] == plain['net_profit'] and bva['net_profit_total'] == plain['net_profit_total'],
+          'budget vs actual leaves the actual figures unchanged')
+    check(in_budget in got and in_budget not in {r['account_id'] for s in plain['sections'] for r in s['rows']},
+          'a budgeted account with no actuals shows only in budget vs actual')
+    check(all(s['budget_total'] == sum(s['budget_totals']) for s in bva['sections']), 'section budget totals add up')
+    one_m = call('GET', f'/api/reports/pl?from={fy_months[2]}&to={fy_months[2]}&budget=1')
+    check(one_m['net_profit_budget'] == [cur['net_profit'][2]], 'a single month compares with that month\'s budget')
+    span = call('GET', f'/api/reports/pl?from={fy_months[10]}&to={ym_add(fy, 13)}')
+    check(not span['budget_cover']['available'] and span['budget_cover']['missing'] == [ym_add(fy, 12), ym_add(fy, 13)],
+          f"months without a budget are listed ({span['budget_cover']})")
+    r = call('GET', f'/api/reports/pl?from={fy_months[10]}&to={ym_add(fy, 13)}&budget=1', expect_ok=False)
+    check('No budget covers' in r.get('error', ''), 'budget vs actual is refused when a month has no budget')
+
     tb_ = call('GET', '/api/reports/tb')
     check(tb_['debit'] == tb_['credit'], 'TB still balances with a budget')
     check(call('GET', f'/api/reports/bs?to={td.isoformat()[:7]}&count=1')['balanced'], 'BS still balances with a budget')

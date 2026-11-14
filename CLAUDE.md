@@ -52,7 +52,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 
 - **Bank rules:** `bank_rules` categorise statement lines in `POST /api/reconcile/import` (pipeline: duplicate → rule → client-side match). A rule creates an ordinary `spend`/`receive` journal (or a `transfer` when its target is a bank account) tagged `journals.rule_id`/`rule_mode`; auto-applied lines are only *ticked*, never reconciled without the statement balance. A transfer rule claims an existing unreconciled transfer line instead of creating the transfer twice. `journal_lines.bank_text` + `bank_date` are the duplicate key (statement date + amount + normalised text); keep them when a journal is edited. Users build patterns from parts; `compile_rule_regex()` makes the regex, never accept raw regex from the client.
 
-- **Budgets:** `budgets` (one per financial year), `budget_methods` (the builder's choice per account) and `budget_amounts` (monthly natural-sign cents). Planning data only: never in journals or ledger maths. History for the builder comes through `report_lines()`. Choices are stored only to default next year's builder (`roll_config()`); a built budget's figures change only by hand (`PUT /api/budgets/:id`) and are never recalculated from the choices. P&L accounts only.
+- **Budgets:** `budgets` (one per financial year), `budget_methods` (the builder's choice per account) and `budget_amounts` (monthly natural-sign cents). Planning data only: never in journals or ledger maths. History for the builder comes through `report_lines()`. Choices are stored only to default next year's builder (`roll_config()`); a built budget's figures change only by hand (`PUT /api/budgets/:id`) and are never recalculated from the choices. P&L accounts only. Budget vs actual on the P&L (`budget=1` on `/api/reports/pl`, `plBudgetView` in `app.js`) is offered only when every month in the range has a budget.
 
 ### Invariants the code enforces (keep them)
 
@@ -103,4 +103,3 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 - Email or PDF invoices (print-to-PDF works today)
 - Credit notes (current workaround: void and reissue)
 - Bank rules that split one line across several accounts
-- Budget vs actual on the P&L
