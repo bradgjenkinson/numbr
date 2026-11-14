@@ -410,6 +410,24 @@ try:
         shot(page, '21c-budget-yearly-spread')
         page.click('#oa-ok'); page.wait_for_timeout(600)
         assert 'spread over Wednesdays for the year' in page.inner_text(irow), page.inner_text(irow)
+        # year totals sit above the accounts, match the preview, and stay in view when scrolled to the bottom
+        bar = page.locator('#bb-totals')
+        page.evaluate('window.scrollTo(0, 0)'); page.wait_for_timeout(200)
+        assert bar.bounding_box()['y'] < page.locator('.bb-table').bounding_box()['y']
+        want = page.evaluate("(() => { const t = BB.preview.totals, s = k => sumC(t[k]); return [$fmt(s('income')), $fmt(s('cos') + s('expense')), $fmt(s('net_profit'))]; })()")
+        assert [bar.locator('.v').nth(k).inner_text() for k in range(3)] == want, (bar.inner_text(), want)
+        assert 'Net profit' not in page.inner_text('.bb-table'), 'totals moved out of the table'
+        np_before = bar.locator('.v').nth(2).inner_text()
+        srow = f'.bb-table tr[data-a="{sales}"]'
+        page.select_option(f'{srow} .bb-method', 'none'); page.wait_for_timeout(600)
+        assert page.locator('#bb-totals .v').nth(2).inner_text() != np_before, 'net profit updates as accounts change'
+        page.select_option(f'{srow} .bb-method', 'average'); page.wait_for_timeout(600)
+        assert page.locator('#bb-totals .v').nth(2).inner_text() == np_before
+        page.evaluate('window.scrollTo(0, document.body.scrollHeight)'); page.wait_for_timeout(200)
+        top = page.locator('#bb-totals').bounding_box()['y']
+        assert 0 <= top < 5, top
+        shot(page, '21c-budget-totals-sticky')
+        page.evaluate('window.scrollTo(0, 0)')
         shot(page, '21c-budget-accounts')
         page.click('#bb-next'); page.wait_for_selector('#bb-name')
         shot(page, '21d-budget-review')

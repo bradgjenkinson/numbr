@@ -2229,12 +2229,15 @@ function drawBuilderAccounts() {
     });
   });
   const t = BB.preview.totals;
-  const yr = k => sumC(t[k]);
-  body += `<tr class="total"><td>Total income</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('income'))}</tr>
-    <tr class="total"><td>Total costs and expenses</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('cos') + yr('expense'))}</tr>
-    <tr class="grand"><td>Net profit</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(sumC(t.net_profit))}</tr>`;
+  const yr = k => sumC(t[k]), np = sumC(t.net_profit);
+  // Year totals sit above the accounts and stay in view while scrolling, so you can watch them move as you change accounts.
+  const totals = `<div class="sum-bar" id="bb-totals">
+      <div><div class="k">Total income</div><div class="v">${$fmt(yr('income'))}</div></div>
+      <div><div class="k">Total costs and expenses</div><div class="v">${$fmt(yr('cos') + yr('expense'))}</div></div>
+      <div><div class="k">Net profit</div><div class="v${np < 0 ? ' neg' : ''}">${$fmt(np)}</div></div>
+      <div class="small-note" style="margin-left:auto">For the year</div></div>`;
   const errors = BB.preview.accounts.filter(a => a.error).length;
-  $('#bb-body').innerHTML = `<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
+  $('#bb-body').innerHTML = `${totals}<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
       ${h ? '<option value="average">Monthly average</option><option value="last">Last month</option>' : ''}<option value="none">Don't budget</option></select></div>
       <div class="hint" style="margin:0 0 8px">Tip: "My own amounts" handles things like "$100 a month until October, then $110", a weekly amount from a start date, or a total for the year spread evenly.</div></div>
     <div class="table-wrap"><table class="bb-table"><thead><tr><th>Account</th>${h ? '<th class="num">Average a month</th><th class="num">Last month</th>' : ''}<th>How to budget</th><th class="num">Year total</th></tr></thead>

@@ -182,9 +182,10 @@ h3.csv-sub { font-size: 14px; margin: 14px 18px 4px; }
 .notice.bad { background: var(--bad-soft); border-color: #f0c3c3; color: #8a1f1f; }
 
 /* Reconcile */
-.recon-bar { position: sticky; top: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 18px; margin-bottom: 16px; display: flex; gap: 28px; align-items: center; flex-wrap: wrap; box-shadow: 0 2px 6px rgba(0,0,0,.04); }
-.recon-bar .k { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
-.recon-bar .v { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.recon-bar, .sum-bar { position: sticky; top: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 18px; margin-bottom: 16px; display: flex; gap: 28px; align-items: center; flex-wrap: wrap; box-shadow: 0 2px 6px rgba(0,0,0,.04); }
+.recon-bar .k, .sum-bar .k { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+.recon-bar .v, .sum-bar .v { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.sum-bar .v.neg { color: var(--bad); }
 .recon-bar .diff-ok .v { color: var(--good); }
 .recon-bar .diff-bad .v { color: var(--bad); }
 tr.ticked td { background: #f1f8f5; }
