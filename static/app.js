@@ -1441,6 +1441,7 @@ function csvMapping(rows, accId, onDone) {
       el.querySelectorAll('.m-single').forEach(x => { x.hidden = mode !== 'single'; });
       el.querySelectorAll('.m-split').forEach(x => { x.hidden = mode !== 'split'; });
       const out = [], bad = [];
+      let todays = 0;
       (head ? rows.slice(1) : rows).forEach((r, i) => {
         const date = parseAnyDate(r[g('#m-date')] || '', el.querySelector('#m-df').value);
         let amt;
@@ -1448,9 +1449,11 @@ function csvMapping(rows, accId, onDone) {
         else { const dr = parseMoney(r[g('#m-dr')] || ''), cr = parseMoney(r[g('#m-cr')] || ''); amt = (isNaN(cr) ? 0 : Math.abs(cr)) - (isNaN(dr) ? 0 : Math.abs(dr)); if (isNaN(dr) && isNaN(cr)) amt = NaN; }
         if (flip) amt = -amt;
         if (!date || isNaN(amt) || amt === 0) { bad.push(i + 1); return; }
+        // Lines dated today (or later) are left out: banks often re-date them, especially over a weekend.
+        if (date >= S.today) { todays++; return; }
         out.push({ date, amount: amt, description: r[g('#m-desc')] || '' });
       });
-      el.querySelector('#m-prev').innerHTML = `<div class="hint">${out.length} lines read${bad.length ? `, ${bad.length} skipped (no date or zero amount)` : ''}. First few:</div>
+      el.querySelector('#m-prev').innerHTML = `<div class="hint">${out.length} lines read${bad.length ? `, ${bad.length} skipped (no date or zero amount)` : ''}${todays ? `, ${todays} dated today left out (their dates often change, so import them next time)` : ''}. First few:</div>
         <table><tbody>${out.slice(0, 4).map(o => `<tr><td>${dfmt(o.date)}</td><td>${esc(o.description)}</td><td class="num${o.amount < 0 ? ' neg' : ''}">${fmt(o.amount)}</td></tr>`).join('')}</tbody></table>
         <div class="hint">Money out should be negative, money in positive.</div>`;
       return out;

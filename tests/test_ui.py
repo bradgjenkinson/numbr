@@ -2,7 +2,7 @@
 Walks setup, invoices, payments, recurring, CSV reconciliation and reports. Screenshots go to tests/screenshots/.
 Run: python tests/test_ui.py"""
 import os, subprocess, sys, time, tempfile, shutil
-from datetime import date
+from datetime import date, timedelta
 from playwright.sync_api import sync_playwright
 
 SP = os.path.dirname(os.path.abspath(__file__))
@@ -299,13 +299,17 @@ try:
         page.click('#ru-save'); page.wait_for_selector('#main td >> text=Savings sweep')
         assert 'Transfer: ' in page.locator('#main tr', has=page.locator('text=Savings sweep')).inner_text()
         shot(page, '18-rules')
-        d = date.today().strftime('%d/%m/%Y')
+        d = (date.today() - timedelta(days=1)).strftime('%d/%m/%Y')
+        today = date.today().strftime('%d/%m/%Y')
         csv2 = os.path.join(data, 'stmt2.csv')
         with open(csv2, 'w') as f:
-            f.write(f'Date,Description,Debit,Credit\n{d},BEAN CAFE 1234 SYDNEY,4.50,\n{d},BEAN CAFE 1234 SYDNEY,18.00,\n{d},MYSTERY SHOP,7.00,\n')
+            f.write(f'Date,Description,Debit,Credit\n{d},BEAN CAFE 1234 SYDNEY,4.50,\n{d},BEAN CAFE 1234 SYDNEY,18.00,\n{d},MYSTERY SHOP,7.00,\n{today},PENDING TODAY,9.00,\n')
         page.goto(URL + '#/reconcile'); page.wait_for_selector('#rc-bal')
         page.set_input_files('#rc-file', csv2); page.wait_for_selector('#m-acc')
         assert 'Import into Westpac Business One' in page.inner_text('#modal [data-x=yes]')
+        # lines dated today are left out (banks often re-date them)
+        prev = page.inner_text('#m-prev')
+        assert '3 lines read' in prev and '1 dated today left out' in prev and 'PENDING TODAY' not in prev, prev
         page.click('#modal [data-x=yes]'); page.wait_for_selector('#rc-csv h2')
         head = page.inner_text('#rc-csv h2')
         assert '1 auto-applied' in head and '1 to review' in head and '1 unmatched' in head, head
