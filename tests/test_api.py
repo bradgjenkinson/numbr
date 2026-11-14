@@ -763,6 +763,23 @@ try:
     h_from = max(ym_add(h_to, -11), '2026-07')
     in_budget = call('POST', '/api/accounts', {'name': 'Budget only expense', 'type': 'expense'})['id']
     not_budgeted = call('POST', '/api/accounts', {'name': 'Never budgeted', 'type': 'expense'})['id']
+    spread_wk = call('POST', '/api/accounts', {'name': 'Spread by weekday', 'type': 'expense'})['id']
+    spread_fn = call('POST', '/api/accounts', {'name': 'Spread by fortnight', 'type': 'expense'})['id']
+    fy_first = f'{fy}-01'
+
+    def spread_units(keep, start=fy_first, end=fy_end, step=1):
+        """How many of the dates start..end (every `step` days) that `keep` accepts fall in each month."""
+        d, out = date.fromisoformat(start), {}
+        while d.isoformat() <= end:
+            if keep(d):
+                out[d.isoformat()[:7]] = out.get(d.isoformat()[:7], 0) + 1
+            d = date.fromordinal(d.toordinal() + step)
+        return [out.get(m, 0) for m in fy_months]
+
+    def shared(vals, amount, units):
+        """Months add up to the total exactly and each is within a cent of its fair share."""
+        tot = sum(units)
+        return sum(vals) == amount and all(abs(v * tot - amount * u) <= tot for v, u in zip(vals, units))
 
     bld = call('GET', '/api/budgets/builder')
     check(bld['fy'] == fy and bld['months'] == fy_months, f"builder defaults to this financial year {bld['fy']}")
@@ -812,6 +829,9 @@ try:
         {'account_id': A['6-1700'], 'method': 'schedule', 'config': [
             {'freq': 'yearly', 'amount': 100000},
             {'freq': 'yearly', 'amount': -1000, 'from': fy_months[0], 'to': fy_months[2]}]},
+        {'account_id': spread_wk, 'method': 'schedule', 'config': [{'freq': 'yearly', 'amount': 520000, 'spread': 'weekly', 'weekday': 0}]},
+        {'account_id': spread_fn, 'method': 'schedule', 'config': [
+            {'freq': 'yearly', 'amount': 260000, 'spread': 'fortnightly', 'start': fn_first, 'end': fy_end}]},
     ]
     pv = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': choose})
     pa = {a['account_id']: a for a in pv['accounts']}
@@ -827,6 +847,45 @@ try:
     check(pa[not_budgeted]['values'] == [0] * 12, 'not budgeted is all zeros')
     check(pa[A['6-1700']]['values'] == [8000, 8001, 8001, 8334] + [8333] * 8 and pa[A['6-1700']]['total'] == 99000,
           f"a yearly total is spread evenly over its months and adds up exactly ({pa[A['6-1700']]['values']})")
+    mondays = spread_units(lambda d: d.weekday() == 0)
+    check(sum(mondays) in (52, 53) and shared(pa[spread_wk]['values'], 520000, mondays),
+          f"a yearly total spread by weekday follows the Mondays in each month ({pa[spread_wk]['values']}, {mondays})")
+    check(pa[spread_wk]['config'][0] == {'freq': 'yearly', 'amount': 520000, 'spread': 'weekly', 'weekday': 0,
+                                         'start': fy_first, 'end': fy_end},
+          f"weekday spread dates default to the whole financial year ({pa[spread_wk]['config']})")
+    fns = spread_units(lambda d: True, fn_first, fy_end, 14)
+    check(fns == occurrences(fn_first, 14) and shared(pa[spread_fn]['values'], 260000, fns),
+          f"a yearly total spread by fortnight follows the fortnights from the start date ({pa[spread_fn]['values']})")
+
+    def spread_preview(*segs):
+        res = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': [
+            {'account_id': in_budget, 'method': 'schedule', 'config': list(segs)}]})['accounts'][0]
+        return res.get('error') or res['values']
+
+    days = spread_units(lambda d: True)
+    v = spread_preview({'freq': 'yearly', 'amount': 365000, 'spread': 'daily', 'days': 'all'})
+    check(sum(days) in (365, 366) and shared(v, 365000, days), f'a yearly total spread by day follows the days in each month ({v})')
+    wdays = spread_units(lambda d: d.weekday() < 5)
+    v = spread_preview({'freq': 'yearly', 'amount': -123457, 'spread': 'daily', 'days': 'weekdays'})
+    check(shared(v, -123457, wdays), f'spread by weekdays only (Mon-Fri), negative totals add up too ({v})')
+    part_s, part_e = f'{fy_months[2]}-10', f'{fy_months[4]}-20'
+    fri = spread_units(lambda d: d.weekday() == 4, part_s, part_e)
+    v = spread_preview({'freq': 'yearly', 'amount': 100000, 'spread': 'weekly', 'weekday': 4, 'start': part_s, 'end': part_e})
+    check(shared(v, 100000, fri) and v[0] == v[1] == v[5] == 0 and v[2] > 0,
+          f'a spread between two dates leaves the other months empty ({v})')
+    v = spread_preview({'freq': 'yearly', 'amount': 1200, 'spread': 'monthly', 'from': fy_months[0], 'to': fy_months[11]})
+    check(v == [100] * 12, f'an even monthly spread still divides by the months ({v})')
+    one_day = f'{fy_months[0]}-08'
+    other_wd = (date.fromisoformat(one_day).weekday() + 1) % 7
+    for seg, want, what in [
+        ({'spread': 'weekly', 'weekday': other_wd, 'start': one_day, 'end': one_day}, 'there are no ', 'no matching weekday'),
+        ({'spread': 'daily', 'days': 'all', 'start': f'{fy_months[3]}-01', 'end': f'{fy_months[2]}-01'}, 'before the start', 'end before start'),
+        ({'spread': 'daily', 'days': 'all', 'start': f'{int(fy[:4]) - 1}-12-01'}, 'inside this financial year', 'start outside the year'),
+        ({'spread': 'quarterly'}, 'how to spread', 'unknown spread'),
+        ({'spread': 'weekly'}, 'day of the week', 'missing weekday'),
+        ({'spread': 'daily', 'days': 'some'}, 'every day or weekdays', 'bad day count')]:
+        err = spread_preview({'freq': 'yearly', 'amount': 100, **seg})
+        check(isinstance(err, str) and want in err, f'spread total refuses {what} ({err})')
     exp_np = [sum(pa[a]['values'][i] * (1 if pa[a]['type'] == 'income' else -1) for a in pa) for i in range(12)]
     check(pv['totals']['net_profit'] == exp_np, 'preview totals add up')
     bad = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': [
@@ -888,6 +947,19 @@ try:
           'typed amounts carry forward as typed, not as edited')
     check(na_[not_budgeted]['method'] == 'none' and na_[not_budgeted]['from_prior'], 'not budgeted carries forward')
     check(all(a['from_prior'] for a in nb['accounts'] if a['account_id'] in pa), 'carried choices are flagged')
+    nfy_end = f'{ym_add(nfy, 11)}-{calendar.monthrange(int(ym_add(nfy, 11)[:4]), int(ym_add(nfy, 11)[5:7]))[1]:02d}'
+    check(na_[spread_wk]['config'] == [{'freq': 'yearly', 'amount': 520000, 'spread': 'weekly', 'weekday': 0,
+                                        'start': f'{nfy}-01', 'end': nfy_end}],
+          f"a weekday spread moves forward to next year's dates ({na_[spread_wk]['config']})")
+    fn2 = na_[spread_fn]['config'][0]
+    fn_target = date(int(fn_first[:4]) + 1, 7, 10)
+    check(fn2['spread'] == 'fortnightly' and fn2['end'] == nfy_end and (date.fromisoformat(fn2['start']) - date.fromisoformat(fn_first)).days % 14 == 0
+          and 0 <= (date.fromisoformat(fn2['start']) - fn_target).days < 14,
+          f'a fortnight spread keeps its rhythm next year ({fn2})')
+    nb_prev = call('POST', '/api/budgets/preview', {'fy': nfy, 'accounts': [
+        {'account_id': a['account_id'], 'method': a['method'], 'config': a['config']} for a in nb['accounts']]})
+    check(not [a for a in nb_prev['accounts'] if a.get('error')],
+          f"next year's carried spreads are valid ({[a for a in nb_prev['accounts'] if a.get('error')]})")
 
     # accounts in a budget can't be deleted; one only marked "not budgeted" can
     r = call('DELETE', f'/api/accounts/{in_budget}', expect_ok=False)

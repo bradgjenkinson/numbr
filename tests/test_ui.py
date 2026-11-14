@@ -387,6 +387,19 @@ try:
         assert page.inner_text('#oa-prev').count('100.00') == 12, page.inner_text('#oa-prev')
         page.click('#oa-ok'); page.wait_for_timeout(600)
         assert 'spread evenly over the year' in page.inner_text(irow) and '1,200.00' in page.inner_text(irow), page.inner_text(irow)
+        # "Total for the year" is last in the list, and can be spread by day of the week between dates that default to the year
+        page.click(f'{irow} .bb-setup'); page.wait_for_selector('#oa-body .seg')
+        opts = page.evaluate("[...document.querySelectorAll('.s-freq option')].map(o => o.value)")
+        assert opts[-1] == 'yearly', opts
+        page.select_option('.s-spread', 'weekly'); page.wait_for_selector('.s-wday')
+        fy0, fy9 = page.evaluate('[fyFirstDay(BB.d.months), fyLastDay(BB.d.months)]')
+        assert fy0.endswith('-01') and fy9 > fy0
+        assert page.input_value('.s-start') == fy0 and page.input_value('.s-end') == fy9, (page.input_value('.s-start'), page.input_value('.s-end'))
+        page.select_option('.s-wday', '2'); page.wait_for_timeout(700)
+        assert '1,200.00' in page.inner_text('#oa-prev'), page.inner_text('#oa-prev')
+        shot(page, '21c-budget-yearly-spread')
+        page.click('#oa-ok'); page.wait_for_timeout(600)
+        assert 'spread over Wednesdays for the year' in page.inner_text(irow), page.inner_text(irow)
         shot(page, '21c-budget-accounts')
         page.click('#bb-next'); page.wait_for_selector('#bb-name')
         shot(page, '21d-budget-review')

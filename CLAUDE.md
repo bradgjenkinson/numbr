@@ -81,7 +81,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
   - account choosers: `acctOptions()` inside a `<select class="acct-pick">`; `enhanceAcctPick()` (applied automatically by a MutationObserver) adds the type-to-search box and keeps the real select underneath holding the value
   - `ROUTES` hash router → one async function per screen (`dashboard`, `invoiceForm`, `reconcilePage`, `reportPL`, …)
   - global `S` holds settings, accounts and contacts (refresh with `refreshState()`)
-  - budgets: `budgetList`, `budgetBuilder` (3 steps, state in `BB`, `ownAmountsModal` for schedules/typed months), `budgetView` (editable grid; `budgetTable` lays budget figures out like the P&L)
+  - budgets: `budgetList`, `budgetBuilder` (3 steps, state in `BB`, `ownAmountsModal` for schedules/typed months; a "Total for the year" can be spread evenly by month or by weekday, fortnight or day between dates, see `schedule_amounts()`), `budgetView` (editable grid; `budgetTable` lays budget figures out like the P&L)
   - CSV statement parsing and matching are client-side (`parseCSV`, `csvMapping`, `drawCsv` inside `reconcilePage`)
 - `docs/ARCHITECTURE.md`: schema, API reference, design decisions
 - `docs/OPERATIONS.md`: how the user runs the books (weekly, month end, backups, recovery)
