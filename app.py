@@ -2628,6 +2628,10 @@ BUDGET_METHODS = ('average', 'last', 'schedule', 'manual', 'none')
 BUDGET_METHOD_LABEL = {'average': 'Monthly average', 'last': 'Last month', 'schedule': 'Own amounts',
                        'manual': 'Typed each month', 'none': 'Not budgeted'}
 STEP_DAYS = {'weekly': 7, 'fortnightly': 14}
+# How a "total for the year" is shared out: evenly by month (from/to months) or across the weekdays,
+# fortnights or days between a start and end date.
+YEAR_SPREADS = ('monthly', 'weekly', 'fortnightly', 'daily')
+WEEKDAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
 
 
 def ym_add(ym, n):
@@ -2726,7 +2730,9 @@ def budget_config(method, raw, months):
             raise ApiError('Amount details are not valid')
         freq = s.get('freq')
         amount = as_cents(s.get('amount') or 0, f'Amount {i}')
-        if freq in ('monthly', 'yearly'):
+        if freq == 'yearly' and (s.get('spread') or 'monthly') != 'monthly':
+            out.append(yearly_spread_config(s, i, amount, fy_first, fy_last))
+        elif freq in ('monthly', 'yearly'):
             frm = as_ym(s.get('from') or fy_first, f'Amount {i} "from" month')
             to = as_ym(s.get('to') or fy_last, f'Amount {i} "to" month')
             if to < frm:
@@ -2751,6 +2757,63 @@ def budget_config(method, raw, months):
     return out
 
 
+def yearly_spread_config(s, i, amount, fy_first, fy_last):
+    """Check a "total for the year" amount spread by weekday, fortnight or day between two dates."""
+    spread = s.get('spread')
+    if spread not in YEAR_SPREADS:
+        raise ApiError(f'Amount {i}: choose how to spread the total')
+    fy_s, fy_e = month_start(fy_first), month_end(fy_last)
+    fy_start, fy_end = fy_s.isoformat(), fy_e.isoformat()
+    start = as_date(s.get('start') or fy_start, f'Amount {i} start date')
+    end = as_date(s.get('end') or fy_end, f'Amount {i} end date')
+    if end < start:
+        raise ApiError(f'Amount {i}: the end date is before the start date')
+    if start < fy_start or end > fy_end:
+        raise ApiError(f'Amount {i}: the start and end dates must be inside this financial year '
+                       f'({fy_s:%d/%m/%Y} to {fy_e:%d/%m/%Y})')
+    seg = {'freq': 'yearly', 'amount': amount, 'spread': spread, 'start': start, 'end': end}
+    if spread == 'weekly':
+        wd = s.get('weekday')
+        if not isinstance(wd, int) or isinstance(wd, bool) or not 0 <= wd <= 6:
+            raise ApiError(f'Amount {i}: choose a day of the week')
+        seg['weekday'] = wd
+    if spread == 'daily':
+        if s.get('days') not in ('all', 'weekdays'):
+            raise ApiError(f'Amount {i}: choose whether to count every day or weekdays only')
+        seg['days'] = s['days']
+    if not any(d for d in spread_days(seg)):
+        what = {'weekly': f'{WEEKDAY_NAMES[seg.get("weekday", 0)]}s', 'fortnightly': 'fortnights',
+                'daily': 'weekdays' if seg.get('days') == 'weekdays' else 'days'}[spread]
+        raise ApiError(f'Amount {i}: there are no {what} between those dates. Pick other dates.')
+    return seg
+
+
+def spread_days(seg):
+    """The dates a spread total is shared across, from start to end inclusive."""
+    d, end = D(seg['start']), D(seg['end'])
+    if seg['spread'] == 'fortnightly':
+        while d <= end:
+            yield d
+            d += dt.timedelta(days=14)
+        return
+    while d <= end:
+        if (seg['spread'] == 'weekly' and d.weekday() == seg['weekday']) or \
+                (seg['spread'] == 'daily' and (seg['days'] == 'all' or d.weekday() < 5)):
+            yield d
+        d += dt.timedelta(days=1)
+
+
+def allocate(amount, units):
+    """Share amount across slots in proportion to units, in whole cents that add up exactly."""
+    total, cum, prev, out = sum(units), 0, 0, []
+    for u in units:
+        cum += u
+        v = round_div(amount * cum, total)
+        out.append(v - prev)
+        prev = v
+    return out
+
+
 def schedule_amounts(segs, months):
     idx = {m: i for i, m in enumerate(months)}
     vals = [0] * 12
@@ -2760,6 +2823,14 @@ def schedule_amounts(segs, months):
             for m in months:
                 if s['from'] <= m <= s['to']:
                     vals[idx[m]] += s['amount']
+            continue
+        if s['freq'] == 'yearly' and s.get('spread', 'monthly') != 'monthly':
+            # A total shared by weekday, fortnight or day: each month gets its share of those dates.
+            units = [0] * 12
+            for d in spread_days(s):
+                units[idx[d.strftime('%Y-%m')]] += 1
+            for k, v in enumerate(allocate(s['amount'], units)):
+                vals[k] += v
             continue
         if s['freq'] == 'yearly':
             # A total spread evenly over its months; leftover cents go to the first months so it adds up exactly.
@@ -2792,6 +2863,21 @@ def method_amounts(method, config, months, figures):
     return [0] * 12
 
 
+def roll_spread_dates(s, shift):
+    """A spread total's start and end moved forward `shift` months. A fortnightly start keeps its
+    rhythm (the first date in the series on or after the moved date); an end on the last day of a
+    month stays on the last day. Both stay inside the moved financial year, since budgets are always
+    shifted by whole years."""
+    start, end = D(s['start']), D(s['end'])
+    new_start = add_months(start, shift, start.day)
+    if s['spread'] == 'fortnightly':
+        new_start = start + dt.timedelta(days=-(-(new_start - start).days // 14) * 14)
+    new_end = add_months(end, shift, 31 if end == month_end(end.strftime('%Y-%m')) else end.day)
+    if new_start > new_end:
+        new_start = new_end
+    return new_start.isoformat(), new_end.isoformat()
+
+
 def roll_config(method, config, shift):
     """A previous budget's choice moved forward `shift` months to suit a later year."""
     if method == 'manual':
@@ -2801,7 +2887,9 @@ def roll_config(method, config, shift):
     out = []
     for s in config:
         s = dict(s)
-        if s['freq'] in ('monthly', 'yearly'):
+        if s['freq'] == 'yearly' and s.get('spread', 'monthly') != 'monthly':
+            s['start'], s['end'] = roll_spread_dates(s, shift)
+        elif s['freq'] in ('monthly', 'yearly'):
             s['from'], s['to'] = ym_add(s['from'], shift), ym_add(s['to'], shift)
         else:
             # Keep the same weekday rhythm: the first date in the original series on or after the same

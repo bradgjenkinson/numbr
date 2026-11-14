@@ -2099,8 +2099,16 @@ async function reportTB() {
 // are edited by hand on the budget page.
 const BUDGET_METHOD = { average: 'Monthly average', last: 'Last month', schedule: 'My own amounts', manual: 'Type each month', none: "Don't budget" };
 const BUDGET_SECTIONS = [['income', 'Income'], ['cos', 'Cost of Sales'], ['expense', 'Expenses']];
-const SCHED_FREQ = { monthly: 'Every month', yearly: 'Total for the year', weekly: 'Every week', fortnightly: 'Every fortnight' };
-const BY_MONTH = f => f === 'monthly' || f === 'yearly';  // segments with from/to months rather than dates
+const SCHED_FREQ = { monthly: 'Every month', weekly: 'Every week', fortnightly: 'Every fortnight', yearly: 'Total for the year' };
+// How a total for the year is shared out. Anything but monthly uses start/end dates inside the year.
+const YEAR_SPREAD = { monthly: 'Evenly each month', weekly: 'By day of the week', fortnightly: 'By fortnight', daily: 'By day' };
+const SPREAD_DAYS = { all: 'Every day', weekdays: 'Weekdays only (Mon–Fri)' };
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];  // 0 = Monday, as the server counts
+const spreadOf = s => (s.freq === 'yearly' && s.spread) || 'monthly';
+// Segments with from/to months rather than dates.
+const BY_MONTH = s => s.freq === 'monthly' || (s.freq === 'yearly' && spreadOf(s) === 'monthly');
+const fyFirstDay = months => `${months[0]}-01`;
+const fyLastDay = months => addDays(`${addMonthsYM(months[11], 1)}-01`, -1);
 const SCHED_PER = { monthly: 'a month', weekly: 'a week', fortnightly: 'a fortnight' };
 const BUDGET_METHOD_SHORT = { average: 'average', last: 'last month', schedule: 'own amounts', manual: 'typed' };
 const PL_TYPE_SET = new Set(['income', 'cos', 'expense']);
@@ -2139,6 +2147,13 @@ function scheduleSummary(cfg, months) {
   if (!cfg || !cfg.length) return '';
   return cfg.map(s => {
     const amt = `${$fmt(s.amount)} ${SCHED_PER[s.freq]}`;
+    if (s.freq === 'yearly' && spreadOf(s) !== 'monthly') {
+      const over = { weekly: `${WEEKDAYS[s.weekday]}s`, fortnightly: 'fortnights', daily: s.days === 'weekdays' ? 'weekdays (Mon–Fri)' : 'every day' }[s.spread];
+      const whole = s.start === fyFirstDay(months) && s.end === fyLastDay(months);
+      const when = s.spread === 'fortnightly' ? ` from ${dfmt(s.start)} to ${dfmt(s.end)}`
+        : whole ? ' for the year' : `, ${dfmt(s.start)} to ${dfmt(s.end)}`;
+      return `${$fmt(s.amount)} spread over ${over}${when}`;
+    }
     if (s.freq === 'yearly') {
       const n = months.indexOf(s.to) - months.indexOf(s.from) + 1;
       return `${$fmt(s.amount)} spread evenly over ${n === 12 ? 'the year' : `${monthLabel(s.from)} – ${monthLabel(s.to)}`}`;
@@ -2214,12 +2229,15 @@ function drawBuilderAccounts() {
     });
   });
   const t = BB.preview.totals;
-  const yr = k => sumC(t[k]);
-  body += `<tr class="total"><td>Total income</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('income'))}</tr>
-    <tr class="total"><td>Total costs and expenses</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(yr('cos') + yr('expense'))}</tr>
-    <tr class="grand"><td>Net profit</td>${h ? '<td></td><td></td>' : ''}<td></td>${numCell(sumC(t.net_profit))}</tr>`;
+  const yr = k => sumC(t[k]), np = sumC(t.net_profit);
+  // Year totals sit above the accounts and stay in view while scrolling, so you can watch them move as you change accounts.
+  const totals = `<div class="sum-bar" id="bb-totals">
+      <div><div class="k">Total income</div><div class="v">${$fmt(yr('income'))}</div></div>
+      <div><div class="k">Total costs and expenses</div><div class="v">${$fmt(yr('cos') + yr('expense'))}</div></div>
+      <div><div class="k">Net profit</div><div class="v${np < 0 ? ' neg' : ''}">${$fmt(np)}</div></div>
+      <div class="small-note" style="margin-left:auto">For the year</div></div>`;
   const errors = BB.preview.accounts.filter(a => a.error).length;
-  $('#bb-body').innerHTML = `<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
+  $('#bb-body').innerHTML = `${totals}<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
       ${h ? '<option value="average">Monthly average</option><option value="last">Last month</option>' : ''}<option value="none">Don't budget</option></select></div>
       <div class="hint" style="margin:0 0 8px">Tip: "My own amounts" handles things like "$100 a month until October, then $110", a weekly amount from a start date, or a total for the year spread evenly.</div></div>
     <div class="table-wrap"><table class="bb-table"><thead><tr><th>Account</th>${h ? '<th class="num">Average a month</th><th class="num">Last month</th>' : ''}<th>How to budget</th><th class="num">Year total</th></tr></thead>
@@ -2254,13 +2272,32 @@ function ownAmountsModal(a, done) {
   let amounts = manual && c.config ? [...c.config.amounts] : (BB.prev[a.account_id] ? [...BB.prev[a.account_id].values] : Array(12).fill(0));
   if (!manual && !segs.length) segs = [{ freq: 'monthly', amount: null, from: months[0], to: months[11] }];
   const monthSel = (cls, v) => `<select class="${cls}">${months.map(m => `<option value="${m}" ${m === v ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>`;
-  const segRow = (s, i) => `<div class="seg" data-i="${i}">
-      <div class="field"><label>How often</label><select class="s-freq">${Object.entries(SCHED_FREQ).map(([k, v]) => `<option value="${k}" ${s.freq === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
-      <div class="field"><label>${s.freq === 'yearly' ? 'Total amount' : 'Amount'}</label><input class="s-amt num" inputmode="decimal" placeholder="0.00" value="${s.amount === null || s.amount === undefined ? '' : fmt(s.amount)}"></div>
-      ${BY_MONTH(s.freq)
-        ? `<div class="field"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
-        : `<div class="field"><label>First date</label><input type="date" class="s-first" value="${s.first || ''}"></div><div class="field"><label>Until (optional)</label><input type="date" class="s-until" value="${s.to || ''}"></div>`}
+  const pick = (cls, opts, v) => `<select class="${cls}">${Object.entries(opts).map(([k, t]) => `<option value="${k}" ${String(v) === k ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+  const firstDay = fyFirstDay(months), lastDay = fyLastDay(months);
+  const dateIn = (cls, v) => `<input type="date" class="${cls}" min="${firstDay}" max="${lastDay}" value="${v || ''}">`;
+  // A total for the year spread by weekday, fortnight or day starts and ends on the year's first and last day unless changed.
+  const spreadDefaults = s => {
+    if (!BY_MONTH(s)) { s.start = s.start || firstDay; s.end = s.end || lastDay; }
+    if (s.spread === 'weekly' && s.weekday === undefined) s.weekday = 0;
+    if (s.spread === 'daily' && !s.days) s.days = 'all';
+  };
+  const segRow = (s, i) => {
+    const yearly = s.freq === 'yearly', spread = spreadOf(s);
+    // On a yearly row the from/to (or start/end) pair always starts its own line, so the two sit side by side.
+    const when = BY_MONTH(s)
+      ? `<div class="field range"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
+      : yearly
+        ? `${spread === 'weekly' ? `<div class="field"><label>Day of the week</label>${pick('s-wday', Object.fromEntries(WEEKDAYS.map((w, k) => [k, w])), s.weekday)}</div>` : ''}
+          ${spread === 'daily' ? `<div class="field"><label>Count</label>${pick('s-days', SPREAD_DAYS, s.days)}</div>` : ''}
+          <div class="field range"><label>Start date</label>${dateIn('s-start', s.start)}</div><div class="field"><label>End date</label>${dateIn('s-end', s.end)}</div>`
+        : `<div class="field"><label>First date</label><input type="date" class="s-first" value="${s.first || ''}"></div><div class="field"><label>Until (optional)</label><input type="date" class="s-until" value="${s.to || ''}"></div>`;
+    return `<div class="seg${yearly ? ' yearly' : ''}" data-i="${i}">
+      <div class="field"><label>How often</label>${pick('s-freq', SCHED_FREQ, s.freq)}</div>
+      ${yearly ? `<div class="field"><label>Spread the total</label>${pick('s-spread', YEAR_SPREAD, spread)}</div>` : ''}
+      <div class="field"><label>${yearly ? 'Total amount' : 'Amount'}</label><input class="s-amt num" inputmode="decimal" placeholder="0.00" value="${s.amount === null || s.amount === undefined ? '' : fmt(s.amount)}"></div>
+      ${when}
       <div class="field"><label>&nbsp;</label><button class="small danger s-del" title="Remove this amount" ${segs.length < 2 ? 'disabled' : ''}>Remove</button></div></div>`;
+  };
   // Read the form back into segs/amounts. strict: throw on anything unfinished (when saving).
   const read = (el, strict) => {
     if (manual) {
@@ -2275,8 +2312,17 @@ function ownAmountsModal(a, done) {
       const q = s => row.querySelector(s), freq = q('.s-freq').value, raw = q('.s-amt').value;
       const amount = raw.trim() === '' ? null : parseMoney(raw);
       if (strict && (amount === null || isNaN(amount))) throw new Error(`Amount ${i + 1}: enter an amount like 120.50`);
-      return BY_MONTH(freq) ? { freq, amount: isNaN(amount) ? null : amount, from: q('.s-from') ? q('.s-from').value : months[0], to: q('.s-to') ? q('.s-to').value : months[11] }
-        : { freq, amount: isNaN(amount) ? null : amount, first: q('.s-first') ? q('.s-first').value : '', ...(q('.s-until') && q('.s-until').value ? { to: q('.s-until').value } : {}) };
+      const amt = isNaN(amount) ? null : amount;
+      const spread = freq === 'yearly' && q('.s-spread') ? q('.s-spread').value : 'monthly';
+      if (freq === 'yearly' && spread !== 'monthly') {
+        const s = { freq, amount: amt, spread, start: q('.s-start') ? q('.s-start').value : '', end: q('.s-end') ? q('.s-end').value : '' };
+        if (spread === 'weekly') s.weekday = q('.s-wday') ? +q('.s-wday').value : 0;
+        if (spread === 'daily') s.days = q('.s-days') ? q('.s-days').value : 'all';
+        if (strict && (!s.start || !s.end)) throw new Error(`Amount ${i + 1}: enter a start date and an end date`);
+        return s;
+      }
+      return BY_MONTH({ freq }) ? { freq, amount: amt, from: q('.s-from') ? q('.s-from').value : months[0], to: q('.s-to') ? q('.s-to').value : months[11] }
+        : { freq, amount: amt, first: q('.s-first') ? q('.s-first').value : '', ...(q('.s-until') && q('.s-until').value ? { to: q('.s-until').value } : {}) };
     });
     return segs.map(s => ({ ...s, amount: s.amount || 0 }));
   };
@@ -2284,7 +2330,7 @@ function ownAmountsModal(a, done) {
   modal(`<h2>${esc(a.name)}: ${title}</h2>
     ${manual ? `<p class="hint">Enter what you expect for each month of ${esc(d.label)}.</p><div id="oa-body"></div>
         <div class="actions" style="margin-top:8px"><button class="small" id="oa-copy">Copy ${monthLabel(months[0])} to every month</button></div>`
-      : `<p class="hint">Add each amount and how often it happens. For example: $100 every month from July to October, then another line for $110 every month from November. "Total for the year" splits an amount evenly across the months you choose (e.g. $1,200 becomes $100 a month). Weekly and fortnightly amounts start on the first date you give and land in the month they fall in.</p>
+      : `<p class="hint">Add each amount and how often it happens. For example: $100 every month from July to October, then another line for $110 every month from November. Weekly and fortnightly amounts start on the first date you give and land in the month they fall in. "Total for the year" shares one amount out: evenly each month (e.g. $1,200 becomes $100 a month), or between a start and end date by a day of the week, by fortnight, or by day (every day or weekdays only), so a month with more of those days gets more of the total.</p>
         <div id="oa-body"></div><button class="small" id="oa-add">+ Add another amount</button>`}
     ${manual ? '<div class="hint" style="margin-top:10px">Year total: <b id="oa-total"></b></div>'
       : '<h2 style="margin-top:16px;font-size:14px">What this gives you</h2><div id="oa-prev" class="muted">…</div>'}
@@ -2313,7 +2359,18 @@ function ownAmountsModal(a, done) {
         read(el, false);
         const s = segs[+x.closest('.seg').dataset.i];
         s.freq = x.value;
-        if (!BY_MONTH(s.freq) && !s.first) s.first = `${months[0]}-01`;
+        if (s.freq !== 'yearly') delete s.spread;
+        if (BY_MONTH(s)) {  // a "to" date from a weekly amount is not a month
+          if (!/^\d{4}-\d{2}$/.test(s.from || '')) s.from = months[0];
+          if (!/^\d{4}-\d{2}$/.test(s.to || '')) s.to = months[11];
+        } else if (s.freq !== 'yearly' && !s.first) s.first = `${months[0]}-01`;
+        draw(); preview();
+      });
+      body.querySelectorAll('.s-spread').forEach(x => x.onchange = () => {
+        read(el, false);
+        const s = segs[+x.closest('.seg').dataset.i];
+        s.spread = x.value;
+        spreadDefaults(s);
         draw(); preview();
       });
       body.querySelectorAll('.s-del').forEach(x => x.onclick = () => { read(el, false); segs.splice(+x.closest('.seg').dataset.i, 1); draw(); preview(); });
@@ -2323,7 +2380,7 @@ function ownAmountsModal(a, done) {
     if (add) add.onclick = () => {
       read(el, false);
       const last = segs[segs.length - 1];
-      const from = last && BY_MONTH(last.freq) && last.to < months[11] ? addMonthsYM(last.to, 1) : months[0];
+      const from = last && BY_MONTH(last) && last.to < months[11] ? addMonthsYM(last.to, 1) : months[0];
       segs.push({ freq: 'monthly', amount: null, from, to: months[11] });
       draw(); preview();
       const inps = body.querySelectorAll('.s-amt'); inps[inps.length - 1].focus();
