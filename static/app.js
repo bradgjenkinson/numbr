@@ -2280,12 +2280,13 @@ function ownAmountsModal(a, done) {
   };
   const segRow = (s, i) => {
     const yearly = s.freq === 'yearly', spread = spreadOf(s);
+    // On a yearly row the from/to (or start/end) pair always starts its own line, so the two sit side by side.
     const when = BY_MONTH(s)
-      ? `<div class="field"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
+      ? `<div class="field range"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
       : yearly
         ? `${spread === 'weekly' ? `<div class="field"><label>Day of the week</label>${pick('s-wday', Object.fromEntries(WEEKDAYS.map((w, k) => [k, w])), s.weekday)}</div>` : ''}
           ${spread === 'daily' ? `<div class="field"><label>Count</label>${pick('s-days', SPREAD_DAYS, s.days)}</div>` : ''}
-          <div class="field"><label>Start date</label>${dateIn('s-start', s.start)}</div><div class="field"><label>End date</label>${dateIn('s-end', s.end)}</div>`
+          <div class="field range"><label>Start date</label>${dateIn('s-start', s.start)}</div><div class="field"><label>End date</label>${dateIn('s-end', s.end)}</div>`
         : `<div class="field"><label>First date</label><input type="date" class="s-first" value="${s.first || ''}"></div><div class="field"><label>Until (optional)</label><input type="date" class="s-until" value="${s.to || ''}"></div>`;
     return `<div class="seg${yearly ? ' yearly' : ''}" data-i="${i}">
       <div class="field"><label>How often</label>${pick('s-freq', SCHED_FREQ, s.freq)}</div>

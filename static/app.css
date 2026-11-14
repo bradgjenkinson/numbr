@@ -241,6 +241,7 @@ tr.matched td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .seg { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr auto; gap: 0 10px; align-items: end; border-bottom: 1px solid var(--line-2); margin-bottom: 10px; }
 .seg.yearly { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .seg.yearly > .field:last-child { justify-self: start; }
+.seg.yearly > .field.range { grid-column-start: 1; }
 @media (max-width: 700px) { .seg, .seg.yearly { grid-template-columns: 1fr 1fr; } }
 td.bcell { padding: 2px 4px; }
 td.bcell input { width: 96px; padding: 4px 6px; border-color: transparent; background: transparent; }

@@ -391,7 +391,17 @@ try:
         page.click(f'{irow} .bb-setup'); page.wait_for_selector('#oa-body .seg')
         opts = page.evaluate("[...document.querySelectorAll('.s-freq option')].map(o => o.value)")
         assert opts[-1] == 'yearly', opts
-        page.select_option('.s-spread', 'weekly'); page.wait_for_selector('.s-wday')
+        # the from/to (or start/end) pair always sits side by side, on its own line, whatever the spread
+        def same_line(a, b):
+            ba, bb = page.locator(a).bounding_box(), page.locator(b).bounding_box()
+            return abs(ba['y'] - bb['y']) < 2 and bb['x'] > ba['x'], (ba, bb)
+        amt_y = lambda: page.locator('.s-amt').bounding_box()['y']
+        ok, boxes = same_line('.s-from', '.s-to'); assert ok and page.locator('.s-from').bounding_box()['y'] > amt_y(), boxes
+        for sp in ('fortnightly', 'daily', 'weekly'):
+            page.select_option('.s-spread', sp); page.wait_for_selector('.s-start')
+            ok, boxes = same_line('.s-start', '.s-end'); assert ok and page.locator('.s-start').bounding_box()['y'] > amt_y(), (sp, boxes)
+            if sp == 'fortnightly': shot(page, '21c-budget-yearly-fortnight')
+        page.wait_for_selector('.s-wday')
         fy0, fy9 = page.evaluate('[fyFirstDay(BB.d.months), fyLastDay(BB.d.months)]')
         assert fy0.endswith('-01') and fy9 > fy0
         assert page.input_value('.s-start') == fy0 and page.input_value('.s-end') == fy9, (page.input_value('.s-start'), page.input_value('.s-end'))
