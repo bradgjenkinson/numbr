@@ -1827,12 +1827,17 @@ const repLabelRow = (label, cols, cls, tdCls = '') => `<tr class="${cls}"><td${t
 // Scrolling table with the month header row and the account column frozen.
 const repTable = (head, rowsHtml) => `<div class="table-wrap rep-grid"><table><thead>${head}</thead><tbody>${rowsHtml}</tbody></table></div>`;
 
-// From/To month pickers, quick ranges and Groups only, shared by the P&L and Balance Sheet.
-// Both default to this financial year (FY start to this month).
+// From/To month pickers, quick ranges, Groups only and Project, shared by the P&L and Balance Sheet.
+// Both default to this financial year (FY start to this month) and all accounts (no project).
 function monthRangeState(key) {
-  RF[key] = RF[key] || { from: fyStartYM(S.today), to: S.today.slice(0, 7), groupsOnly: false };
+  RF[key] = RF[key] || { from: fyStartYM(S.today), to: S.today.slice(0, 7), groupsOnly: false, project: '' };
+  if (RF[key].project && !projectById(RF[key].project)) RF[key].project = '';  // the project was deleted
   return RF[key];
 }
+// Query string for a report's project filter, and the words that go under the report title.
+const projQS = r => (r.project ? `&project=${encodeURIComponent(r.project)}` : '');
+const projTag = d => (d.project ? ` · Project: ${esc(d.project.name)}` : '');
+const projFile = d => (d.project ? `-${d.project.name.replace(/[^\w-]+/g, '-')}` : '');
 function monthRangeFilters(key, hasGroups) {
   const cur = S.today.slice(0, 7), fy = fyStartYM(S.today), r = RF[key];
   return `<div class="filters">
@@ -1840,6 +1845,8 @@ function monthRangeFilters(key, hasGroups) {
     <div class="field"><label>To month</label><input type="month" id="f-to" value="${r.to}"></div>
     <div class="actions"><button class="small" data-r="${cur},${cur}">This month</button><button class="small" data-r="${addMonthsYM(cur, -1)},${addMonthsYM(cur, -1)}">Last month</button>
     <button class="small" data-r="${fy},${cur}">This financial year</button><button class="small" data-r="${addMonthsYM(fy, -12)},${addMonthsYM(fy, -1)}">Last financial year</button></div>
+    ${(S.projects || []).length ? `<div class="field"><label>Project</label><select id="f-proj"><option value="">All accounts</option>
+      ${S.projects.map(p => `<option value="${p.id}" ${p.id == r.project ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
     ${hasGroups ? `<label class="check"><input type="checkbox" id="f-gonly" ${r.groupsOnly ? 'checked' : ''}> Groups only</label>` : ''}</div>`;
 }
 function wireMonthRange(key, redraw) {
@@ -1848,14 +1855,16 @@ function wireMonthRange(key, redraw) {
   $('#f-from').onchange = apply; $('#f-to').onchange = apply;
   const g = $('#f-gonly');
   if (g) g.onchange = () => { r.groupsOnly = g.checked; redraw(); };
+  const pj = $('#f-proj');
+  if (pj) pj.onchange = () => { r.project = pj.value; redraw(); };
   $$('[data-r]').forEach(b => b.onclick = () => { [r.from, r.to] = b.dataset.r.split(','); redraw(); });
 }
 
 async function reportPL() {
   const r = monthRangeState('pl');
-  let d = await GET(`/api/reports/pl?from=${r.from}&to=${r.to}`);
+  let d = await GET(`/api/reports/pl?from=${r.from}&to=${r.to}${projQS(r)}`);
   // Budget vs actual needs a budget for every month (budget_cover); otherwise the actual P&L shows.
-  if (r.view && r.view !== 'actual' && d.budget_cover.available) return plBudgetView(await GET(`/api/reports/pl?from=${r.from}&to=${r.to}&budget=1`), r);
+  if (r.view && r.view !== 'actual' && d.budget_cover.available) return plBudgetView(await GET(`/api/reports/pl?from=${r.from}&to=${r.to}${projQS(r)}&budget=1`), r);
   const multi = d.months.length > 1;
   const cols = d.months.length + (multi ? 1 : 0);
   // With several months the Total column is shaded (ptot) so it stands apart from the months.
@@ -1879,19 +1888,19 @@ async function reportPL() {
   rowsHtml += valsRow('Net profit', d.net_profit, d.net_profit_total, 'grand');
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, 'actual')}
-    <div class="report pl-act">${reportHead('Profit &amp; Loss', plPeriod(d))}
+    <div class="report pl-act">${reportHead('Profit &amp; Loss', plPeriod(d) + projTag(d))}
       ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   wireMonthRange('pl', reportPL); wirePlView(r);
   $('#x-csv').onclick = () => {
-    const out = [[S.settings.business_name], ['Profit & Loss'], [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
+    const out = [[S.settings.business_name], ['Profit & Loss'], ...(d.project ? [[`Project: ${d.project.name}`]] : []), [], ['Account', ...(multi ? d.months : []), multi ? 'Total' : d.months[0]]];
     d.sections.forEach(s => {
       out.push([s.title]);
       csvTreeLines(lines(s), x => x.name).forEach(([label, vals, total]) => out.push([label, ...(multi ? vals.map(c2d) : []), c2d(total)]));
       out.push([`Total ${s.title}`, ...(multi ? s.totals.map(c2d) : []), c2d(s.total)]);
     });
     out.push(['Net profit', ...(multi ? d.net_profit.map(c2d) : []), c2d(d.net_profit_total)]);
-    download(`Profit-and-Loss-${r.from}-to-${r.to}.csv`, out);
+    download(`Profit-and-Loss${projFile(d)}-${r.from}-to-${r.to}.csv`, out);
   };
 }
 
@@ -1981,7 +1990,7 @@ async function plBudgetView(d, r) {
   const title = monthly ? 'Budget vs Actual, Month by Month' : 'Budget vs Actual, YTD Accumulative';
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, r.view)}
-    <div class="report bva${monthly ? ' bva-mm' : ''}">${reportHead(title, `${plPeriod(d)} · compared with ${esc(names)}`)}
+    <div class="report bva${monthly ? ' bva-mm' : ''}">${reportHead(title, `${plPeriod(d)} · compared with ${esc(names)}${projTag(d)}`)}
       ${monthly ? `<div class="mm-key no-print">Whole dollars. A positive difference is better than budget (spent less, or earned more). <span class="bad">Red</span> is worse than budget: over spent, or income short. Hover a difference for the exact figures.</div>` : ''}
       ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
@@ -1990,7 +1999,7 @@ async function plBudgetView(d, r) {
     // Budget before Actual, the same order as the screen.
     const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Budget`, `${m} Actual`, `${m} Variance`]), 'Total Budget', 'Total Actual', 'Total Variance']
       : ['Account', 'Budget', 'Actual', 'Variance', 'Variance %'];
-    const out = [[S.settings.business_name], [title], [`${plPeriod(d)}, compared with ${names}`], [], hdr];
+    const out = [[S.settings.business_name], [title], [`${plPeriod(d)}, compared with ${names}`], ...(d.project ? [[`Project: ${d.project.name}`]] : []), [], hdr];
     const line = (label, A, B) => {
       if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(B[i]), c2d(a), c2d(a - B[i])]), c2d(sum(B)), c2d(sum(A)), c2d(sum(A) - sum(B))]);
       else { const p = varPct(A[0], B[0]); out.push([label, c2d(B[0]), c2d(A[0]), c2d(A[0] - B[0]), p === null ? '' : p.toFixed(1)]); }
@@ -2003,20 +2012,20 @@ async function plBudgetView(d, r) {
       if (s.type === 'cos' && s.rows.length) line('Gross profit', ...prof('gross_profit'));
     });
     line('Net profit', ...prof('net_profit'));
-    download(`Budget-vs-Actual-${monthly ? 'monthly' : 'YTD'}-${r.from}-to-${r.to}.csv`, out);
+    download(`Budget-vs-Actual${projFile(d)}-${monthly ? 'monthly' : 'YTD'}-${r.from}-to-${r.to}.csv`, out);
   };
 }
 
 async function reportBS() {
   const r = monthRangeState('bs');
-  const d = await GET(`/api/reports/bs?from=${r.from}&to=${r.to}`);
+  const d = await GET(`/api/reports/bs?from=${r.from}&to=${r.to}${projQS(r)}`);
   const n = d.dates.length;
   // Same column headings as the P&L: one column per month, each the balance at that month's end.
   const head = `<tr><th></th>${d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('')}</tr>`;
   const valsRow = (label, vals, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${vals.map(repCell).join('')}</tr>`;
   const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
   const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!r.groupsOnly);
-  const rowLabel = x => esc(x.name) + (x.computed ? ' <span class="muted">(this financial year)</span>' : '') + (x.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : '');
+  const rowLabel = x => esc(x.name) + (x.computed && !x.earlier ? ' <span class="muted">(this financial year)</span>' : '') + (x.partner ? ' <span class="muted">(the part of shared accounts, invoices and bills that belongs to the other owners)</span>' : '');
   const sectionRows = s => lines(s).forEach(l => {
     if (l.kind === 'row') rowsHtml += valsRow(rowLabel(l.row), l.row.values, 'sub', l.row.account_id ? `#/register/${l.row.account_id}?from=2000-01-01&to=${d.dates[n - 1]}` : '', treeCell(l, 28));
     else rowsHtml += valsRow(esc(l.group.name), l.values, `sub ${headClass(l)}`, '', treeCell(l, 28));
@@ -2037,20 +2046,21 @@ async function reportBS() {
   const period = n === 1 ? `As at ${dfmt(d.dates[0])}` : `Month ends, ${monthLong(d.months[0])} to ${monthLong(d.months[n - 1])}`;
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `${monthRangeFilters('bs', hasGroups)}
-    ${!d.balanced ? '<div class="notice bad">The balance sheet doesn\'t balance. This shouldn\'t happen. Please check the Trial Balance.</div>' : ''}
-    ${hist && hist.values.some(v => v) ? '<div class="notice warn">Historical Balancing isn\'t zero. Your opening balances don\'t fully balance yet. <a href="#/opening">Review opening balances</a></div>' : ''}
-    <div class="report">${reportHead('Balance Sheet', period)}${repTable(head, rowsHtml)}</div>`);
+    ${d.project ? `<div class="notice info no-print">Showing only the accounts in the project “${esc(d.project.name)}”. Project earnings are this project's profit. This view doesn't balance on its own, because the project's money moves through accounts outside it (usually your bank account). Choose “All accounts” for the full balance sheet.</div>` : ''}
+    ${d.balanced === false ? '<div class="notice bad">The balance sheet doesn\'t balance. This shouldn\'t happen. Please check the Trial Balance.</div>' : ''}
+    ${!d.project && hist && hist.values.some(v => v) ? '<div class="notice warn">Historical Balancing isn\'t zero. Your opening balances don\'t fully balance yet. <a href="#/opening">Review opening balances</a></div>' : ''}
+    <div class="report">${reportHead('Balance Sheet', period + projTag(d))}${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   wireMonthRange('bs', reportBS);
   $('#x-csv').onclick = () => {
-    const out = [[S.settings.business_name], ['Balance Sheet'], [], ['Account', ...d.dates]];
+    const out = [[S.settings.business_name], ['Balance Sheet'], ...(d.project ? [[`Project: ${d.project.name}`]] : []), [], ['Account', ...d.dates]];
     d.sections.forEach(s => {
       out.push([s.title]);
       csvTreeLines(lines(s), x => x.name).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
       out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
     });
     out.push(['Net assets', ...d.net_assets.map(c2d)]);
-    download(`Balance-Sheet-${r.from}-to-${r.to}.csv`, out);
+    download(`Balance-Sheet${projFile(d)}-${r.from}-to-${r.to}.csv`, out);
   };
 }
 
@@ -2717,7 +2727,8 @@ async function accountsPage() {
   await refreshState();
   const showArch = QS.get('archived') === '1';
   let rowsHtml = '';
-  const kind = a => a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') + (isShared(a) ? ` · shared, yours ${pctText(a.share_bp)}` : '') : a.system ? 'System' : '';
+  const kindText = a => a.subtype === 'bank' ? (a.type === 'asset' ? 'Bank account' : 'Credit card') + (isShared(a) ? ` · shared, yours ${pctText(a.share_bp)}` : '') : a.system ? 'System' : '';
+  const kind = a => esc(kindText(a)) + projectsOf(a.id).map(p => ` <span class="pill">${esc(p.name)}</span>`).join('');
   TYPE_GROUPS.forEach(([t, label]) => {
     const list = S.accounts.filter(a => a.type === t && (showArch || !a.archived));
     if (!list.length && !groupsOfType(t).length) return;
@@ -2739,8 +2750,8 @@ async function accountsPage() {
     });
   });
   const dups = duplicateAccountNames();
-  page('Chart of accounts', 'Open an account to put it in a group. Groups show a subtotal here and on the reports.',
-    `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button id="g-new">New group</button><button class="primary" id="a-new">New account</button>`,
+  page('Chart of accounts', 'Open an account to put it in a group or a project. Groups show a subtotal here and on the reports; projects let you filter the Profit &amp; Loss and Balance Sheet.',
+    `<a class="btn" href="#/accounts${showArch ? '' : '?archived=1'}">${showArch ? 'Hide' : 'Show'} archived</a><button id="p-list">Projects</button><button id="g-new">New group</button><button class="primary" id="a-new">New account</button>`,
     `${dups.length ? `<div class="notice warn">More than one account is called ${dups.map(n => `“${esc(n)}”`).join(', ')}. Rename one of each so they can't be mixed up.</div>` : ''}
     <div class="filters"><div class="field"><label>Find an account</label><input type="search" id="a-find" placeholder="Type part of a name" autocomplete="off"></div></div>
     <div class="panel flush"><table><thead><tr><th>Name</th><th>Kind</th><th class="num">Balance</th></tr></thead><tbody>${rowsHtml}</tbody></table>
@@ -2749,6 +2760,7 @@ async function accountsPage() {
   $$('tr[data-gid]').forEach(tr => tr.onclick = () => groupModal(groupById(tr.dataset.gid)));
   $('#a-new').onclick = () => accountModal(null);
   $('#g-new').onclick = () => groupModal(null);
+  $('#p-list').onclick = () => projectsModal();
   $('#a-find').oninput = () => filterChart(val('#a-find'));
 }
 // Show only chart lines whose name has every typed word, plus the headings above them and,
@@ -2812,6 +2824,62 @@ function groupModal(g) {
   });
 }
 
+// ---------------------------------------------------------------- projects
+// A project (e.g. an investment property) is a named set of accounts; an account can be in several.
+// The P&L and Balance Sheet can be filtered to one project. Projects never change balances.
+const projectById = id => (S.projects || []).find(p => p.id == id);
+const projectsOf = aid => (S.projects || []).filter(p => p.account_ids.includes(+aid));
+
+function projectsModal() {
+  const list = S.projects || [];
+  modal(`<h2>Projects</h2>
+    <p class="muted" style="margin-top:0">A project is a set of accounts you want to report on together, such as an investment property. Choose a project on the Profit &amp; Loss or Balance Sheet to see only its accounts. An account can be in more than one project.</p>
+    ${list.length ? `<div class="panel flush"><table><tbody>${list.map(p => `<tr class="click" data-pid="${p.id}"><td>${esc(p.name)}</td><td class="muted">${p.account_ids.length} account${p.account_ids.length === 1 ? '' : 's'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty">No projects yet.</div>'}
+    <div class="modal-foot"><button data-x="no">Close</button><button class="primary" data-x="new">New project</button></div>`, el => {
+    el.querySelector('[data-x=no]').onclick = closeModal;
+    el.querySelector('[data-x=new]').onclick = () => projectModal(null);
+    el.querySelectorAll('tr[data-pid]').forEach(tr => tr.onclick = () => projectModal(projectById(tr.dataset.pid)));
+  });
+}
+
+function projectModal(p) {
+  const ticked = new Set(p ? p.account_ids : []);
+  const lists = TYPE_GROUPS.map(([t, label]) => {
+    const accts = S.accounts.filter(a => a.type === t && (!a.archived || ticked.has(a.id))).sort(byName);
+    return accts.length ? `<div class="pm-type"><b>${label}</b>${accts.map(a => `<label class="check"><input type="checkbox" value="${a.id}" ${ticked.has(a.id) ? 'checked' : ''}> ${esc(a.name)}${a.archived ? ' <span class="pill">archived</span>' : ''}</label>`).join('')}</div>` : '';
+  }).join('');
+  modal(`<h2>${p ? 'Edit project' : 'New project'}</h2>
+    <div class="form-grid"><div class="field"><label>Name</label><input id="pm-name" value="${esc(p ? p.name : '')}" placeholder="e.g. Investment property"></div></div>
+    <div class="field"><label>Accounts in this project</label><div class="hint">Tick the income, expense, asset and loan accounts that belong to this project. Accounts can be in other projects too.</div>
+      <input type="search" id="pm-find" placeholder="Find an account" autocomplete="off" style="margin:6px 0">
+      <div class="gm-list" id="pm-list">${lists}</div></div>
+    <div class="modal-foot">${p ? '<button class="danger" data-x="del" style="margin-right:auto">Delete project</button>' : ''}<button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
+    el.querySelector('[data-x=no]').onclick = closeModal;
+    el.querySelector('#pm-find').oninput = () => {
+      const words = searchWords(val('#pm-find', el));
+      // style.display, not hidden: .check sets display, which beats the hidden attribute.
+      el.querySelectorAll('#pm-list .pm-type').forEach(t => {
+        let any = false;
+        t.querySelectorAll('label').forEach(l => { const on = !words.length || wordsMatch(words, l.textContent); l.style.display = on ? '' : 'none'; any = any || on; });
+        t.style.display = any ? '' : 'none';
+      });
+    };
+    const del = el.querySelector('[data-x=del]');
+    if (del) del.onclick = async () => {
+      if (!await confirmBox(`Delete the project “${esc(p.name)}”? Its accounts stay in your chart of accounts and no transactions or balances change.`, 'Delete project', true)) return;
+      try { await api('DELETE', `/api/projects/${p.id}`); toast('Project deleted'); accountsPage(); } catch (e) { fail(e); }
+    };
+    el.querySelector('[data-x=yes]').onclick = async () => {
+      try {
+        const b = { name: val('#pm-name', el), account_ids: [...el.querySelectorAll('#pm-list input:checked')].map(i => +i.value) };
+        if (p) await api('PUT', `/api/projects/${p.id}`, b); else await api('POST', '/api/projects', b);
+        closeModal(); toast('Saved'); accountsPage();
+      } catch (e) { fail(e); }
+    };
+  });
+}
+
 function accountModal(a) {
   const sys = a && a.system;
   modal(`<h2>${a ? 'Edit account' : 'New account'}</h2>
@@ -2825,6 +2893,8 @@ function accountModal(a) {
       <div class="field am-newgrp"><label>New group name</label><input id="am-gname" placeholder="e.g. Motor vehicle"></div>
       <div class="field am-newgrp"><label>Put new group inside</label><select id="am-gparent"></select></div>
     </div>
+    ${(S.projects || []).length ? `<div class="field"><label>Projects</label><div class="am-proj">${S.projects.map(p => `<label class="check"><input type="checkbox" value="${p.id}" ${a && p.account_ids.includes(a.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</div>
+      <div class="hint">Filter the Profit &amp; Loss and Balance Sheet to a project to see only its accounts. Manage projects with the Projects button on the chart of accounts.</div></div>` : ''}
     ${a && !sys ? `<label class="check"><input type="checkbox" id="am-arch" ${a.archived ? 'checked' : ''}> Archived</label>` : ''}
     <div class="modal-foot">${a && !sys && !a.used ? '<button class="danger" data-x="del" style="margin-right:auto">Delete</button>' : ''}<button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
     el.querySelector('[data-x=no]').onclick = closeModal;
@@ -2850,6 +2920,7 @@ function accountModal(a) {
         if (grp === 'new') b.new_group = { name: val('#am-gname', el), parent_id: val('#am-gparent', el) || null };
         else b.group_id = grp || null;
         if (a && !sys) b.archived = el.querySelector('#am-arch').checked;
+        if ((S.projects || []).length) b.project_ids = [...el.querySelectorAll('.am-proj input:checked')].map(i => +i.value);
         if (a) await api('PUT', `/api/accounts/${a.id}`, b); else await api('POST', '/api/accounts', b);
         closeModal(); toast('Saved'); accountsPage();
       } catch (e) { fail(e); }

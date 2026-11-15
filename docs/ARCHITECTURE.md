@@ -15,6 +15,8 @@ A single Python process serves the static frontend and a JSON API. All state is 
 |---|---|
 | `settings` | Key/value: `business_name`, `conversion_date` (start date), `fy_start_month`, `lock_date`, `next_invoice_number`, `setup_done`, `last_recurring_run` |
 | `accounts` | Chart of accounts. `name` is what users see and pick by, so it's unique ignoring case and extra spaces (checked in `account_payload()`, not a DB index, so older books with duplicates still open). `code` is backend-only: the server picks the next free `<type digit>-NNNN` when none is sent, and the UI never shows it. `type` ∈ asset, liability, equity, income, cos, expense. `subtype` ∈ bank, ar, ap, re, hist, partner, other. `share_bp` = user's share of a shared bank account in basis points (10000 = 100%). `csv_map` = JSON column choices from the last statement CSV import into a bank account (each column by position and header name). `group_id` = optional account group |
+| `projects` | Named sets of accounts to report on together (e.g. an investment property): `name` (unique ignoring case and spacing). Presentation only |
+| `project_accounts` | Which accounts are in which project (`project_id`, `account_id`); many-to-many, so an account can be in several projects |
 | `account_groups` | Headings with subtotals for the chart of accounts and reports: `name`, `type` (same values as accounts; a group only holds accounts of its type), `parent_id` (optional group of the same type; at most 4 levels). Presentation only |
 | `contacts` | Customers/suppliers, default account |
 | `journals` | One row per financial event: date, memo, reference, `source` (opening, sale, bill, receipt, payment, spend, receive, transfer, journal), `source_id`, `contact_id`, `recurring_id`; `rule_id`/`rule_mode` (auto, recommend) when a bank rule created it, `reviewed`=1 once a recommended one is edited or reconciled |
@@ -55,6 +57,8 @@ All computed on request from `journal_lines` joined to `journals` and `accounts`
 - **Trial balance:** debit/credit per account
 
 **Account groups** are presentation only. P&L and balance sheet rows carry `group_id`; the frontend (`groupTree`/`treeLines` in `app.js`) arranges rows under group headings and adds the subtotals, so section totals, profit and balances never depend on groups. At every level, groups come first A-Z, then ungrouped accounts A-Z by name, so no numbering scheme is needed. "Groups only" collapses each top-level group to one line.
+
+**Projects** are presentation only too. `?project=ID` on the P&L and balance sheet keeps only that project's accounts (still read through `report_lines()`, so shared-account and shared-invoice cuts apply). Budget vs actual follows, since budget rows are keyed by the same accounts. On the balance sheet, a project view shows its tagged asset/liability/equity accounts plus computed "Project earnings" (the project's profit this financial year) and "Project earnings, earlier years"; it leaves out Other owners' share and the whole-business retained earnings, and returns `balanced: null`, because the project's cash sits in accounts outside it.
 
 ### Shared bank accounts and shared invoices/bills
 
@@ -108,11 +112,12 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 
 | Method & path | Purpose |
 |---|---|
-| `GET /state` | Settings, accounts (with balances), contacts, account groups; runs due recurring once per day |
+| `GET /state` | Settings, accounts (with balances), contacts, account groups, projects (`{id, name, account_ids}`); runs due recurring once per day |
 | `PUT /settings` | Update settings (business name, FY month, invoice number, start date, lock date, setup_done) |
 | `GET/PUT /opening` | Read or replace opening balances (`{balances: {account_id: natural_cents}}`) |
-| `GET/POST /accounts`, `PUT/DELETE /accounts/:id` | Chart of accounts. `code` is optional (generated on create, kept on edit). A name already used by another account is refused; a pre-existing duplicate can still be edited until it is renamed. `group_id` puts the account in a group; `new_group: {name, parent_id}` creates one and joins it in the same request. Changing an account's type takes it out of a group of the old type |
+| `GET/POST /accounts`, `PUT/DELETE /accounts/:id` | Chart of accounts. `code` is optional (generated on create, kept on edit). A name already used by another account is refused; a pre-existing duplicate can still be edited until it is renamed. `group_id` puts the account in a group; `new_group: {name, parent_id}` creates one and joins it in the same request. Changing an account's type takes it out of a group of the old type. `project_ids` (optional) sets exactly which projects the account is in |
 | `POST /groups`, `PUT/DELETE /groups/:id` | Account groups (`{name, type, parent_id, account_ids}`; `account_ids` sets the exact members). Delete moves the group's accounts and subgroups up one level |
+| `POST /projects`, `PUT/DELETE /projects/:id` | Projects (`{name, account_ids}`; `account_ids` sets the exact members). Delete removes only the project, never accounts or transactions |
 | `GET/POST /contacts`, `PUT/DELETE /contacts/:id` | Contacts |
 | `GET /invoices?kind=&status=&contact_id=` | List (status: open, overdue, paid, void, all) |
 | `GET/PUT /invoices/:id`, `POST /invoices`, `POST /invoices/:id/void` | Invoices and bills |
@@ -124,8 +129,8 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `POST /reconcile/import` | Statement lines for one account: skip duplicates, apply bank rules (`{account_id, lines: [{date, amount, description}], mapping?}`; `mapping` = the column choices, saved on the account and returned as `csv_map` in `/state`) |
 | `GET/POST /rules`, `GET/PUT/DELETE /rules/:id`, `POST /rules/reorder`, `POST /rules/test` | Bank rules; delete archives a rule that has created transactions; test returns the regex, a sample match and recent matching lines |
 | `GET/POST /recurring`, `GET/PUT/DELETE /recurring/:id`, `POST /recurring/:id/skip`, `POST /recurring/run` | Recurring templates |
-| `GET /reports/pl?from=YYYY-MM&to=YYYY-MM[&budget=1]` | Profit & Loss by month, with `budget_cover`. `budget=1` adds budget figures and fails (400) unless every month has a budget |
-| `GET /reports/bs?from=YYYY-MM&to=YYYY-MM` | Balance sheet, one month-end column per month (max 36). Older form `?to=YYYY-MM&count=N` still works |
+| `GET /reports/pl?from=YYYY-MM&to=YYYY-MM[&budget=1][&project=ID]` | Profit & Loss by month, with `budget_cover` and `project`. `project` limits it to that project's accounts. `budget=1` adds budget figures and fails (400) unless every month has a budget |
+| `GET /reports/bs?from=YYYY-MM&to=YYYY-MM[&project=ID]` | Balance sheet, one month-end column per month (max 36). `project` shows only that project's accounts and earnings (`balanced: null`). Older form `?to=YYYY-MM&count=N` still works |
 | `GET /reports/aged?kind=sale\|bill&as_at=` | Aged receivables/payables |
 | `GET /reports/tb?as_at=` | Trial balance |
 | `GET /budgets` | Budgets with yearly income, expenses and net profit |

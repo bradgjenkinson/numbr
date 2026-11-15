@@ -1074,6 +1074,83 @@ try:
     r = call('GET', f'/api/reports/pl?from={fy_months[10]}&to={ym_add(fy, 13)}&budget=1', expect_ok=False)
     check('No budget covers' in r.get('error', ''), 'budget vs actual is refused when a month has no budget')
 
+    # projects: named sets of accounts that filter the P&L and Balance Sheet; an account can be in several
+    tdi = td.isoformat()
+    bank = A['1-1100']
+    rent = call('POST', '/api/accounts', {'name': 'Rent Income', 'type': 'income'})['id']
+    prop_exp = call('POST', '/api/accounts', {'name': 'Property Expenses', 'type': 'expense'})['id']
+    prop = call('POST', '/api/accounts', {'name': 'Investment Property', 'type': 'asset'})['id']
+    pl_all0 = call('GET', f'/api/reports/pl?{rng}')
+    rental = call('POST', '/api/projects', {'name': 'Rental', 'account_ids': [rent, prop_exp, prop]})['id']
+    shared_p = call('POST', '/api/projects', {'name': 'Shared costs', 'account_ids': [prop_exp, A['6-1600']]})['id']
+    r = call('POST', '/api/projects', {'name': '  rental ', 'account_ids': []}, expect_ok=False)
+    check('already a project' in r.get('error', ''), 'project names must be unique ignoring case and spacing')
+    r = call('POST', '/api/projects', {'name': ''}, expect_ok=False)
+    check('name' in r.get('error', ''), 'a project needs a name')
+    projs = {p['name']: p for p in call('GET', '/api/state')['projects']}
+    check(projs['Rental']['account_ids'] == sorted([rent, prop_exp, prop]), 'project keeps its accounts')
+    check(prop_exp in projs['Shared costs']['account_ids'] and prop_exp in projs['Rental']['account_ids'],
+          'one account can be in more than one project')
+    call('POST', '/api/txn/receive', {'date': tdi, 'bank_account_id': bank, 'memo': 'Rent',
+                                      'lines': [{'account_id': rent, 'amount': 100000}]})
+    call('POST', '/api/txn/spend', {'date': tdi, 'bank_account_id': bank, 'memo': 'Repairs',
+                                    'lines': [{'account_id': prop_exp, 'amount': 30000}]})
+    call('POST', '/api/txn/spend', {'date': tdi, 'bank_account_id': bank, 'memo': 'Not in a project',
+                                    'lines': [{'account_id': A['6-1200'], 'amount': 5000}]})
+    call('POST', '/api/txn/spend', {'date': tdi, 'bank_account_id': bank, 'memo': 'Buy property',
+                                    'lines': [{'account_id': prop, 'amount': 500000}]})
+    pl_all = call('GET', f'/api/reports/pl?{rng}')
+    check(pl_all['project'] is None and pl_all['net_profit_total'] == pl_all0['net_profit_total'] + 100000 - 30000 - 5000,
+          'unfiltered P&L still shows every account')
+    pl_r = call('GET', f'/api/reports/pl?{rng}&project={rental}')
+    ids_r = {x['account_id'] for s in pl_r['sections'] for x in s['rows']}
+    check(pl_r['project'] == {'id': rental, 'name': 'Rental'} and ids_r == {rent, prop_exp},
+          f'project P&L shows only its accounts ({ids_r})')
+    check(pl_r['net_profit_total'] == 70000, f"project net profit is its income less its costs ({pl_r['net_profit_total']})")
+    pl_s = call('GET', f'/api/reports/pl?{rng}&project={shared_p}')
+    exp_6_1600 = next((x['total'] for s in pl_all['sections'] for x in s['rows'] if x['account_id'] == A['6-1600']), 0)
+    check({x['account_id'] for s in pl_s['sections'] for x in s['rows']} <= {prop_exp, A['6-1600']}
+          and pl_s['net_profit_total'] == -30000 - exp_6_1600, 'an account in two projects counts in both')
+    bva_s = call('GET', f'/api/reports/pl?{rng}&project={shared_p}&budget=1')
+    bud_6_1600 = next(x['budget_total'] for s in bva['sections'] for x in s['rows'] if x['account_id'] == A['6-1600'])
+    check({x['account_id'] for s in bva_s['sections'] for x in s['rows']} <= {prop_exp, A['6-1600']}
+          and bva_s['net_profit_budget_total'] == -bud_6_1600, 'budget vs actual for a project uses only its budgets')
+    bs_r = call('GET', f'/api/reports/bs?to={tdi[:7]}&count=1&project={rental}')
+    a_rows = bs_r['sections'][0]['rows']
+    eq_rows = {x['name']: x['values'] for x in bs_r['sections'][2]['rows']}
+    check([x['account_id'] for x in a_rows] == [prop] and a_rows[0]['values'] == [500000] and not bs_r['sections'][1]['rows'],
+          'project balance sheet shows only its accounts')
+    check(eq_rows == {'Project earnings': [70000]}, f'project earnings are the project profit this year ({eq_rows})')
+    check(bs_r['balanced'] is None and bs_r['project']['name'] == 'Rental', 'project balance sheet is not checked for balance')
+    r = call('GET', f'/api/reports/pl?{rng}&project=99999', expect_ok=False)
+    check('Project not found' in r.get('error', ''), 'an unknown project is refused')
+    # the account form's tick-boxes replace that account's projects
+    call('PUT', f'/api/accounts/{prop_exp}', {'name': 'Property Expenses', 'type': 'expense', 'project_ids': [shared_p]})
+    projs = {p['name']: p for p in call('GET', '/api/state')['projects']}
+    check(prop_exp not in projs['Rental']['account_ids'] and prop_exp in projs['Shared costs']['account_ids'],
+          'account form sets which projects an account is in')
+    call('PUT', f'/api/accounts/{prop_exp}', {'name': 'Property Expenses'})
+    check(prop_exp in {p['name']: p for p in call('GET', '/api/state')['projects']}['Shared costs']['account_ids'],
+          'saving an account without project_ids leaves its projects alone')
+    agent = call('POST', '/api/accounts', {'name': 'Letting Agent Fees', 'type': 'expense', 'project_ids': [rental]})['id']
+    check(agent in {p['name']: p for p in call('GET', '/api/state')['projects']}['Rental']['account_ids'],
+          'a new account can join a project')
+    r = call('PUT', f'/api/accounts/{agent}', {'project_ids': [99999]}, expect_ok=False)
+    check('Project not found' in r.get('error', ''), 'an unknown project id is refused on an account')
+    call('DELETE', f'/api/accounts/{agent}')
+    check(agent not in {p['name']: p for p in call('GET', '/api/state')['projects']}['Rental']['account_ids'],
+          'deleting an account takes it out of its projects')
+    call('PUT', f'/api/projects/{rental}', {'name': 'Rental property'})
+    projs = {p['name']: p for p in call('GET', '/api/state')['projects']}
+    check('Rental property' in projs and projs['Rental property']['account_ids'] == sorted([rent, prop]),
+          'renaming a project keeps its accounts')
+    call('DELETE', f'/api/projects/{shared_p}')
+    check([p['name'] for p in call('GET', '/api/state')['projects']] == ['Rental property']
+          and call('GET', f'/api/reports/pl?{rng}')['net_profit_total'] == pl_all['net_profit_total'],
+          'deleting a project leaves accounts and figures alone')
+    acts = [a['action'] for a in call('GET', '/api/audit')]
+    check(all(x in acts for x in ('project_create', 'project_update', 'project_delete')), 'project changes are audited')
+
     tb_ = call('GET', '/api/reports/tb')
     check(tb_['debit'] == tb_['credit'], 'TB still balances with a budget')
     check(call('GET', f'/api/reports/bs?to={td.isoformat()[:7]}&count=1')['balanced'], 'BS still balances with a budget')
