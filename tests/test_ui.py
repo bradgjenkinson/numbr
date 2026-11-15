@@ -410,6 +410,39 @@ try:
         shot(page, '21c-budget-yearly-spread')
         page.click('#oa-ok'); page.wait_for_timeout(600)
         assert 'spread over Wednesdays for the year' in page.inner_text(irow), page.inner_text(irow)
+        # "Every quarter" sits below "Every fortnight": a start month and an end month that can be left to continue
+        page.click(f'{irow} .bb-setup'); page.wait_for_selector('#oa-body .seg')
+        opts = page.evaluate("[...document.querySelectorAll('.s-freq option')].map(o => o.value)")
+        assert opts.index('quarterly') == opts.index('fortnightly') + 1, opts
+        page.select_option('.s-freq', 'quarterly'); page.wait_for_selector('.s-from')
+        assert page.input_value('.s-to') == '' and 'Continues' in page.inner_text('.s-to'), page.inner_text('.s-to')
+        page.fill('.s-amt', '250'); page.wait_for_timeout(700)
+        assert page.inner_text('#oa-prev').count('250.00') == 4 and '1,000.00' in page.inner_text('#oa-prev'), page.inner_text('#oa-prev')
+        page.select_option('.s-to', index=7); page.wait_for_timeout(700)  # the 7th month: quarters in months 1, 4 and 7
+        assert page.inner_text('#oa-prev').count('250.00') == 3, page.inner_text('#oa-prev')
+        shot(page, '21c-budget-quarterly')
+        # a total for the year can be shared out by quarter between two months
+        page.select_option('.s-freq', 'yearly'); page.wait_for_selector('.s-spread')
+        page.select_option('.s-spread', 'quarterly'); page.wait_for_selector('.s-from')
+        assert page.input_value('.s-to') == page.evaluate('BB.d.months[6]')  # keeps the end month picked above
+        page.select_option('.s-to', page.evaluate('BB.d.months[11]'))
+        ok, boxes = same_line('.s-from', '.s-to'); assert ok and page.locator('.s-from').bounding_box()['y'] > amt_y(), boxes
+        page.fill('.s-amt', '1200'); page.wait_for_timeout(700)
+        assert page.inner_text('#oa-prev').count('300.00') == 4, page.inner_text('#oa-prev')
+        shot(page, '21c-budget-yearly-quarterly')
+        page.click('#oa-ok'); page.wait_for_timeout(600)
+        assert 'spread over the quarters' in page.inner_text(irow) and '1,200.00' in page.inner_text(irow), page.inner_text(irow)
+        # "Every year (annual)" comes after "Every quarter": one month, the same month each year
+        page.click(f'{irow} .bb-setup'); page.wait_for_selector('#oa-body .seg')
+        opts = page.evaluate("[...document.querySelectorAll('.s-freq option')].map(o => o.value)")
+        assert opts.index('annual') == opts.index('quarterly') + 1 and opts[-1] == 'yearly', opts
+        page.select_option('.s-freq', 'annual'); page.wait_for_selector('.s-from')
+        assert page.locator('.s-to').count() == 0
+        page.select_option('.s-from', index=3); page.fill('.s-amt', '199'); page.wait_for_timeout(700)
+        prev = page.inner_text('#oa-prev')
+        assert prev.count('199.00') == 2 and prev.count('0.00') == 11, prev  # one month plus the year total; 11 empty months
+        shot(page, '21c-budget-annual')
+        page.click('#oa-cancel'); page.wait_for_timeout(600)
         # year totals sit above the accounts, match the preview, and stay in view when scrolled to the bottom
         bar = page.locator('#bb-totals')
         page.evaluate('window.scrollTo(0, 0)'); page.wait_for_timeout(200)
@@ -441,6 +474,21 @@ try:
         page.reload(); page.wait_for_selector('.bcell input')
         assert page.locator(f'.bcell input[data-a="{rent}"][data-i="0"]').input_value() == '150.00'
         assert '1,330.00' in page.inner_text(f'tr[data-a="{rent}"]')
+        assert len(errors) == n_err, errors
+        # the built budget can be opened in the builder again; a hand-edited account keeps its figures as typed months
+        bud_url = page.url
+        page.click('#bv-rebuild'); page.wait_for_selector('.bb-table')
+        assert page.url.endswith('/rebuild') and 'Rebuild' in page.inner_text('h1'), page.inner_text('h1')
+        assert 'edited by hand' in page.inner_text(row) and page.input_value(f'{row} .bb-method') == 'manual', page.inner_text(row)
+        assert 'own amounts' not in page.inner_text(irow).lower() or 'spread over the quarters' in page.inner_text(irow), page.inner_text(irow)
+        shot(page, '21f-budget-rebuild')
+        page.select_option(f'{irow} .bb-method', 'none'); page.wait_for_timeout(600)
+        page.click('#bb-next'); page.wait_for_selector('#bb-name')
+        assert page.inner_text('#bb-next') == 'Update budget'
+        page.click('#bb-next'); page.wait_for_selector('.bcell input')
+        assert page.url == bud_url and 'Budget updated' in toast_text(page), (page.url, toast_text(page))
+        assert page.locator(f'.bcell input[data-a="{rent}"][data-i="0"]').input_value() == '150.00'
+        assert page.locator(f'.bcell input[data-a="{ins}"]').count() == 0, 'insurance no longer budgeted'
         assert len(errors) == n_err, errors
 
         # budget vs actual on the P&L: YTD accumulative totals, then month by month; refused for months with no budget
