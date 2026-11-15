@@ -40,11 +40,13 @@ Nothing needs closing. Retained earnings roll over automatically on 1 July. Give
 **Budgets → Build a budget** walks you through it: pick the financial year, then for each income and expense account choose how to budget it. Each account starts with a suggestion: the method you used last year, otherwise its monthly average if it has history.
 
 - **Monthly average** or **Last month**: from your last 12 full months of actuals.
-- **My own amounts**: amounts that repeat, e.g. $100 a month from July to October, then $110 a month from November; or $50 a week starting on a given date (weeks and fortnights land in the month they fall in); or a total for the year spread evenly across the months.
+- **My own amounts**: amounts that repeat, e.g. $100 a month from July to October, then $110 a month from November; or $50 a week starting on a given date (weeks and fortnights land in the month they fall in); or $300 every quarter from a start month (with an end month, or leave it to continue); or $199 once a year in March for an annual subscription (next year's budget puts it in March again); or a total for the year spread evenly across the months, or by quarter between two months (e.g. $1,200 from July to June is $300 in July, October, January and April).
 - **Type each month**: all 12 months by hand.
 - **Don't budget**.
 
 Once built, change any figure on the budget page by typing over it and **Save changes**. Those edits don't change how next year's builder starts: it reuses the choices you made when building (moved forward a year). To change the choices themselves, delete the budget and build it again.
+
+To rework a budget with the builder's methods (e.g. switch an account to a quarterly amount, or refresh the monthly averages), click **Rebuild with builder** on the budget page. Each account starts with the method it was built with; accounts you changed by hand are marked "edited by hand" and start as typed months holding your figures, so they stay as they are unless you pick another method. **Update budget** replaces the budget's figures and the choices next year's builder starts from.
 
 Near the end of each financial year, build next year's budget: each account starts the way you did it this year (marked "as last year"), so just adjust anything that's changed.
 

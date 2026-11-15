@@ -425,8 +425,9 @@ const ROUTES = [
   [/^#\/reports\/aged-ap$/, () => reportAged('bill')],
   [/^#\/reports\/tb$/, reportTB],
   [/^#\/budgets$/, budgetList],
-  [/^#\/budgets\/new$/, budgetBuilder],
+  [/^#\/budgets\/new$/, () => budgetBuilder()],
   [/^#\/budgets\/(\d+)$/, m => budgetView(m[1])],
+  [/^#\/budgets\/(\d+)\/rebuild$/, m => budgetBuilder(m[1])],
   [/^#\/contacts$/, contactsList],
   [/^#\/contacts\/new$/, () => contactForm()],
   [/^#\/contacts\/(\d+)$/, m => contactForm(m[1])],
@@ -2099,17 +2100,17 @@ async function reportTB() {
 // are edited by hand on the budget page.
 const BUDGET_METHOD = { average: 'Monthly average', last: 'Last month', schedule: 'My own amounts', manual: 'Type each month', none: "Don't budget" };
 const BUDGET_SECTIONS = [['income', 'Income'], ['cos', 'Cost of Sales'], ['expense', 'Expenses']];
-const SCHED_FREQ = { monthly: 'Every month', weekly: 'Every week', fortnightly: 'Every fortnight', yearly: 'Total for the year' };
-// How a total for the year is shared out. Anything but monthly uses start/end dates inside the year.
-const YEAR_SPREAD = { monthly: 'Evenly each month', weekly: 'By day of the week', fortnightly: 'By fortnight', daily: 'By day' };
+const SCHED_FREQ = { monthly: 'Every month', weekly: 'Every week', fortnightly: 'Every fortnight', quarterly: 'Every quarter', annual: 'Every year (annual)', yearly: 'Total for the year' };
+// How a total for the year is shared out. Monthly and quarterly use from/to months; the rest use start/end dates inside the year.
+const YEAR_SPREAD = { monthly: 'Evenly each month', quarterly: 'By quarter', weekly: 'By day of the week', fortnightly: 'By fortnight', daily: 'By day' };
 const SPREAD_DAYS = { all: 'Every day', weekdays: 'Weekdays only (Mon–Fri)' };
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];  // 0 = Monday, as the server counts
 const spreadOf = s => (s.freq === 'yearly' && s.spread) || 'monthly';
 // Segments with from/to months rather than dates.
-const BY_MONTH = s => s.freq === 'monthly' || (s.freq === 'yearly' && spreadOf(s) === 'monthly');
+const BY_MONTH = s => s.freq === 'monthly' || s.freq === 'quarterly' || s.freq === 'annual' || (s.freq === 'yearly' && ['monthly', 'quarterly'].includes(spreadOf(s)));
 const fyFirstDay = months => `${months[0]}-01`;
 const fyLastDay = months => addDays(`${addMonthsYM(months[11], 1)}-01`, -1);
-const SCHED_PER = { monthly: 'a month', weekly: 'a week', fortnightly: 'a fortnight' };
+const SCHED_PER = { monthly: 'a month', weekly: 'a week', fortnightly: 'a fortnight', quarterly: 'a quarter', annual: 'a year' };
 const BUDGET_METHOD_SHORT = { average: 'average', last: 'last month', schedule: 'own amounts', manual: 'typed' };
 const PL_TYPE_SET = new Set(['income', 'cos', 'expense']);
 const sumC = v => v.reduce((a, b) => a + b, 0);
@@ -2128,14 +2129,17 @@ async function budgetList() {
 
 // Builder state: d = what the server sent, choice = {account_id: {method, config}}, preview = last server preview.
 let BB = null;
-async function budgetBuilder() {
+// With rebuildId, the builder opens again on a built budget: it skips the year, starts each account with the
+// choice it was built with (hand-edited accounts as typed months) and saving replaces that budget.
+async function budgetBuilder(rebuildId) {
   await refreshState();
   const fy = QS.get('fy');
-  const d = await GET('/api/budgets/builder' + (fy ? `?fy=${encodeURIComponent(fy)}` : ''));
+  const d = await GET('/api/budgets/builder' + (rebuildId ? `?budget=${encodeURIComponent(rebuildId)}` : fy ? `?fy=${encodeURIComponent(fy)}` : ''));
   // Each account starts with the server's suggestion: last year's choice where there is one,
   // else the monthly average when it has history, else not budgeted.
-  BB = { d, step: 1, preview: null, name: d.name,
+  BB = { d, step: rebuildId ? 2 : 1, preview: null, name: d.name, rebuild: d.budget_id || null,
     choice: Object.fromEntries(d.accounts.map(a => [a.account_id, { method: a.method, config: a.config }])) };
+  if (BB.rebuild) await builderPreview();
   drawBuilder();
 }
 const builderChoices = () => BB.d.accounts.map(a => ({ account_id: a.account_id, ...BB.choice[a.account_id] }));
@@ -2147,6 +2151,11 @@ function scheduleSummary(cfg, months) {
   if (!cfg || !cfg.length) return '';
   return cfg.map(s => {
     const amt = `${$fmt(s.amount)} ${SCHED_PER[s.freq]}`;
+    if (s.freq === 'yearly' && spreadOf(s) === 'quarterly') {
+      return `${$fmt(s.amount)} spread over the quarters from ${monthLabel(s.from)} to ${monthLabel(s.to)}`;
+    }
+    if (s.freq === 'annual') return `${amt}, in ${monthLabel(s.from)} each year`;
+    if (s.freq === 'quarterly') return `${amt} from ${monthLabel(s.from)}${s.to ? ` to ${monthLabel(s.to)}` : ''}`;
     if (s.freq === 'yearly' && spreadOf(s) !== 'monthly') {
       const over = { weekly: `${WEEKDAYS[s.weekday]}s`, fortnightly: 'fortnights', daily: s.days === 'weekdays' ? 'weekdays (Mon–Fri)' : 'every day' }[s.spread];
       const whole = s.start === fyFirstDay(months) && s.end === fyLastDay(months);
@@ -2165,8 +2174,9 @@ function scheduleSummary(cfg, months) {
 
 function drawBuilder() {
   const d = BB.d, st = BB.step;
-  const steps = `<div class="steps">${[1, 2, 3].map(i => `<span class="${i <= st ? 'on' : ''}"></span>`).join('')}</div>`;
-  const head = (t, sub) => page(`Build a budget`, `${esc(d.label)} · step ${st} of 3`, `<a class="btn" href="#/budgets">Cancel</a>`, `<div class="${st < 2 ? 'setup' : ''}">${steps}<div class="panel" id="bb">${t ? `<h2>${t}</h2>` : ''}${sub ? `<p class="muted">${sub}</p>` : ''}<div id="bb-body"></div></div></div>`);
+  const steps = `<div class="steps">${(BB.rebuild ? [2, 3] : [1, 2, 3]).map(i => `<span class="${i <= st ? 'on' : ''}"></span>`).join('')}</div>`;
+  const rb = BB.rebuild, cancel = rb ? `#/budgets/${rb}` : '#/budgets';
+  const head = (t, sub) => page(rb ? `Rebuild ${esc(d.name)}` : `Build a budget`, rb ? `${esc(d.label)} · step ${st - 1} of 2` : `${esc(d.label)} · step ${st} of 3`, `<a class="btn" href="${cancel}">Cancel</a>`, `<div class="${st < 2 ? 'setup' : ''}">${steps}<div class="panel" id="bb">${t ? `<h2>${t}</h2>` : ''}${sub ? `<p class="muted">${sub}</p>` : ''}<div id="bb-body"></div></div></div>`);
   const foot = (back, next, nextLabel = 'Continue') => `<div class="modal-foot">${back ? '<button id="bb-back">Back</button>' : ''}<button class="primary" id="bb-next">${nextLabel}</button></div>`;
   const wire = (onNext) => {
     const b = $('#bb-back'); if (b) b.onclick = () => { BB.step--; drawBuilder(); };
@@ -2179,24 +2189,29 @@ function drawBuilder() {
     $('#bb-fy').onchange = () => go(`#/budgets/new?fy=${val('#bb-fy')}`);
     wire(async () => { try { await builderPreview(); BB.step = 2; drawBuilder(); } catch (e) { fail(e); } });
   } else if (st === 2) {
-    head('Choose how to budget each account', d.history
+    head('Choose how to budget each account', BB.rebuild
+      ? `Each account starts with the method it was built with. Accounts you changed by hand since start as "Type each month" with your figures, so they stay as they are unless you pick another method. Saving replaces this budget's figures with what you see here.`
+      : d.history
       ? `Each account starts with a suggestion: ${d.prior ? `the method you used for ${esc(d.prior.label)}, or ` : ''}its monthly average from ${monthLong(d.history.from)} to ${monthLong(d.history.to)}. Change any of them; the yearly total updates as you go.`
-      : 'Pick a method for each account. Choose "My own amounts" for amounts that repeat (monthly, weekly or fortnightly) or a total for the year, or "Type each month" to enter all 12 months.');
+      : 'Pick a method for each account. Choose "My own amounts" for amounts that repeat (monthly, weekly, fortnightly, quarterly or once a year) or a total for the year, or "Type each month" to enter all 12 months.');
     drawBuilderAccounts();
   } else {
-    head('Check your budget', 'This is your budget month by month. Once it is built you can still change any figure by hand.');
+    head('Check your budget', BB.rebuild ? 'This is your budget month by month as it will be saved. You can still change any figure by hand afterwards.'
+      : 'This is your budget month by month. Once it is built you can still change any figure by hand.');
     const p = BB.preview;
     const rowsFor = type => d.accounts.filter(a => a.type === type && BB.choice[a.account_id].method !== 'none')
       .map(a => ({ account_id: a.account_id, name: a.name, group_id: a.group_id, values: BB.prev[a.account_id].values, total: BB.prev[a.account_id].total }));
     const t = p.totals, gp = t.income.map((v, i) => v - t.cos[i]);
     $('#bb-body').innerHTML = `<div class="field" style="max-width:360px"><label>Budget name</label><input id="bb-name" value="${esc(BB.name)}"></div>
       <div class="report">${budgetTable(p.months, BUDGET_SECTIONS.map(([type, title]) => ({ type, title, rows: rowsFor(type), totals: t[type] })), gp, t.net_profit)}</div>
-      ${foot(true, true, 'Build budget')}`;
+      ${foot(true, true, BB.rebuild ? 'Update budget' : 'Build budget')}`;
     $('#bb-name').oninput = () => { BB.name = val('#bb-name'); };
     wire(async () => {
       try {
-        const res = await api('POST', '/api/budgets', { fy: d.fy, name: BB.name, accounts: builderChoices() });
-        toast('Budget built'); BB = null; go(`#/budgets/${res.id}`);
+        const res = BB.rebuild
+          ? await api('PUT', `/api/budgets/${BB.rebuild}/rebuild`, { name: BB.name, accounts: builderChoices() })
+          : await api('POST', '/api/budgets', { fy: d.fy, name: BB.name, accounts: builderChoices() });
+        toast(BB.rebuild ? 'Budget updated' : 'Budget built'); BB = null; go(`#/budgets/${res.id}`);
       } catch (e) { fail(e); }
     });
   }
@@ -2222,7 +2237,7 @@ function drawBuilderAccounts() {
       const own = c.method === 'schedule' || c.method === 'manual';
       const note = own && !c.config ? '<div class="hint neg">Click Set up… to enter the amounts</div>'
         : pr.error ? `<div class="hint neg">${esc(pr.error)}</div>` : c.method === 'schedule' ? `<div class="hint">${esc(scheduleSummary(c.config, d.months))}</div>` : '';
-      body += `<tr class="sub" data-a="${a.account_id}"><td ${treeCell(l, 28)}>${esc(a.name)}${a.from_prior ? ' <span class="pill" title="Same choice as last year">as last year</span>' : ''}</td>
+      body += `<tr class="sub" data-a="${a.account_id}"><td ${treeCell(l, 28)}>${esc(a.name)}${a.from_prior ? ' <span class="pill" title="Same choice as last year">as last year</span>' : ''}${a.edited ? ' <span class="pill" title="Changed by hand since it was built: kept as typed months">edited by hand</span>' : ''}</td>
         ${h ? `<td class="num muted">${a.has_history ? fmt(a.average) : '–'}</td><td class="num muted" title="${a.last_month ? monthLong(a.last_month) : ''}">${a.last_month ? `${fmt(a.last)} <span class="small-note">${monthLabel(a.last_month)}</span>` : '–'}</td>` : ''}
         <td><div class="inline"><select class="bb-method" style="width:auto">${methods.map(k => opt(a, k)).join('')}</select>${own ? `<button class="small bb-setup">${c.config ? 'Change…' : 'Set up…'}</button>` : ''}</div>${note}</td>
         ${numCell(pr.total)}</tr>`;
@@ -2239,13 +2254,13 @@ function drawBuilderAccounts() {
   const errors = BB.preview.accounts.filter(a => a.error).length;
   $('#bb-body').innerHTML = `${totals}<div class="filters"><div class="field"><label>Set every account to</label><select id="bb-all" style="width:auto"><option value="">Choose…</option>
       ${h ? '<option value="average">Monthly average</option><option value="last">Last month</option>' : ''}<option value="none">Don't budget</option></select></div>
-      <div class="hint" style="margin:0 0 8px">Tip: "My own amounts" handles things like "$100 a month until October, then $110", a weekly amount from a start date, or a total for the year spread evenly.</div></div>
+      <div class="hint" style="margin:0 0 8px">Tip: "My own amounts" handles things like "$100 a month until October, then $110", a weekly amount from a start date, a quarterly amount, an annual subscription, or a total for the year spread evenly.</div></div>
     <div class="table-wrap"><table class="bb-table"><thead><tr><th>Account</th>${h ? '<th class="num">Average a month</th><th class="num">Last month</th>' : ''}<th>How to budget</th><th class="num">Year total</th></tr></thead>
     <tbody>${body}</tbody></table></div>
     ${errors ? `<div class="notice warn" style="margin-top:12px">${errors} account${errors > 1 ? 's need' : ' needs'} attention (see the red notes above) before you can continue.</div>` : ''}
     <div class="modal-foot"><button id="bb-back">Back</button><button class="primary" id="bb-next" ${errors ? 'disabled' : ''}>Continue</button></div>`;
   const refresh = async () => { try { await builderPreview(); drawBuilderAccounts(); } catch (e) { fail(e); } };
-  $('#bb-back').onclick = () => { BB.step = 1; drawBuilder(); };
+  $('#bb-back').onclick = () => { if (BB.rebuild) { go(`#/budgets/${BB.rebuild}`); return; } BB.step = 1; drawBuilder(); };
   $('#bb-next').onclick = () => { BB.step = 3; drawBuilder(); };
   $('#bb-all').onchange = () => {
     const m = val('#bb-all'); if (!m) return;
@@ -2271,7 +2286,9 @@ function ownAmountsModal(a, done) {
   let segs = !manual && Array.isArray(c.config) ? c.config.map(s => ({ ...s })) : [];
   let amounts = manual && c.config ? [...c.config.amounts] : (BB.prev[a.account_id] ? [...BB.prev[a.account_id].values] : Array(12).fill(0));
   if (!manual && !segs.length) segs = [{ freq: 'monthly', amount: null, from: months[0], to: months[11] }];
-  const monthSel = (cls, v) => `<select class="${cls}">${months.map(m => `<option value="${m}" ${m === v ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>`;
+  // blank: an empty first choice (e.g. "Continues"). A quarterly start before this year (it sets the rhythm) is kept as a choice.
+  const monthSel = (cls, v, blank) => `<select class="${cls}">${blank ? `<option value="">${blank}</option>` : ''}${(v && !months.includes(v) ? [v, ...months] : months)
+    .map(m => `<option value="${m}" ${m === v ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>`;
   const pick = (cls, opts, v) => `<select class="${cls}">${Object.entries(opts).map(([k, t]) => `<option value="${k}" ${String(v) === k ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
   const firstDay = fyFirstDay(months), lastDay = fyLastDay(months);
   const dateIn = (cls, v) => `<input type="date" class="${cls}" min="${firstDay}" max="${lastDay}" value="${v || ''}">`;
@@ -2284,7 +2301,11 @@ function ownAmountsModal(a, done) {
   const segRow = (s, i) => {
     const yearly = s.freq === 'yearly', spread = spreadOf(s);
     // On a yearly row the from/to (or start/end) pair always starts its own line, so the two sit side by side.
-    const when = BY_MONTH(s)
+    const when = s.freq === 'annual'
+      ? `<div class="field"><label>Month</label>${monthSel('s-from', months.includes(s.from) ? s.from : months[0])}</div>`
+      : s.freq === 'quarterly'
+      ? `<div class="field"><label>Start month</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>End month (optional)</label>${monthSel('s-to', s.to || '', 'Continues')}</div>`
+      : BY_MONTH(s)
       ? `<div class="field range"><label>From</label>${monthSel('s-from', s.from || months[0])}</div><div class="field"><label>To</label>${monthSel('s-to', s.to || months[11])}</div>`
       : yearly
         ? `${spread === 'weekly' ? `<div class="field"><label>Day of the week</label>${pick('s-wday', Object.fromEntries(WEEKDAYS.map((w, k) => [k, w])), s.weekday)}</div>` : ''}
@@ -2314,13 +2335,20 @@ function ownAmountsModal(a, done) {
       if (strict && (amount === null || isNaN(amount))) throw new Error(`Amount ${i + 1}: enter an amount like 120.50`);
       const amt = isNaN(amount) ? null : amount;
       const spread = freq === 'yearly' && q('.s-spread') ? q('.s-spread').value : 'monthly';
-      if (freq === 'yearly' && spread !== 'monthly') {
+      if (freq === 'yearly' && !['monthly', 'quarterly'].includes(spread)) {
         const s = { freq, amount: amt, spread, start: q('.s-start') ? q('.s-start').value : '', end: q('.s-end') ? q('.s-end').value : '' };
         if (spread === 'weekly') s.weekday = q('.s-wday') ? +q('.s-wday').value : 0;
         if (spread === 'daily') s.days = q('.s-days') ? q('.s-days').value : 'all';
         if (strict && (!s.start || !s.end)) throw new Error(`Amount ${i + 1}: enter a start date and an end date`);
         return s;
       }
+      if (freq === 'annual') return { freq, amount: amt, from: q('.s-from') ? q('.s-from').value : months[0] };
+      if (freq === 'quarterly') {
+        const s = { freq, amount: amt, from: q('.s-from') ? q('.s-from').value : months[0] };
+        if (q('.s-to') && q('.s-to').value) s.to = q('.s-to').value;
+        return s;
+      }
+      if (freq === 'yearly' && spread === 'quarterly') return { freq, amount: amt, spread, from: q('.s-from') ? q('.s-from').value : months[0], to: q('.s-to') ? q('.s-to').value : months[11] };
       return BY_MONTH({ freq }) ? { freq, amount: amt, from: q('.s-from') ? q('.s-from').value : months[0], to: q('.s-to') ? q('.s-to').value : months[11] }
         : { freq, amount: amt, first: q('.s-first') ? q('.s-first').value : '', ...(q('.s-until') && q('.s-until').value ? { to: q('.s-until').value } : {}) };
     });
@@ -2330,7 +2358,7 @@ function ownAmountsModal(a, done) {
   modal(`<h2>${esc(a.name)}: ${title}</h2>
     ${manual ? `<p class="hint">Enter what you expect for each month of ${esc(d.label)}.</p><div id="oa-body"></div>
         <div class="actions" style="margin-top:8px"><button class="small" id="oa-copy">Copy ${monthLabel(months[0])} to every month</button></div>`
-      : `<p class="hint">Add each amount and how often it happens. For example: $100 every month from July to October, then another line for $110 every month from November. Weekly and fortnightly amounts start on the first date you give and land in the month they fall in. "Total for the year" shares one amount out: evenly each month (e.g. $1,200 becomes $100 a month), or between a start and end date by a day of the week, by fortnight, or by day (every day or weekdays only), so a month with more of those days gets more of the total.</p>
+      : `<p class="hint">Add each amount and how often it happens. For example: $100 every month from July to October, then another line for $110 every month from November. Weekly and fortnightly amounts start on the first date you give and land in the month they fall in. Quarterly amounts land in the start month and every third month after it, until the end month if you pick one. "Every year (annual)" puts the amount in one month, and next year's budget puts it in the same month again (handy for annual subscriptions). "Total for the year" shares one amount out: evenly each month (e.g. $1,200 becomes $100 a month), by quarter between two months (e.g. $1,200 from July to June becomes $300 in July, October, January and April), or between a start and end date by a day of the week, by fortnight, or by day (every day or weekdays only), so a month with more of those days gets more of the total.</p>
         <div id="oa-body"></div><button class="small" id="oa-add">+ Add another amount</button>`}
     ${manual ? '<div class="hint" style="margin-top:10px">Year total: <b id="oa-total"></b></div>'
       : '<h2 style="margin-top:16px;font-size:14px">What this gives you</h2><div id="oa-prev" class="muted">…</div>'}
@@ -2360,7 +2388,13 @@ function ownAmountsModal(a, done) {
         const s = segs[+x.closest('.seg').dataset.i];
         s.freq = x.value;
         if (s.freq !== 'yearly') delete s.spread;
-        if (BY_MONTH(s)) {  // a "to" date from a weekly amount is not a month
+        if (s.freq === 'annual') {  // one month, inside this year
+          if (!months.includes(s.from)) s.from = months[0];
+          delete s.to;
+        } else if (s.freq === 'quarterly') {  // runs on with no end month unless one is picked
+          if (!/^\d{4}-\d{2}$/.test(s.from || '')) s.from = months[0];
+          delete s.to;
+        } else if (BY_MONTH(s)) {  // a "to" date from a weekly amount is not a month
           if (!/^\d{4}-\d{2}$/.test(s.from || '')) s.from = months[0];
           if (!/^\d{4}-\d{2}$/.test(s.to || '')) s.to = months[11];
         } else if (s.freq !== 'yearly' && !s.first) s.first = `${months[0]}-01`;
@@ -2370,6 +2404,10 @@ function ownAmountsModal(a, done) {
         read(el, false);
         const s = segs[+x.closest('.seg').dataset.i];
         s.spread = x.value;
+        if (BY_MONTH(s)) {
+          if (!/^\d{4}-\d{2}$/.test(s.from || '') || !months.includes(s.from)) s.from = months[0];
+          if (!/^\d{4}-\d{2}$/.test(s.to || '')) s.to = months[11];
+        }
         spreadDefaults(s);
         draw(); preview();
       });
@@ -2441,9 +2479,10 @@ async function budgetView(id) {
   const draw = () => {
     const secs = sections(), [gp, np] = profit(secs);
     page(esc(b.name), `${esc(b.label)} · ${monthLong(b.months[0])} to ${monthLong(b.months[11])}`,
-      `<a class="btn" href="#/budgets">All budgets</a><button id="bv-rename">Rename</button><button id="bv-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button><button class="danger" id="bv-del">Delete</button><button class="primary" id="bv-save" disabled>Save changes</button>`,
+      `<a class="btn" href="#/budgets">All budgets</a><button id="bv-rebuild" title="Open this budget in the builder again">Rebuild with builder</button><button id="bv-rename">Rename</button><button id="bv-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button><button class="danger" id="bv-del">Delete</button><button class="primary" id="bv-save" disabled>Save changes</button>`,
       `<div class="notice info no-print">Change any figure by typing over it, then <b>Save changes</b>. Use <b>⇉</b> next to an account to copy its first month to every month.
-        Changes here don't affect how next year's builder starts: that uses the choices you made when you built this budget${b.created_at ? ` on ${dfmt(b.created_at.slice(0, 10))}` : ''}.</div>
+        Changes here don't affect how next year's builder starts: that uses the choices you made when you built this budget${b.created_at ? ` on ${dfmt(b.created_at.slice(0, 10))}` : ''}.
+        To change those choices or work figures out again, use <b>Rebuild with builder</b>.</div>
       <div class="filters no-print"><div class="field"><label>Add an account to this budget</label><select class="acct-pick" id="bv-acct">${acctOptions('', a => PL_TYPE_SET.has(a.type) && !inBudget().has(a.id) && !a.archived, 'Choose account…')}</select></div>
         <button id="bv-add">Add</button></div>
       <div class="report">${reportHead(esc(b.name), `${monthLong(b.months[0])} to ${monthLong(b.months[11])}`)}
@@ -2514,6 +2553,10 @@ async function budgetView(id) {
         await api('PUT', `/api/budgets/${b.id}`, { amounts: [...dirty.values()] });
         toast('Budget saved'); budgetView(b.id);
       } catch (e) { fail(e); }
+    };
+    $('#bv-rebuild').onclick = async () => {
+      if (dirty.size && !await confirmBox('You have changes that are not saved. Open the builder anyway and lose them?', 'Discard and open builder', true)) return;
+      dirty.clear(); go(`#/budgets/${b.id}/rebuild`);
     };
     $('#bv-rename').onclick = () => modal(`<h2>Rename budget</h2><div class="field"><label>Name</label><input id="bv-name" value="${esc(b.name)}"></div>
       <div class="modal-foot"><button onclick="closeModal()">Cancel</button><button class="primary" id="bv-name-ok">Save</button></div>`, el => {

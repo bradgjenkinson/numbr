@@ -765,6 +765,8 @@ try:
     not_budgeted = call('POST', '/api/accounts', {'name': 'Never budgeted', 'type': 'expense'})['id']
     spread_wk = call('POST', '/api/accounts', {'name': 'Spread by weekday', 'type': 'expense'})['id']
     spread_fn = call('POST', '/api/accounts', {'name': 'Spread by fortnight', 'type': 'expense'})['id']
+    quarterly = call('POST', '/api/accounts', {'name': 'Quarterly fee', 'type': 'expense'})['id']
+    annual = call('POST', '/api/accounts', {'name': 'Annual subscription', 'type': 'expense'})['id']
     fy_first = f'{fy}-01'
 
     def spread_units(keep, start=fy_first, end=fy_end, step=1):
@@ -832,6 +834,13 @@ try:
         {'account_id': spread_wk, 'method': 'schedule', 'config': [{'freq': 'yearly', 'amount': 520000, 'spread': 'weekly', 'weekday': 0}]},
         {'account_id': spread_fn, 'method': 'schedule', 'config': [
             {'freq': 'yearly', 'amount': 260000, 'spread': 'fortnightly', 'start': fn_first, 'end': fy_end}]},
+        {'account_id': quarterly, 'method': 'schedule', 'config': [
+            {'freq': 'quarterly', 'amount': 30000, 'from': ym_add(fy, -1)},
+            {'freq': 'quarterly', 'amount': 500, 'from': fy_months[0], 'to': fy_months[6]},
+            {'freq': 'yearly', 'amount': 100001, 'spread': 'quarterly', 'from': fy_months[1], 'to': fy_months[11]}]},
+        {'account_id': annual, 'method': 'schedule', 'config': [
+            {'freq': 'annual', 'amount': 19900, 'from': fy_months[8]},
+            {'freq': 'monthly', 'amount': 1000, 'from': fy_months[0], 'to': fy_months[11]}]},
     ]
     pv = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': choose})
     pa = {a['account_id']: a for a in pv['accounts']}
@@ -857,6 +866,23 @@ try:
     check(fns == occurrences(fn_first, 14) and shared(pa[spread_fn]['values'], 260000, fns),
           f"a yearly total spread by fortnight follows the fortnights from the start date ({pa[spread_fn]['values']})")
 
+    q_want = [0] * 12
+    for k in (2, 5, 8, 11):
+        q_want[k] += 30000  # started the month before the year: its rhythm carries on
+    for k in (0, 3, 6):
+        q_want[k] += 500    # an end month stops it
+    for k, v in zip((1, 4, 7, 10), (25001, 25000, 25000, 25000)):
+        q_want[k] += v      # a total by quarter: shared over its quarters, leftover cents first
+    check(pa[quarterly]['values'] == q_want and pa[quarterly]['total'] == 120000 + 1500 + 100001,
+          f"quarterly amounts and a total spread by quarter ({pa[quarterly]['values']})")
+    check(pa[quarterly]['config'][0] == {'freq': 'quarterly', 'amount': 30000, 'from': ym_add(fy, -1)},
+          f"a quarterly amount with no end month keeps going ({pa[quarterly]['config'][0]})")
+
+    a_want = [1000] * 12
+    a_want[8] += 19900
+    check(pa[annual]['values'] == a_want and pa[annual]['total'] == 12000 + 19900,
+          f"an annual amount lands once, in its month ({pa[annual]['values']})")
+
     def spread_preview(*segs):
         res = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': [
             {'account_id': in_budget, 'method': 'schedule', 'config': list(segs)}]})['accounts'][0]
@@ -881,11 +907,21 @@ try:
         ({'spread': 'weekly', 'weekday': other_wd, 'start': one_day, 'end': one_day}, 'there are no ', 'no matching weekday'),
         ({'spread': 'daily', 'days': 'all', 'start': f'{fy_months[3]}-01', 'end': f'{fy_months[2]}-01'}, 'before the start', 'end before start'),
         ({'spread': 'daily', 'days': 'all', 'start': f'{int(fy[:4]) - 1}-12-01'}, 'inside this financial year', 'start outside the year'),
-        ({'spread': 'quarterly'}, 'how to spread', 'unknown spread'),
+        ({'spread': 'hourly'}, 'how to spread', 'unknown spread'),
+        ({'spread': 'quarterly', 'from': fy_months[5], 'to': fy_months[2]}, 'before the "from"', 'quarters to before from'),
         ({'spread': 'weekly'}, 'day of the week', 'missing weekday'),
         ({'spread': 'daily', 'days': 'some'}, 'every day or weekdays', 'bad day count')]:
         err = spread_preview({'freq': 'yearly', 'amount': 100, **seg})
         check(isinstance(err, str) and want in err, f'spread total refuses {what} ({err})')
+    for seg, want, what in [
+        ({'from': ym_add(fy, 12)}, 'after the end', 'a start after the year'),
+        ({'from': fy_months[4], 'to': fy_months[2]}, 'before the start month', 'an end before the start'),
+        ({'from': ym_add(fy, -6), 'to': ym_add(fy, -1)}, 'none of its quarters', 'quarters all before the year')]:
+        err = spread_preview({'freq': 'quarterly', 'amount': 100, **seg})
+        check(isinstance(err, str) and want in err, f'quarterly amount refuses {what} ({err})')
+    for frm, what in [(ym_add(fy, -1), 'before'), (ym_add(fy, 12), 'after')]:
+        err = spread_preview({'freq': 'annual', 'amount': 100, 'from': frm})
+        check(isinstance(err, str) and 'inside this financial year' in err, f'an annual amount refuses a month {what} the year ({err})')
     exp_np = [sum(pa[a]['values'][i] * (1 if pa[a]['type'] == 'income' else -1) for a in pa) for i in range(12)]
     check(pv['totals']['net_profit'] == exp_np, 'preview totals add up')
     bad = call('POST', '/api/budgets/preview', {'fy': fy, 'accounts': [
@@ -956,10 +992,54 @@ try:
     check(fn2['spread'] == 'fortnightly' and fn2['end'] == nfy_end and (date.fromisoformat(fn2['start']) - date.fromisoformat(fn_first)).days % 14 == 0
           and 0 <= (date.fromisoformat(fn2['start']) - fn_target).days < 14,
           f'a fortnight spread keeps its rhythm next year ({fn2})')
+    check(na_[quarterly]['config'] == [{'freq': 'quarterly', 'amount': 30000, 'from': ym_add(nfy, -1)},
+                                       {'freq': 'quarterly', 'amount': 500, 'from': nfy, 'to': ym_add(nfy, 6)},
+                                       {'freq': 'yearly', 'amount': 100001, 'spread': 'quarterly', 'from': ym_add(nfy, 1), 'to': ym_add(nfy, 11)}],
+          f"quarterly amounts move forward a year and keep their rhythm ({na_[quarterly]['config']})")
+    check(na_[annual]['config'][0] == {'freq': 'annual', 'amount': 19900, 'from': ym_add(nfy, 8)},
+          f"an annual amount lands in the same month next year ({na_[annual]['config']})")
     nb_prev = call('POST', '/api/budgets/preview', {'fy': nfy, 'accounts': [
         {'account_id': a['account_id'], 'method': a['method'], 'config': a['config']} for a in nb['accounts']]})
     check(not [a for a in nb_prev['accounts'] if a.get('error')],
           f"next year's carried spreads are valid ({[a for a in nb_prev['accounts'] if a.get('error')]})")
+
+    # a built budget can be opened in the builder again: saved choices, hand edits kept as typed months
+    before = call('GET', f'/api/budgets/{bid}')
+    before_vals = {r['account_id']: r['values'] for sec in before['sections'] for r in sec['rows']}
+    rb = call('GET', f'/api/budgets/builder?budget={bid}')
+    ra = {a['account_id']: a for a in rb['accounts']}
+    check(rb['budget_id'] == bid and rb['fy'] == fy and rb['name'] == 'My first budget', 'rebuild opens on the budget itself')
+    check(ra[A['6-1600']]['edited'] and ra[A['6-1600']]['method'] == 'manual'
+          and ra[A['6-1600']]['config']['amounts'] == before_vals[A['6-1600']],
+          'an account edited by hand starts as typed months holding its figures')
+    check(ra[A['6-1900']]['edited'] and ra[A['6-1900']]['config']['amounts'] == before_vals[A['6-1900']],
+          'an account added by hand starts as typed months too')
+    check(not ra[A['6-1300']]['edited'] and ra[A['6-1300']]['method'] == 'schedule' and ra[A['6-1300']]['config'] == pa[A['6-1300']]['config'],
+          'an untouched account starts with the choice it was built with')
+    check(not ra[A['4-1000']]['edited'] and ra[A['4-1000']]['method'] == 'average', 'average is not mistaken for a hand edit')
+    check(not ra[spread_wk]['edited'] and not ra[quarterly]['edited'], 'spread and quarterly choices are not mistaken for hand edits')
+    same = [{'account_id': a['account_id'], 'method': a['method'], 'config': a['config']} for a in rb['accounts']]
+    call('PUT', f'/api/budgets/{bid}/rebuild', {'name': 'My first budget', 'accounts': same})
+    after = call('GET', f'/api/budgets/{bid}')
+    check({r['account_id']: r['values'] for sec in after['sections'] for r in sec['rows']} == before_vals,
+          'rebuilding without changes keeps every figure')
+    same = [x if x['account_id'] != A['6-1300'] else
+            {'account_id': A['6-1300'], 'method': 'schedule', 'config': [{'freq': 'monthly', 'amount': 7000}]} for x in same]
+    call('PUT', f'/api/budgets/{bid}/rebuild', {'name': 'Rebuilt budget', 'accounts': same})
+    after = call('GET', f'/api/budgets/{bid}')
+    arows = {r['account_id']: r for sec in after['sections'] for r in sec['rows']}
+    check(after['name'] == 'Rebuilt budget' and arows[A['6-1300']]['values'] == [7000] * 12 and arows[A['6-1600']]['values'] == before_vals[A['6-1600']],
+          'rebuilding replaces the figures the builder changed and keeps the rest')
+    rb2 = {a['account_id']: a for a in call('GET', f'/api/budgets/builder?budget={bid}')['accounts']}
+    check(rb2[A['6-1300']]['config'] == [{'freq': 'monthly', 'amount': 7000, 'from': fy_months[0], 'to': fy_months[11]}]
+          and not rb2[A['6-1300']]['edited'], 'rebuilding stores the new choices')
+    r = call('PUT', f'/api/budgets/{bid}/rebuild', {'accounts': [{'account_id': A['6-1300'], 'method': 'schedule', 'config': [{'freq': 'weekly', 'amount': 1}]}]}, expect_ok=False)
+    check('first date' in r.get('error', '') and call('GET', f'/api/budgets/{bid}')['name'] == 'Rebuilt budget',
+          'a bad rebuild changes nothing')
+    call('PUT', f'/api/budgets/{bid}/rebuild', {'name': 'My first budget', 'accounts': [
+        {'account_id': a['account_id'], 'method': a['method'], 'config': a['config']} for a in rb['accounts']]})
+    check({r['account_id']: r['values'] for sec in call('GET', f'/api/budgets/{bid}')['sections'] for r in sec['rows']} == before_vals,
+          'rebuilding back to the earlier choices restores the figures')
 
     # accounts in a budget can't be deleted; one only marked "not budgeted" can
     r = call('DELETE', f'/api/accounts/{in_budget}', expect_ok=False)
@@ -998,7 +1078,7 @@ try:
     check(tb_['debit'] == tb_['credit'], 'TB still balances with a budget')
     check(call('GET', f'/api/reports/bs?to={td.isoformat()[:7]}&count=1')['balanced'], 'BS still balances with a budget')
     acts = [a['action'] for a in call('GET', '/api/audit')]
-    check(all(x in acts for x in ('budget_create', 'budget_update')), 'budget changes are audited')
+    check(all(x in acts for x in ('budget_create', 'budget_update', 'budget_rebuild')), 'budget changes are audited')
     call('DELETE', f'/api/budgets/{bid}')
     check(call('GET', '/api/budgets') == [] and call('GET', f'/api/budgets/builder?fy={nfy}')['prior'] is None,
           'deleting a budget removes it and its choices')

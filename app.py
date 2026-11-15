@@ -2628,9 +2628,10 @@ BUDGET_METHODS = ('average', 'last', 'schedule', 'manual', 'none')
 BUDGET_METHOD_LABEL = {'average': 'Monthly average', 'last': 'Last month', 'schedule': 'Own amounts',
                        'manual': 'Typed each month', 'none': 'Not budgeted'}
 STEP_DAYS = {'weekly': 7, 'fortnightly': 14}
-# How a "total for the year" is shared out: evenly by month (from/to months) or across the weekdays,
-# fortnights or days between a start and end date.
-YEAR_SPREADS = ('monthly', 'weekly', 'fortnightly', 'daily')
+# How a "total for the year" is shared out: evenly by month or by quarter (from/to months), or across
+# the weekdays, fortnights or days between a start and end date.
+YEAR_SPREADS = ('monthly', 'quarterly', 'weekly', 'fortnightly', 'daily')
+MONTH_SPREADS = ('monthly', 'quarterly')
 WEEKDAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
 
 
@@ -2730,7 +2731,8 @@ def budget_config(method, raw, months):
             raise ApiError('Amount details are not valid')
         freq = s.get('freq')
         amount = as_cents(s.get('amount') or 0, f'Amount {i}')
-        if freq == 'yearly' and (s.get('spread') or 'monthly') != 'monthly':
+        spread = (s.get('spread') or 'monthly') if freq == 'yearly' else None
+        if freq == 'yearly' and spread not in MONTH_SPREADS:
             out.append(yearly_spread_config(s, i, amount, fy_first, fy_last))
         elif freq in ('monthly', 'yearly'):
             frm = as_ym(s.get('from') or fy_first, f'Amount {i} "from" month')
@@ -2739,7 +2741,32 @@ def budget_config(method, raw, months):
                 raise ApiError(f'Amount {i}: the "to" month is before the "from" month')
             if frm > fy_last or to < fy_first:
                 raise ApiError(f'Amount {i}: those months are outside this financial year')
-            out.append({'freq': freq, 'amount': amount, 'from': frm, 'to': to})
+            seg = {'freq': freq, 'amount': amount, 'from': frm, 'to': to}
+            if spread == 'quarterly':
+                seg['spread'] = 'quarterly'
+                if not quarter_months(seg, months):
+                    raise ApiError(f'Amount {i}: no quarter starts between those months. Pick other months.')
+            out.append(seg)
+        elif freq == 'annual':
+            # Once a year, in the same month every year (e.g. an annual subscription).
+            frm = as_ym(s.get('from') or fy_first, f'Amount {i} month')
+            if not fy_first <= frm <= fy_last:
+                raise ApiError(f'Amount {i}: pick a month inside this financial year')
+            out.append({'freq': freq, 'amount': amount, 'from': frm})
+        elif freq == 'quarterly':
+            # Every third month from the start month, until the end month if there is one. The start may be
+            # before this year (it sets the rhythm), but some quarter has to land inside it.
+            frm = as_ym(s.get('from') or fy_first, f'Amount {i} start month')
+            seg = {'freq': freq, 'amount': amount, 'from': frm}
+            if s.get('to'):
+                seg['to'] = as_ym(s['to'], f'Amount {i} end month')
+                if seg['to'] < frm:
+                    raise ApiError(f'Amount {i}: the end month is before the start month')
+            if frm > fy_last:
+                raise ApiError(f'Amount {i}: the start month is after the end of this financial year')
+            if not quarter_months(seg, months):
+                raise ApiError(f'Amount {i}: none of its quarters fall in this financial year. Pick other months.')
+            out.append(seg)
         elif freq in STEP_DAYS:
             if not s.get('first'):
                 raise ApiError(f'Amount {i}: enter the first date it happens')
@@ -2788,6 +2815,13 @@ def yearly_spread_config(s, i, amount, fy_first, fy_last):
     return seg
 
 
+def quarter_months(seg, months):
+    """The months of the year a quarterly amount (or a total spread by quarter) lands in: its start
+    month and every third month after it, up to its end month if it has one."""
+    return [m for m in months if m >= seg['from'] and ym_diff(seg['from'], m) % 3 == 0
+            and (not seg.get('to') or m <= seg['to'])]
+
+
 def spread_days(seg):
     """The dates a spread total is shared across, from start to end inclusive."""
     d, end = D(seg['start']), D(seg['end'])
@@ -2824,7 +2858,14 @@ def schedule_amounts(segs, months):
                 if s['from'] <= m <= s['to']:
                     vals[idx[m]] += s['amount']
             continue
-        if s['freq'] == 'yearly' and s.get('spread', 'monthly') != 'monthly':
+        if s['freq'] == 'annual':
+            vals[idx[s['from']]] += s['amount']
+            continue
+        if s['freq'] == 'quarterly':
+            for m in quarter_months(s, months):
+                vals[idx[m]] += s['amount']
+            continue
+        if s['freq'] == 'yearly' and s.get('spread', 'monthly') not in MONTH_SPREADS:
             # A total shared by weekday, fortnight or day: each month gets its share of those dates.
             units = [0] * 12
             for d in spread_days(s):
@@ -2834,7 +2875,8 @@ def schedule_amounts(segs, months):
             continue
         if s['freq'] == 'yearly':
             # A total spread evenly over its months; leftover cents go to the first months so it adds up exactly.
-            span = [m for m in months if s['from'] <= m <= s['to']]
+            # By quarter, it is shared over the quarters' first months instead.
+            span = quarter_months(s, months) if s.get('spread') == 'quarterly'                 else [m for m in months if s['from'] <= m <= s['to']]
             q, r = divmod(abs(s['amount']), len(span))
             sign = -1 if s['amount'] < 0 else 1
             for k, m in enumerate(span):
@@ -2887,10 +2929,13 @@ def roll_config(method, config, shift):
     out = []
     for s in config:
         s = dict(s)
-        if s['freq'] == 'yearly' and s.get('spread', 'monthly') != 'monthly':
+        if s['freq'] == 'yearly' and s.get('spread', 'monthly') not in MONTH_SPREADS:
             s['start'], s['end'] = roll_spread_dates(s, shift)
-        elif s['freq'] in ('monthly', 'yearly'):
-            s['from'], s['to'] = ym_add(s['from'], shift), ym_add(s['to'], shift)
+        elif s['freq'] in ('monthly', 'yearly', 'quarterly', 'annual'):
+            # Whole years, so a quarterly rhythm is kept and an annual amount stays in its month.
+            s['from'] = ym_add(s['from'], shift)
+            if s.get('to'):
+                s['to'] = ym_add(s['to'], shift)
         else:
             # Keep the same weekday rhythm: the first date in the original series on or after the same
             # date `shift` months later.
@@ -3006,6 +3051,8 @@ def api_budget_builder(db, q, body):
         fy = ym_add(cur, 12 * n)
         years.append({'fy': fy, 'label': fy_label(fy),
                       'budget_id': scalar(db, 'SELECT id FROM budgets WHERE fy_start=?', (fy,))})
+    if q.get('budget'):
+        return budget_rebuilder(db, get_budget(db, q['budget']), years)
     if q.get('fy'):
         fy = budget_fy(db, q['fy'])
     else:
@@ -3037,6 +3084,45 @@ def api_budget_builder(db, q, body):
             'accounts': accts}
 
 
+def budget_rebuilder(db, b, years):
+    """The builder opened again on a built budget: each account starts with the choice it was built with.
+    An account whose figures were changed or added by hand since starts as "Type each month" holding its
+    current figures, so nothing typed is lost unless the user picks another method for it."""
+    months = budget_months(b['fy_start'])
+    window = history_window(db)
+    hist = actuals_by_month(db, *window) if window else {}
+    # Average and last month are checked against the history the budget was built from.
+    built_window = (b['history_from'], b['history_to']) if b['history_from'] and b['history_to'] else None
+    built_hist = actuals_by_month(db, *built_window) if built_window else {}
+    current = {}
+    for aid, m, amt in db.execute('SELECT account_id, month, amount FROM budget_amounts WHERE budget_id=?', (b['id'],)):
+        if m in months:
+            current.setdefault(aid, [0] * 12)[months.index(m)] = amt
+    saved = {r[0]: (r[1], json.loads(r[2]) if r[2] else None)
+             for r in db.execute('SELECT account_id, method, config FROM budget_methods WHERE budget_id=?', (b['id'],))}
+    accts = []
+    for a in budget_accounts(db, include_archived=True):
+        if a['archived'] and a['id'] not in current and saved.get(a['id'], ('none',))[0] == 'none':
+            continue
+        avg, last, last_m = history_figures(hist.get(a['id'], {}), window)
+        has = any(hist.get(a['id'], {}).values())
+        method, config = saved.get(a['id'], ('none', None))
+        figures = current.get(a['id'], [0] * 12)
+        try:
+            built = method_amounts(method, config, months, history_figures(built_hist.get(a['id'], {}), built_window))
+        except (ApiError, KeyError, TypeError, ValueError):
+            built = None
+        edited = built != figures
+        if edited:
+            method, config = 'manual', {'amounts': figures}
+        accts.append({'account_id': a['id'], 'name': a['name'], 'type': a['type'], 'group_id': a['group_id'],
+                      'average': avg, 'last': last, 'last_month': last_m, 'has_history': has,
+                      'method': method, 'config': config, 'from_prior': False, 'edited': edited})
+    return {'fy': b['fy_start'], 'label': fy_label(b['fy_start']), 'name': b['name'], 'months': months, 'years': years,
+            'history': {'from': window[0], 'to': window[1], 'count': len(months_between(*window))} if window else None,
+            'prior': None, 'budget_id': b['id'], 'accounts': accts}
+
+
 @route('POST', '/api/budgets/preview')
 def api_budget_preview(db, q, body):
     months = budget_months(budget_fy(db, req(body, 'fy', 'Financial year')))
@@ -3063,6 +3149,29 @@ def api_budget_create(db, q, body):
     audit(db, 'budget_create', 'budget', bid, {'fy_start': fy, 'name': name,
                                                 'methods': {it['account_id']: it['method'] for it in items}})
     return {'id': bid}
+
+
+@route('PUT', '/api/budgets/:bid/rebuild')
+def api_budget_rebuild(db, q, body, bid):
+    """Run the builder again over a built budget: its choices and figures are replaced with what the
+    builder sent, worked out the same way as a new budget."""
+    b = get_budget(db, bid)
+    months = budget_months(b['fy_start'])
+    window = history_window(db)
+    items = compute_budget(db, body, months, window, strict=True)
+    name = text(body.get('name')) or b['name']
+    db.execute('UPDATE budgets SET name=?, history_from=?, history_to=? WHERE id=?',
+               (name, window[0] if window else None, window[1] if window else None, b['id']))
+    db.execute('DELETE FROM budget_methods WHERE budget_id=?', (b['id'],))
+    db.execute('DELETE FROM budget_amounts WHERE budget_id=?', (b['id'],))
+    for it in items:
+        db.execute('INSERT INTO budget_methods(budget_id, account_id, method, config) VALUES (?,?,?,?)',
+                   (b['id'], it['account_id'], it['method'], json.dumps(it['config']) if it['config'] is not None else None))
+        db.executemany('INSERT INTO budget_amounts(budget_id, account_id, month, amount) VALUES (?,?,?,?)',
+                       [(b['id'], it['account_id'], m, v) for m, v in zip(months, it['values']) if v])
+    audit(db, 'budget_rebuild', 'budget', b['id'], {'name': name,
+                                                     'methods': {it['account_id']: it['method'] for it in items}})
+    return {'id': b['id']}
 
 
 @route('GET', '/api/budgets/:bid')
