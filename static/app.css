@@ -284,8 +284,12 @@ tr.total .vbar, tr.grand .vbar { height: 9px; }
 .bva-mm .rep-grid tr > :first-child { min-width: 170px; max-width: 220px; white-space: normal; }
 th.mgrp { text-align: center; color: var(--ink); font-size: 12px; box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line-2) !important; }
 td.mm { font-variant-numeric: tabular-nums; min-width: 58px; }
+td.mm.mb { color: var(--ink-2); }
 td.mb, th.mb { box-shadow: inset 1px 0 var(--line); }
 .rep-grid thead th.mb { box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line); }
+/* Lighter lines between Budget, Actual and Difference inside a month; months keep the stronger line above. */
+.bva-mm td.mm:not(.mb) { box-shadow: inset 1px 0 var(--line-2); }
+.bva-mm .rep-grid thead tr + tr th:not(.mb) { box-shadow: inset 1px 0 var(--line-2), inset 0 -1px var(--line); }
 td.md { font-weight: 600; }
 td.md.bad { color: var(--bad); background-color: var(--bad-soft); }
 td.mtot, th.mtot { background-color: #f6f8fb; }
@@ -294,6 +298,12 @@ td.mtot, th.mtot { background-color: #f6f8fb; }
 /* Budget vs actual (both views): value columns centred. */
 .bva .rep-grid td.num, .bva .rep-grid th.num, .bva .rep-grid th.vb { text-align: center; }
 .bva .rep-grid td.vb .vbar { margin: 0 auto; }
+/* Actual P&L: value columns centred, a light line between months, and a shaded Total column. */
+.pl-act .rep-grid td.num, .pl-act .rep-grid th.num { text-align: center; box-shadow: inset 1px 0 var(--line); }
+.pl-act .rep-grid thead th.num { box-shadow: inset 1px 0 var(--line), inset 0 -1px var(--line); }
+.pl-act td.ptot, .pl-act .rep-grid th.ptot { background-color: #f0f2f6; }
+.pl-act .rep-grid tr.ghead td.ptot { background-color: #e5e8ee; }
+.pl-act .rep-grid tr.total td.ptot, .pl-act .rep-grid tr.grand td.ptot { background-color: #dfe4ec; }
 .mm-key { font-size: 12px; color: var(--ink-2); margin: -8px 0 10px; text-align: center; }
 @media (max-width: 700px) { td.vb, th.vb { display: none; } }
 
@@ -323,6 +333,6 @@ td.mtot, th.mtot { background-color: #f6f8fb; }
   .rep-grid tr > :first-child { position: relative; box-shadow: none; }
   td.bcell input { display: none; }
   .print-only { display: inline; }
-  .vbar, .vbar *, td.mm { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .vbar, .vbar *, td.mm, td.ptot { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .bva-mm .rep-grid table { font-size: 10px; }
 }
