@@ -1858,8 +1858,10 @@ async function reportPL() {
   if (r.view && r.view !== 'actual' && d.budget_cover.available) return plBudgetView(await GET(`/api/reports/pl?from=${r.from}&to=${r.to}&budget=1`), r);
   const multi = d.months.length > 1;
   const cols = d.months.length + (multi ? 1 : 0);
-  const head = `<tr><th></th>${multi ? d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('') : ''}<th class="num">${multi ? 'Total' : monthLabel(d.months[0])}</th></tr>`;
-  const valsRow = (label, vals, total, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${multi ? vals.map(repCell).join('') : ''}${repCell(total)}</tr>`;
+  // With several months the Total column is shaded (ptot) so it stands apart from the months.
+  const head = `<tr><th></th>${multi ? d.months.map(m => `<th class="num">${monthLabel(m)}</th>`).join('') : ''}<th class="num${multi ? ' ptot' : ''}">${multi ? 'Total' : monthLabel(d.months[0])}</th></tr>`;
+  const totCell = v => (multi ? repCell(v).replace('class="num', 'class="num ptot') : repCell(v));
+  const valsRow = (label, vals, total, cls = '', href = '', tdAttr = '') => `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${multi ? vals.map(repCell).join('') : ''}${totCell(total)}</tr>`;
   const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
   const lines = s => treeLines(groupTree(s.type, s.rows), hasGroups && !!r.groupsOnly);
   let rowsHtml = '';
@@ -1877,7 +1879,7 @@ async function reportPL() {
   rowsHtml += valsRow('Net profit', d.net_profit, d.net_profit_total, 'grand');
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, 'actual')}
-    <div class="report">${reportHead('Profit &amp; Loss', plPeriod(d))}
+    <div class="report pl-act">${reportHead('Profit &amp; Loss', plPeriod(d))}
       ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   wireMonthRange('pl', reportPL); wirePlView(r);
@@ -1923,7 +1925,8 @@ function vbar(a, b, dir) {
 }
 function varCells(a, b, dir) {
   const cls = favClass(a, b, dir), p = varPct(a, b);
-  const pct = p === null ? (a ? '<span class="pill">Not budgeted</span>' : '–') : pctTxt(p);
+  // A variance that shows as 0.0% gets a dash, like the zero amounts beside it.
+  const pct = p === null ? (a ? '<span class="pill">Not budgeted</span>' : '–') : Math.abs(p) < 0.05 ? '–' : pctTxt(p);
   return `<td class="num var ${cls}">${fmt(a - b, { paren: true, dashZero: true })}</td><td class="num var ${cls}">${pct}</td><td class="vb">${vbar(a, b, dir)}</td>`;
 }
 // Month by month, laid out like a budget spreadsheet: Budget | Actual | Difference for each month.
@@ -1950,7 +1953,7 @@ async function plBudgetView(d, r) {
   // A line of the report from per-month (or single) actual and budget arrays.
   const row = (label, A, B, dir, cls = '', href = '', tdAttr = '') => {
     const cells = monthly ? A.map((a, i) => mmCells(a, B[i], dir)).join('') + (n > 1 ? mmCells(sum(A), sum(B), dir, ' mtot') : '')
-      : `${repCell(A[0])}${repCell(B[0])}${varCells(A[0], B[0], dir)}`;
+      : `${repCell(B[0])}${repCell(A[0])}${varCells(A[0], B[0], dir)}`;
     return `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${cells}</tr>`;
   };
   const tot = (s, which) => (monthly ? s[which === 'a' ? 'totals' : 'budget_totals'] : [s[which === 'a' ? 'total' : 'budget_total']]);
@@ -1973,7 +1976,7 @@ async function plBudgetView(d, r) {
   const head = monthly
     ? `<tr><th rowspan="2"></th>${d.months.map(m => `<th colspan="3" class="mgrp">${monthLabel(m)}</th>`).join('')}${n > 1 ? '<th colspan="3" class="mgrp mtot">Total</th>' : ''}</tr>
        <tr>${'<th class="num mb">Budget</th><th class="num">Actual</th><th class="num">Difference</th>'.repeat(n)}${n > 1 ? '<th class="num mb mtot">Budget</th><th class="num mtot">Actual</th><th class="num mtot">Difference</th>' : ''}</tr>`
-    : `<tr><th></th><th class="num">Actual</th><th class="num">Budget</th><th class="num">Variance</th><th class="num">Var %</th><th class="vb">Against budget</th></tr>`;
+    : `<tr><th></th><th class="num">Budget</th><th class="num">Actual</th><th class="num">Variance</th><th class="num">Var %</th><th class="vb">Against budget</th></tr>`;
   const names = d.budget_cover.budgets.map(b => b.name).join(' and ');
   const title = monthly ? 'Budget vs Actual, Month by Month' : 'Budget vs Actual, YTD Accumulative';
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
@@ -1984,12 +1987,13 @@ async function plBudgetView(d, r) {
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   wireMonthRange('pl', reportPL); wirePlView(r);
   $('#x-csv').onclick = () => {
-    const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Actual`, `${m} Budget`, `${m} Variance`]), 'Total Actual', 'Total Budget', 'Total Variance']
-      : ['Account', 'Actual', 'Budget', 'Variance', 'Variance %'];
+    // Budget before Actual, the same order as the screen.
+    const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Budget`, `${m} Actual`, `${m} Variance`]), 'Total Budget', 'Total Actual', 'Total Variance']
+      : ['Account', 'Budget', 'Actual', 'Variance', 'Variance %'];
     const out = [[S.settings.business_name], [title], [`${plPeriod(d)}, compared with ${names}`], [], hdr];
     const line = (label, A, B) => {
-      if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(a), c2d(B[i]), c2d(a - B[i])]), c2d(sum(A)), c2d(sum(B)), c2d(sum(A) - sum(B))]);
-      else { const p = varPct(A[0], B[0]); out.push([label, c2d(A[0]), c2d(B[0]), c2d(A[0] - B[0]), p === null ? '' : p.toFixed(1)]); }
+      if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(B[i]), c2d(a), c2d(a - B[i])]), c2d(sum(B)), c2d(sum(A)), c2d(sum(A) - sum(B))]);
+      else { const p = varPct(A[0], B[0]); out.push([label, c2d(B[0]), c2d(A[0]), c2d(A[0] - B[0]), p === null ? '' : p.toFixed(1)]); }
     };
     d.sections.forEach(s => {
       if (!s.rows.length && s.type === 'cos') return;

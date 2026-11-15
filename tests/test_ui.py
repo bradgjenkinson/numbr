@@ -502,7 +502,8 @@ try:
         assert 'YTD Accumulative' in page.inner_text('.report-title') and 'Rent' in page.inner_text('.rep-grid')
         want = page.evaluate("(async () => { const d = await GET(`/api/reports/pl?from=" + bfy + "&to=" + bend + "&budget=1`); return [fmt(d.net_profit_total, {paren:true, dashZero:true}), fmt(d.net_profit_budget_total, {paren:true, dashZero:true}), d.net_profit, d.net_profit_budget]; })()")
         np_cells = page.locator('.rep-grid tr.grand td')
-        assert [np_cells.nth(1).inner_text(), np_cells.nth(2).inner_text()] == want[:2], want
+        # Budget | Actual, the same order as the month by month view
+        assert [np_cells.nth(2).inner_text(), np_cells.nth(1).inner_text()] == want[:2], want
         shot(page, '22-budget-vs-actual-ytd')
         page.click('[data-view="monthly"]'); page.wait_for_selector('.bva-mm td.mm')
         # each month is Budget | Actual | Difference in whole dollars; difference is positive when better than budget
