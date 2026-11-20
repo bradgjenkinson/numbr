@@ -392,6 +392,9 @@ function lineEditor(el, { lines = [], filter = postable, amountLabel = 'Amount',
 // ---------------------------------------------------------------- router
 const ROUTES = [
   [/^#\/dashboard$/, dashboard],
+  [/^#\/alerts$/, alertsList],
+  [/^#\/alerts\/new$/, () => alertForm()],
+  [/^#\/alerts\/(\d+)$/, m => alertForm(m[1])],
   [/^#\/setup(?:\/(\d))?$/, m => setupPage(+(m[1] || 1))],
   [/^#\/sales$/, () => invoiceList('sale')],
   [/^#\/sales\/new$/, () => invoiceForm('sale')],
@@ -457,6 +460,7 @@ async function router() {
       main.innerHTML = '<div class="loading">Loading…</div>';
       window.scrollTo(0, 0);
       try { await fn(m); } catch (e) { main.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; console.error(e); }
+      updateAlertCount();
       return;
     }
   }
@@ -470,6 +474,210 @@ function afterSave(fallback) {
   go(r || fallback);
 }
 
+// ---------------------------------------------------------------- alerts
+// An alert watches the current value of one or more accounts and "goes off" while a condition is true.
+// Values come from the server (POST /api/alerts/preview, GET /api/alerts): balance sheet accounts as at
+// today, P&L accounts for this financial year so far, shared bank accounts at their full balance.
+const ALERT_OPS = [['lt', 'goes below'], ['lte', 'is at or below'], ['gt', 'goes above'], ['gte', 'reaches or goes above'], ['eq', 'is exactly']];
+const ALERT_OP_TEXT = Object.fromEntries(ALERT_OPS);
+const ALERT_STATUS = {
+  triggered: ['bad', 'Going off'], seen: ['review', 'Seen'], ok: ['ok', 'All good'], off: ['', 'Turned off'],
+};
+const alertPill = s => `<span class="pill ${ALERT_STATUS[s][0]}">${ALERT_STATUS[s][1]}</span>`;
+
+async function updateAlertCount() {
+  const el = document.getElementById('alert-count');
+  if (!el) return;
+  try {
+    const { count } = await GET('/api/alerts/count');
+    el.textContent = count; el.hidden = !count;
+    el.title = `${count} alert${count === 1 ? ' is' : 's are'} going off`;
+  } catch { el.hidden = true; }
+}
+async function dismissAlert(id) {
+  try { await api('POST', `/api/alerts/${id}/dismiss`); toast('Marked as seen. It stays counted until the figures change.'); } catch (e) { fail(e); }
+}
+
+async function alertsList() {
+  const rank = { triggered: 0, seen: 1, ok: 2, off: 3 };
+  const list = (await GET('/api/alerts')).sort((a, b) => rank[a.status] - rank[b.status]);
+  const going = list.filter(a => ['triggered', 'seen'].includes(a.status)).length;
+  page('Alerts', going ? `${going} alert${going === 1 ? ' is' : 's are'} going off` : 'Get told when an account goes above or below a number you choose',
+    `<a class="btn primary" href="#/alerts/new">New alert</a>`,
+    `<div class="notice info">An alert checks your accounts' figures <b>right now</b> and goes off when the condition you set is true.
+      The number next to <b>Alerts</b> in the menu shows how many are going off, and stays there until the figures change so
+      you can't forget about them. Click <b>Got it</b> to mark one as seen.</div>
+    <div class="panel flush">${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Alert me when</th>
+      <th class="num">Now</th><th class="num">Compared with</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map(a => `<tr class="click" data-href="#/alerts/${a.id}" data-id="${a.id}">
+        <td><b>${esc(a.name)}</b></td><td>${esc(a.summary)}</td>
+        <td class="num">${$fmt(a.watch_value)}</td><td class="num">${$fmt(a.compare_value)}</td>
+        <td>${alertPill(a.status)}${a.triggered_since && a.status !== 'off' ? ` <span class="muted" style="font-size:12px">since ${dfmt(a.triggered_since)}</span>` : ''}</td>
+        <td>${a.status === 'triggered' ? '<button class="small al-gotit">Got it</button>' : ''}</td></tr>`).join('')}
+      </tbody></table></div>`
+      : `<div class="empty"><p>You don't have any alerts yet.</p><a class="btn primary" href="#/alerts/new">Create your first alert</a></div>`}</div>`);
+  $$('tr[data-href]').forEach(tr => tr.onclick = e => { if (!e.target.closest('button')) go(tr.dataset.href); });
+  $$('.al-gotit').forEach(b => b.onclick = async () => { await dismissAlert(b.closest('tr').dataset.id); alertsList(); updateAlertCount(); });
+}
+
+// Plain-English sentence for an alert being edited. st: {watch, compare, mode, op, amount}.
+function alertSentence(st) {
+  const names = terms => terms.filter(t => t.account_id).map((t, i) =>
+    `${i ? (t.sign < 0 ? ' minus ' : ' plus ') : ''}<b>${esc(acctLabel(t.account_id))}</b>`).join('');
+  const left = names(st.watch) || '<span class="muted">(choose an account)</span>';
+  let right;
+  if (st.mode === 'amount') right = isNaN(st.amount) ? '<span class="muted">(type an amount)</span>' : `<b>${$fmt(st.amount)}</b>`;
+  else {
+    right = names(st.compare) || '<span class="muted">(choose an account)</span>';
+    if (st.adjust && !isNaN(st.adjust)) right += ` ${st.adjSign < 0 ? 'minus' : 'plus'} <b>${$fmt(st.adjust)}</b>`;
+  }
+  return `Alert me when ${left} ${ALERT_OP_TEXT[st.op]} ${right}`;
+}
+
+async function alertForm(id) {
+  const a = id ? await GET(`/api/alerts/${id}`) : null;
+  const terms = list => list.map(t => ({ account_id: String(t.account_id), sign: t.sign }));
+  let st = a ? {
+    name: a.name, active: !!a.active, op: a.op, watch: terms(a.watch), compare: terms(a.compare),
+    mode: a.compare.length ? 'accounts' : 'amount',
+    amount: a.compare.length ? 0 : a.amount, adjust: Math.abs(a.amount), adjSign: a.amount < 0 ? -1 : 1,
+  } : { name: '', active: true, op: 'lt', watch: [{ account_id: '', sign: 1 }], compare: [{ account_id: '', sign: 1 }], mode: 'amount', amount: 0, adjust: 0, adjSign: -1 };
+  if (!st.compare.length) st.compare = [{ account_id: '', sign: 1 }];
+
+  const firstOf = f => { const x = S.accounts.filter(x => !x.archived && f(x)).sort(byName)[0]; return x ? String(x.id) : ''; };
+  const EXAMPLES = {
+    low: () => ({ name: 'Low bank balance', op: 'lt', watch: [{ account_id: firstOf(x => isBank(x) && x.type === 'asset'), sign: 1 }], mode: 'amount', amount: 100000 }),
+    offset: () => ({ name: 'Offsets below home loan', op: 'lt', watch: [{ account_id: firstOf(x => isBank(x) && x.type === 'asset'), sign: 1 }],
+      mode: 'accounts', compare: [{ account_id: firstOf(x => x.type === 'liability' && !isBank(x) && /loan|mortgage/i.test(x.name)), sign: 1 }], adjust: 0, adjSign: -1 }),
+    income: () => ({ name: 'Income target reached', op: 'gte', watch: [{ account_id: firstOf(x => x.type === 'income'), sign: 1 }], mode: 'amount', amount: 5000000 }),
+  };
+
+  page(a ? esc(a.name) : 'New alert', a ? alertPill(a.status) : 'Tell numbr what to watch and when to let you know',
+    `<a class="btn" href="#/alerts">Cancel</a>${a ? '<button class="danger" id="al-del">Delete</button>' : ''}<button class="primary" id="al-save">Save alert</button>`,
+    `<div class="panel al-sentence" id="al-sentence"></div>
+    ${a ? '' : `<div class="panel"><h2>Not sure where to start?</h2><p class="muted" style="margin-top:0">Pick an example to fill in the form, then change anything you like.</p>
+      <div class="actions"><button class="al-ex" data-ex="low">A bank balance drops below an amount</button>
+      <button class="al-ex" data-ex="offset">Offset accounts compared with a loan</button>
+      <button class="al-ex" data-ex="income">Income reaches a target</button></div></div>`}
+    <div class="panel"><h2>1. Name your alert</h2><div class="form-grid">
+      <div class="field"><label for="al-name">Name</label><input id="al-name" placeholder="e.g. Offset below home loan"></div></div>
+      <label class="check"><input type="checkbox" id="al-active"> Turned on</label></div>
+    <div class="panel"><h2>2. Which account should numbr watch?</h2>
+      <div id="al-watch"></div>
+      <button type="button" class="small" id="al-watch-add">+ Add another account to this total</button>
+      <div class="hint">Add more than one account to watch their total, e.g. two offset accounts together.</div></div>
+    <div class="panel"><h2>3. When should it go off?</h2>
+      <div class="field" style="max-width:320px"><label for="al-op">Alert me when the total…</label><select id="al-op">
+        ${ALERT_OPS.map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+      <div class="field"><label>…compared with</label>
+        <div class="inline" style="gap:18px;flex-wrap:wrap"><label class="check"><input type="radio" name="al-mode" value="amount"> A dollar amount I type</label>
+        <label class="check"><input type="radio" name="al-mode" value="accounts"> Other accounts</label></div></div>
+      <div id="al-amountbox" class="field" style="max-width:220px"><label for="al-amount">Dollars</label><input id="al-amount" class="num" inputmode="decimal" placeholder="0.00"></div>
+      <div id="al-accountsbox">
+        <div id="al-compare"></div>
+        <button type="button" class="small" id="al-compare-add">+ Add another account</button>
+        <div class="inline" style="margin-top:12px;flex-wrap:wrap"><span>and then</span>
+          <select id="al-adjsign" style="width:auto"><option value="-1">take away</option><option value="1">add</option></select>
+          <input id="al-adjust" class="num" inputmode="decimal" placeholder="0.00" style="width:130px"><span class="muted">(optional)</span></div></div></div>
+    <div class="panel"><h2>Right now</h2><div id="al-preview"></div>
+      <div class="hint">Bank, asset, loan and other balance sheet accounts use today's balance. Income and expense accounts use the total for this financial year so far.
+        Shared bank accounts count at their full balance, the same as your bank statement.</div></div>`);
+
+  const sync = () => {
+    $('#al-name').value = st.name; $('#al-active').checked = st.active; $('#al-op').value = st.op;
+    $$('input[name=al-mode]').forEach(r => { r.checked = r.value === st.mode; });
+    $('#al-amount').value = st.amount && !isNaN(st.amount) ? fmt(st.amount) : '';
+    $('#al-adjust').value = st.adjust && !isNaN(st.adjust) ? fmt(st.adjust) : '';
+    $('#al-adjsign').value = String(st.adjSign);
+    drawTerms('watch'); drawTerms('compare'); refresh();
+  };
+  const drawTerms = side => {
+    const box = $(`#al-${side}`), list = st[side];
+    box.innerHTML = list.map((t, i) => `<div class="al-term" data-i="${i}">
+      ${i ? `<select class="al-sign" aria-label="Plus or minus"><option value="1" ${t.sign > 0 ? 'selected' : ''}>plus</option><option value="-1" ${t.sign < 0 ? 'selected' : ''}>minus</option></select>` : '<span class="al-sign-gap"></span>'}
+      <select class="acct-pick al-acct" aria-label="Account">${acctOptions(t.account_id)}</select>
+      <span class="al-now muted" data-acct="${esc(t.account_id)}"></span>
+      ${list.length > 1 ? '<button type="button" class="tk-btn al-rm" title="Remove" aria-label="Remove">×</button>' : ''}</div>`).join('');
+    $$('.al-term', box).forEach(row => {
+      const t = list[+row.dataset.i];
+      const sg = row.querySelector('.al-sign');
+      if (sg) sg.onchange = () => { t.sign = +sg.value; refresh(); };
+      row.querySelector('.al-acct').onchange = e => { t.account_id = e.target.value; row.querySelector('.al-now').dataset.acct = t.account_id; refresh(); };
+      const rm = row.querySelector('.al-rm');
+      if (rm) rm.onclick = () => { list.splice(+row.dataset.i, 1); drawTerms(side); refresh(); };
+    });
+  };
+  const body = () => {
+    const clean = l => l.filter(t => t.account_id).map(t => ({ account_id: +t.account_id, sign: t.sign }));
+    const accounts = st.mode === 'accounts';
+    return {
+      name: st.name, active: st.active, op: st.op, watch: clean(st.watch), compare: accounts ? clean(st.compare) : [],
+      amount: accounts ? (st.adjust || 0) * st.adjSign : st.amount,
+    };
+  };
+  let timer, seq = 0;
+  const refresh = () => {
+    $('#al-amountbox').hidden = st.mode !== 'amount';
+    $('#al-accountsbox').hidden = st.mode !== 'accounts';
+    $('#al-sentence').innerHTML = alertSentence(st);
+    clearTimeout(timer); timer = setTimeout(preview, 250);
+  };
+  const preview = async () => {
+    const box = $('#al-preview'); if (!box) return;
+    const b = body(), my = ++seq;
+    if (!b.watch.length) { box.innerHTML = '<p class="muted">Choose an account to watch to see today\'s figures.</p>'; return; }
+    if (st.mode === 'accounts' && !b.compare.length) { box.innerHTML = '<p class="muted">Choose an account to compare with to see today\'s figures.</p>'; return; }
+    if (isNaN(b.amount)) { box.innerHTML = '<p class="muted">Type the dollars as a number, e.g. 1500 or 1,500.00.</p>'; return; }
+    try {
+      const r = await api('POST', '/api/alerts/preview', b);
+      if (my !== seq) return;
+      $$('.al-now').forEach(s => {
+        const t = [...r.watch, ...r.compare].find(x => String(x.account_id) === s.dataset.acct);
+        s.textContent = t ? `now ${$fmt(t.value)}` : '';
+      });
+      const line = (label, v) => `<tr><td>${label}</td><td class="num"><b>${$fmt(v)}</b></td></tr>`;
+      box.innerHTML = `<table style="max-width:520px"><tbody>
+        ${line(r.watch.length > 1 ? 'Total you\'re watching' : esc(r.watch[0].name), r.watch_value)}
+        ${line(r.compare.length ? 'Compared with (total)' : 'Compared with', r.compare_value)}</tbody></table>
+        <p style="margin-bottom:0">${r.met ? (st.active ? '<span class="pill bad">Would go off</span> This alert would go off right now.'
+          : '<span class="pill">Turned off</span> The condition is true right now, but the alert is turned off.')
+          : '<span class="pill ok">Quiet</span> This alert wouldn\'t go off right now.'}</p>`;
+    } catch (e) { if (my === seq) box.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+  };
+
+  $('#al-name').oninput = e => { st.name = e.target.value; };
+  $('#al-active').onchange = e => { st.active = e.target.checked; refresh(); };
+  $('#al-op').onchange = e => { st.op = e.target.value; refresh(); };
+  $$('input[name=al-mode]').forEach(r => r.onchange = () => { st.mode = r.value; refresh(); });
+  const money = (sel, key) => {
+    const el = $(sel);
+    el.oninput = () => { st[key] = parseMoney(el.value); el.style.borderColor = isNaN(st[key]) ? 'var(--bad)' : ''; refresh(); };
+    el.onblur = () => { if (!isNaN(st[key]) && el.value) el.value = fmt(st[key]); };
+  };
+  money('#al-amount', 'amount'); money('#al-adjust', 'adjust');
+  $('#al-adjsign').onchange = e => { st.adjSign = +e.target.value; refresh(); };
+  $('#al-watch-add').onclick = () => { st.watch.push({ account_id: '', sign: 1 }); drawTerms('watch'); refresh(); };
+  $('#al-compare-add').onclick = () => { st.compare.push({ account_id: '', sign: 1 }); drawTerms('compare'); refresh(); };
+  $$('.al-ex').forEach(b => b.onclick = () => {
+    st = { ...st, compare: [{ account_id: '', sign: 1 }], adjust: 0, adjSign: -1, ...EXAMPLES[b.dataset.ex]() };
+    sync(); $('#al-name').focus();
+  });
+  $('#al-save').onclick = async () => {
+    try {
+      const b = body();
+      if (isNaN(b.amount)) throw new Error('Type the dollars as a number, e.g. 1500 or 1,500.00');
+      const saved = await api(a ? 'PUT' : 'POST', a ? `/api/alerts/${a.id}` : '/api/alerts', b);
+      toast(saved.status === 'triggered' ? 'Alert saved. It\'s going off right now.' : 'Alert saved');
+      go('#/alerts');
+    } catch (e) { fail(e); }
+  };
+  if (a) $('#al-del').onclick = async () => {
+    if (!await confirmBox(`Delete the alert <b>${esc(a.name)}</b>? This can't be undone.`, 'Delete alert', true)) return;
+    try { await api('DELETE', `/api/alerts/${a.id}`); toast('Alert deleted'); go('#/alerts'); } catch (e) { fail(e); }
+  };
+  sync();
+}
+
 // ---------------------------------------------------------------- dashboard
 async function dashboard() {
   const d = await GET('/api/dashboard');
@@ -481,6 +689,9 @@ async function dashboard() {
       <div class="note">${b.last_reconciled ? `Reconciled to ${dfmt(b.last_reconciled)}` : 'Not reconciled yet'}
       ${b.uncleared ? ` · <a href="#/reconcile?account=${b.id}">${b.uncleared} unreconciled</a>` : ''}</div></div>`).join('');
   const tm = d.this_month, lm = d.last_month;
+  const alerts = d.alerts.length ? `<div class="notice warn al-dash"><b>${d.alerts.length} alert${d.alerts.length === 1 ? ' is' : 's are'} going off</b>
+    <table><tbody>${d.alerts.map(a => `<tr data-id="${a.id}"><td><a href="#/alerts/${a.id}"><b>${esc(a.name)}</b></a></td><td>${esc(a.summary)}</td>
+      <td class="num">Now ${$fmt(a.watch_value)} vs ${$fmt(a.compare_value)}</td><td class="num">${a.status === 'triggered' ? '<button class="small al-gotit">Got it</button>' : alertPill('seen')}</td></tr>`).join('')}</tbody></table></div>` : '';
   const recent = d.recent_recurring.length ? `<table><tbody>${d.recent_recurring.map(r => `<tr><td>${dfmt(r.date)}</td><td>${esc(r.name)}</td>
       <td>${r.skipped ? `<span class="pill bad">Skipped</span> <span class="muted">${esc(r.reason)}</span>` : `<span class="pill ok">Created</span>`}</td>
       <td class="num">${r.total !== undefined ? $fmt(r.total) : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Nothing yet</div>';
@@ -490,7 +701,7 @@ async function dashboard() {
   page('Dashboard', new Date(S.today + 'T00:00:00').toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
     `<a class="btn" href="#/sales/new">New invoice</a><a class="btn" href="#/purchases/new">New bill</a>
      <a class="btn" href="#/banking/spend">Spend money</a><a class="btn primary" href="#/reconcile">Reconcile</a>`,
-    `${setupBanner}
+    `${setupBanner}${alerts}
     <div class="grid g4" style="margin-bottom:16px">${banks}</div>
     <div class="grid g4" style="margin-bottom:16px">
       <div class="stat"><div class="label">Owed to you</div><a class="value" href="#/sales">${$fmt(d.receivable.total)}</a>
@@ -509,6 +720,7 @@ async function dashboard() {
       <div class="panel flush"><h2>Recently created by recurring</h2>${recent}</div>
     </div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
+  $$('.al-dash .al-gotit').forEach(b => b.onclick = async () => { await dismissAlert(b.closest('tr').dataset.id); dashboard(); updateAlertCount(); });
 }
 
 // ---------------------------------------------------------------- setup wizard

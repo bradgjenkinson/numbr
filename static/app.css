@@ -340,3 +340,17 @@ td.mtot, th.mtot { background-color: #f6f8fb; }
   .vbar, .vbar *, td.mm, td.ptot { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .bva-mm .rep-grid table { font-size: 10px; }
 }
+
+/* Alerts */
+.navcount { display: inline-block; min-width: 18px; padding: 1px 6px; margin-left: 6px; border-radius: 99px; background: var(--bad); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; vertical-align: 1px; }
+.navcount[hidden] { display: none; }
+.al-sentence { font-size: 16px; line-height: 1.5; border-left: 3px solid var(--accent); }
+.al-term { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.al-term .acct-pick-wrap, .al-term select.al-acct { flex: 0 1 320px; min-width: 200px; }
+.al-term .al-sign { width: 90px; }
+.al-sign-gap { width: 90px; flex: none; }
+.al-now { font-size: 12.5px; }
+.al-dash table { margin-top: 6px; background: transparent; }
+.al-dash td { border: 0; padding: 4px 8px 4px 0; }
+@media (max-width: 600px) { .al-sign-gap { display: none; } }

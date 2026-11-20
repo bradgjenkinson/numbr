@@ -56,6 +56,8 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 
 - **Budgets:** `budgets` (one per financial year), `budget_methods` (the builder's choice per account) and `budget_amounts` (monthly natural-sign cents). Planning data only: never in journals or ledger maths. History for the builder comes through `report_lines()`. Choices are stored only to default next year's builder (`roll_config()`); a built budget's figures change only by hand (`PUT /api/budgets/:id`) and are never recalculated from the choices, except when the user deliberately reopens it in the builder ("Rebuild with builder", `PUT /api/budgets/:id/rebuild`, which replaces choices and figures; hand-edited accounts start as typed months so edits survive). P&L accounts only. Budget vs actual on the P&L (`budget=1` on `/api/reports/pl`, `plBudgetView` in `app.js`) is offered only when every month in the range has a budget.
 
+- **Alerts:** `alerts` + `alert_terms` (`watch`/`compare` sides, sign ±1). Read-only: never in journals or ledger maths. Current values only (`alert_values()`): balance sheet accounts as at today, P&L accounts for this financial year so far, nothing dated after today, and full ledger amounts (deliberately not `report_lines()`, so shared bank accounts match the bank). `evaluate_alerts()` saves `triggered_since`/`dismissed` as conditions change; "Got it" only marks an alert seen: it keeps counting in the menu and on the Dashboard while the condition is true (on purpose, so it can't be forgotten) and re-arms when the condition goes false. The nav count is `updateAlertCount()`, run after every route.
+
 ### Invariants the code enforces (keep them)
 
 1. Journals balance (`check_lines`).
@@ -84,6 +86,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
   - `ROUTES` hash router → one async function per screen (`dashboard`, `invoiceForm`, `reconcilePage`, `reportPL`, …)
   - global `S` holds settings, accounts and contacts (refresh with `refreshState()`)
   - budgets: `budgetList`, `budgetBuilder` (3 steps, state in `BB`; `#/budgets/:id/rebuild` reopens a built budget at step 2 with `BB.rebuild` set, `ownAmountsModal` for schedules/typed months; amounts can repeat monthly, weekly, fortnightly, quarterly or annually (same month each year); a "Total for the year" can be spread evenly by month, by quarter between months, or by weekday, fortnight or day between dates, see `schedule_amounts()`), `budgetView` (editable grid; `budgetTable` lays budget figures out like the P&L)
+  - alerts: `alertsList`, `alertForm` (state `st`, live sentence `alertSentence`, debounced `POST /api/alerts/preview`), `updateAlertCount`, `dismissAlert`; triggered alerts also show at the top of `dashboard`
   - CSV statement parsing and matching are client-side (`parseCSV`, `csvMapping`, `drawCsv` inside `reconcilePage`)
 - `docs/ARCHITECTURE.md`: schema, API reference, design decisions
 - `docs/OPERATIONS.md`: how the user runs the books (weekly, month end, backups, recovery)
@@ -105,3 +108,4 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 - Email or PDF invoices (print-to-PDF works today)
 - Credit notes (current workaround: void and reissue)
 - Bank rules that split one line across several accounts
+- Alerts on a past month or a month each year (alerts check current values only today)

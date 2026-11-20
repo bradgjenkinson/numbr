@@ -56,6 +56,14 @@ To see how one part of your affairs is going (say an investment property), make 
 
 On the **Profit & Loss** or **Balance Sheet**, choose the project in the **Project** box to see only its accounts; choose **All accounts** to go back. Budget vs actual works the same way. The project balance sheet shows the project's assets and loans plus "Project earnings" (its profit). It won't balance on its own, because the rent and bills go through your bank account, which usually isn't in the project. Projects never change any figures; deleting one leaves the accounts and transactions alone.
 
+## Alerts
+
+**Alerts → New alert** tells numbr to keep an eye on a figure for you. Pick an example to start from, or fill in the three steps: a name, the account (or accounts, added together) to watch, and when it should go off, compared with a dollar amount or with other accounts (plus or minus an amount). For example: *Offset A plus Offset B goes below Home Loan minus $1,000*. The **Right now** box shows today's figures and whether the alert would go off as you type.
+
+- Bank, loan and other balance sheet accounts use today's balance; income and expense accounts use the total for this financial year so far. Shared bank accounts count at their full balance, the same as the bank statement.
+- The red number next to **Alerts** in the menu is how many alerts are going off; they're also listed at the top of the Dashboard.
+- Click **Got it** to mark one as seen. It stays in the count and on the Dashboard until the figures change so the condition is no longer true, so you can't forget it. Untick **Turned on** to pause an alert without deleting it.
+
 ## Shared bank accounts
 
 For an account you share with someone (e.g. a joint account), open Banking → Manage accounts and set **Your share %** (e.g. 50). Enter and reconcile its transactions at their full amounts, exactly as they appear on the statement. Reports then show only your share:

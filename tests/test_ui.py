@@ -559,6 +559,28 @@ try:
         page.click('[data-view="actual"]')
         assert len(errors) == n_err, errors
 
+        # alerts: build one from an example, see the menu count; Got it marks it seen but the count stays
+        page.goto(URL + '#/alerts'); page.wait_for_selector('text=Create your first alert')
+        assert page.locator('#alert-count').is_hidden()
+        page.click('text=Create your first alert'); page.wait_for_selector('.al-ex')
+        page.click('.al-ex[data-ex="low"]')
+        assert page.input_value('#al-name') == 'Low bank balance'
+        page.fill('#al-amount', '1,000,000')
+        page.wait_for_selector('#al-preview .pill.bad')
+        assert 'goes below' in page.inner_text('#al-sentence') and '$1,000,000.00' in page.inner_text('#al-sentence')
+        assert page.locator('.al-now').first.inner_text().startswith('now $')
+        shot(page, '23-alert-form')
+        page.click('#al-save'); page.wait_for_selector('.al-gotit')
+        page.wait_for_selector('#alert-count:not([hidden])')
+        assert page.inner_text('#alert-count') == '1'
+        assert 'Going off' in page.inner_text('main')
+        shot(page, '24-alerts')
+        page.goto(URL + '#/dashboard'); page.wait_for_selector('.al-dash')
+        page.click('.al-dash .al-gotit'); page.wait_for_timeout(500)
+        assert page.locator('.al-dash .al-gotit').count() == 0 and 'Seen' in page.inner_text('.al-dash')
+        assert page.inner_text('#alert-count') == '1', 'a seen alert still counts'
+        page.goto(URL + '#/alerts'); page.wait_for_selector('text=Seen')
+
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')
         for h in ['#/contacts', '#/accounts', '#/journal', '#/audit', '#/opening', '#/reports/tb', '#/reports/aged-ap', '#/purchases', '#/sales?status=all', '#/partner', '#/banking/transfer', '#/dashboard']:

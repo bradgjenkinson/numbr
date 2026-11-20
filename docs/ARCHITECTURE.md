@@ -29,6 +29,8 @@ A single Python process serves the static frontend and a JSON API. All state is 
 | `budgets` | One per financial year: `fy_start` (YYYY-MM), name, the history months the builder used |
 | `budget_methods` | Per budget and account, how the user chose to build it (`average`, `last`, `schedule`, `manual`, `none`) and its `config` JSON. Only used to set up the next year's builder |
 | `budget_amounts` | The budget itself: natural-sign cents per account per month (zero months not stored) |
+| `alerts` | Named alerts: `op` (`gt`, `gte`, `lt`, `lte`, `eq`), `amount` (the fixed amount, or the adjustment added to the compare accounts), `active`, `triggered_since`, `dismissed` |
+| `alert_terms` | The accounts in an alert: `side` (`watch` or `compare`), `account_id`, `sign` (+1 add, -1 take away) |
 | `audit_log` | Append-only change history |
 
 ### How documents post to the ledger
@@ -106,6 +108,15 @@ All the maths is server-side (`POST /budgets/preview` while building, the same c
 
 **Budget vs actual.** The P&L has a view switch: Actual, YTD accumulative and Month by month. Every `GET /reports/pl` response carries `budget_cover` (`available`, `missing` months, the `budgets` that cover the range); the two budget views are only offered when every month in the range has a budget, which may mean two financial years' budgets together. With `budget=1` each account row also carries `budget` (per month) and `budget_total`, sections carry `budget_totals`/`budget_total`, and the response adds `gross_profit_budget(_total)` and `net_profit_budget(_total)`. Accounts with a budget but no actuals are included. Budget figures come straight from `budget_amounts`; the actual figures are identical to the plain P&L. YTD accumulative shows one set of totals for the range (actual, budget, variance, variance %, a bar against budget). Month by month is laid out like a budget spreadsheet: Budget, Actual and Difference columns under each month (and a range Total), in whole dollars with zeros left blank. The difference is signed so positive is better than budget (actual less budget for income, budget less actual for costs) and is worked from the rounded figures shown; worse than budget is red.
 
+### Alerts
+
+An alert goes off while `sum(sign * value of watch accounts) <op> sum(sign * value of compare accounts) + amount` is true; with no compare accounts, `amount` is a fixed dollar figure. Alerts are read-only: they never post journals or change reports.
+
+- **Current values only.** Balance sheet accounts use the balance as at today; P&L accounts use this financial year so far (`fy_start()` to today). Transactions dated after today are ignored (`alert_values()`).
+- **Full ledger amounts.** Values come straight from `journal_lines`, not `report_lines()`, so a shared bank account counts at its whole balance and matches the bank statement (useful for comparing offset accounts with a loan).
+- **State.** `evaluate_alerts()` runs whenever alerts are read (`GET /alerts`, `/alerts/count`, `/dashboard`). When the condition becomes true it sets `triggered_since`; when it becomes false it clears `triggered_since` and `dismissed`, re-arming the alert. "Got it" (`POST /alerts/:id/dismiss`) sets `dismissed` (status `seen`); a seen alert still counts in the menu and shows on the Dashboard until its condition stops, so it can't be forgotten. Editing an alert starts it fresh. Statuses: `triggered`, `seen`, `ok`, `off` (turned off).
+- The nav count (`updateAlertCount()` in `app.js`) refreshes after every screen change. An account in an alert can't be deleted.
+
 ## API reference
 
 All endpoints are under `/api`, take and return JSON, and require header `X-Ledger: 1`. Money is integer cents.
@@ -138,7 +149,11 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `POST /budgets/preview`, `POST /budgets` | `{fy, name?, accounts: [{account_id, method, config}]}`. Preview returns 12 values per account (an `error` per account instead of failing) and totals; create saves it |
 | `GET/PUT/DELETE /budgets/:id` | Budget laid out like the P&L; `PUT {name?, amounts: [{account_id, month, amount}]}` edits figures by hand (amount 0 removes) |
 | `GET /budgets/builder?budget=ID`, `PUT /budgets/:id/rebuild` | Rebuild: the builder opened again on a built budget. Each account starts with its saved choice; one whose figures no longer match that choice (changed or added by hand; average/last month are checked against the history the budget was built from) starts as `manual` holding its current figures, flagged `edited`. `PUT {name?, accounts}` (same shape as `POST /budgets`) replaces the budget's choices and figures and records the current history window |
-| `GET /dashboard`, `GET /audit`, `POST /backup` | Dashboard figures, audit log, manual backup |
+| `GET /alerts`, `GET /alerts/count` | Every alert with `watch`/`compare` accounts and their current `value`, `watch_value`, `compare_value`, `met`, `status` and a plain-English `summary`; the count of alerts going off (`triggered` or `seen`) |
+| `POST /alerts`, `GET/PUT/DELETE /alerts/:id` | `{name, op, active?, watch: [{account_id, sign?}], compare: [{account_id, sign?}], amount}` (cents) |
+| `POST /alerts/preview` | Same body (name not needed): the evaluated alert, nothing saved. Used for the live "Right now" box |
+| `POST /alerts/:id/dismiss` | "Got it": marks a triggered alert as seen. It still counts until the condition stops |
+| `GET /dashboard`, `GET /audit`, `POST /backup` | Dashboard figures (including `alerts` going off), audit log, manual backup |
 
 ## Design decisions
 
