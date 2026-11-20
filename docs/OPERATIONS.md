@@ -50,6 +50,14 @@ To rework a budget with the builder's methods (e.g. switch an account to a quart
 
 Near the end of each financial year, build next year's budget: each account starts the way you did it this year (marked "as last year"), so just adjust anything that's changed.
 
+## Alerts
+
+**Alerts → New alert** tells numbr to keep an eye on a figure for you. Pick an example to start from, or fill in the three steps: a name, the account (or accounts, added together) to watch, and when it should go off, compared with a dollar amount or with other accounts (plus or minus an amount). For example: *Offset A plus Offset B goes below Home Loan minus $1,000*. The **Right now** box shows today's figures and whether the alert would go off as you type.
+
+- Bank, loan and other balance sheet accounts use today's balance; income and expense accounts use the total for this financial year so far. Shared bank accounts count at their full balance, the same as the bank statement.
+- The red number next to **Alerts** in the menu is how many alerts are going off; they're also listed at the top of the Dashboard.
+- Click **Got it** to mark one as seen. It stays in the count and on the Dashboard until the figures change so the condition is no longer true, so you can't forget it. Untick **Turned on** to pause an alert without deleting it.
+
 ## Shared bank accounts
 
 For an account you share with someone (e.g. a joint account), open Banking → Manage accounts and set **Your share %** (e.g. 50). Enter and reconcile its transactions at their full amounts, exactly as they appear on the statement. Reports then show only your share:
