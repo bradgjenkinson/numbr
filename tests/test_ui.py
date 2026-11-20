@@ -195,7 +195,10 @@ try:
         page.goto(URL + '#/reports/bs'); page.wait_for_selector('#f-proj')
         page.select_option('#f-proj', str(pid)); page.wait_for_timeout(500)
         assert 'Showing only the accounts in the project' in page.inner_text('main') and 'Project earnings' in page.inner_text('.report')
+        bs_txt = page.inner_text('.report')
+        assert 'Net assets' in bs_txt and 'Total equity' not in bs_txt, bs_txt
         page.select_option('#f-proj', ''); page.wait_for_timeout(400)
+        assert 'Total equity' in page.inner_text('.report')
         page.goto(URL + '#/reports/pl'); page.wait_for_selector('#f-proj')
         page.select_option('#f-proj', ''); page.wait_for_timeout(400)
         assert sales_name in page.inner_text('.report')
