@@ -2251,9 +2251,10 @@ async function reportBS() {
     rowsHtml += valsRow(`Total ${s.title.toLowerCase()}`, s.totals, 'total');
   });
   rowsHtml += valsRow('Net assets', d.net_assets, 'grand');
-  rowsHtml += repLabelRow(E.title, n, 'sechead');
+  if (!d.project) rowsHtml += repLabelRow(E.title, n, 'sechead');
   sectionRows(E);
-  rowsHtml += valsRow('Total equity', E.totals, 'grand');
+  // A project balance sheet doesn't balance, so a Total equity line would only invite comparison with Net assets.
+  if (!d.project) rowsHtml += valsRow('Total equity', E.totals, 'grand');
   const hist = E.rows.find(x => x.subtype === 'hist');
   const period = n === 1 ? `As at ${dfmt(d.dates[0])}` : `Month ends, ${monthLong(d.months[0])} to ${monthLong(d.months[n - 1])}`;
   page('Balance Sheet', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
@@ -2267,9 +2268,9 @@ async function reportBS() {
   $('#x-csv').onclick = () => {
     const out = [[S.settings.business_name], ['Balance Sheet'], ...(d.project ? [[`Project: ${d.project.name}`]] : []), [], ['Account', ...d.dates]];
     d.sections.forEach(s => {
-      out.push([s.title]);
+      if (!(d.project && s === E)) out.push([s.title]);
       csvTreeLines(lines(s), x => x.name).forEach(([label, vals]) => out.push([label, ...vals.map(c2d)]));
-      out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
+      if (!(d.project && s === E)) out.push([`Total ${s.title}`, ...s.totals.map(c2d)]);
     });
     out.push(['Net assets', ...d.net_assets.map(c2d)]);
     download(`Balance-Sheet${projFile(d)}-${r.from}-to-${r.to}.csv`, out);
