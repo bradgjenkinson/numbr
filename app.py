@@ -241,6 +241,25 @@ CREATE TABLE IF NOT EXISTS budget_amounts (
   amount INTEGER NOT NULL,
   PRIMARY KEY (budget_id, account_id, month)
 );
+-- Alerts watch current account values and flag when a condition is met. Read-only: they never post journals.
+-- Condition: sum(sign * value of 'watch' terms) <op> sum(sign * value of 'compare' terms) + amount.
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('gt','gte','lt','lte','eq')),
+  amount INTEGER NOT NULL DEFAULT 0,        -- cents: the fixed amount, or the adjustment added to the compare accounts
+  active INTEGER NOT NULL DEFAULT 1,
+  triggered_since TEXT,                     -- date the condition last became true (NULL while it's false)
+  dismissed INTEGER NOT NULL DEFAULT 0,     -- user clicked "Got it" (seen); cleared when the condition goes false again
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert_terms (
+  id INTEGER PRIMARY KEY,
+  alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+  side TEXT NOT NULL CHECK (side IN ('watch','compare')),
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  sign INTEGER NOT NULL DEFAULT 1 CHECK (sign IN (1,-1))
+);
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
@@ -933,6 +952,10 @@ def api_account_delete(db, q, body, aid):
     if (scalar(db, 'SELECT COUNT(*) FROM budget_amounts WHERE account_id=?', (a['id'],)) or
             scalar(db, "SELECT COUNT(*) FROM budget_methods WHERE account_id=? AND method<>'none'", (a['id'],))):
         raise ApiError('This account is in a budget. Archive it instead.')
+    used_by = scalar(db, 'SELECT al.name FROM alert_terms t JOIN alerts al ON al.id=t.alert_id WHERE t.account_id=? '
+                         'ORDER BY al.name LIMIT 1', (a['id'],))
+    if used_by:
+        raise ApiError(f'This account is used in the alert "{used_by}". Edit or delete that alert first.')
     db.execute('DELETE FROM budget_methods WHERE account_id=?', (a['id'],))
     db.execute('UPDATE contacts SET default_account_id=NULL WHERE default_account_id=?', (a['id'],))
     db.execute('DELETE FROM accounts WHERE id=?', (a['id'],))
@@ -3221,6 +3244,220 @@ def api_budget_delete(db, q, body, bid):
     return {'ok': True}
 
 
+# ----------------------------------------------------------------------------
+# Alerts
+# ----------------------------------------------------------------------------
+# An alert compares the current value of one or more accounts with a fixed amount, or with other accounts
+# plus or minus an amount, and "goes off" while the condition is true. Alerts are read-only: they never post
+# journals and never change reports.
+# Values are full ledger amounts in natural sign (a shared bank account counts at its whole balance, so it
+# matches the bank statement; that's deliberate, unlike reports, which go through report_lines()).
+# Balance sheet accounts use the balance as at today; P&L accounts use this financial year so far.
+# Transactions dated after today are ignored.
+# "Got it" (dismissed) only marks a triggered alert as seen: it still counts in the menu and shows on the
+# Dashboard for as long as the condition is true, so it can't be forgotten. When the condition goes false it re-arms.
+
+ALERT_OPS = {'gt': 'goes above', 'gte': 'reaches or goes above', 'lt': 'goes below',
+             'lte': 'is at or below', 'eq': 'is exactly'}
+PREVIEW_NAME = '(preview of an unsaved alert)'  # stands in for the name: previews don't check it
+
+
+def alert_values(db):
+    """{account_id: current natural-sign value in cents} for every account."""
+    t = today()
+    fs = fy_start(db, t)
+    out = {}
+    for aid, typ, amt in db.execute(
+            "SELECT a.id, a.type, COALESCE(SUM(CASE WHEN j.date<=? AND "
+            "(a.type NOT IN ('income','cos','expense') OR j.date>=?) THEN l.amount END),0) "
+            "FROM accounts a LEFT JOIN journal_lines l ON l.account_id=a.id "
+            "LEFT JOIN journals j ON j.id=l.journal_id GROUP BY a.id", (t, fs)):
+        out[aid] = SIGN[typ] * amt
+    return out
+
+
+def alert_test(op, left, right):
+    return {'gt': left > right, 'gte': left >= right, 'lt': left < right,
+            'lte': left <= right, 'eq': left == right}[op]
+
+
+def terms_text(terms):
+    s = ''
+    for i, t in enumerate(terms):
+        if i:
+            s += ' - ' if t['sign'] < 0 else ' + '
+        elif t['sign'] < 0:
+            s += 'minus '
+        s += t['name']
+    return s
+
+
+def alert_summary(op, watch, compare, amount):
+    if compare:
+        right = terms_text(compare)
+        if amount:
+            right += f" {'-' if amount < 0 else '+'} {money(abs(amount))}"
+    else:
+        right = money(amount)
+    return f'{terms_text(watch)} {ALERT_OPS[op]} {right}'
+
+
+def evaluate_alert(a, terms, vals, names):
+    """a: alert fields (op, amount, active). terms: [{side, account_id, sign}]. Returns the alert with values."""
+    out = dict(a)
+    for side in ('watch', 'compare'):
+        out[side] = [{'account_id': t['account_id'], 'sign': t['sign'], 'name': names.get(t['account_id'], '?'),
+                      'value': vals.get(t['account_id'], 0)} for t in terms if t['side'] == side]
+    out['watch_value'] = sum(t['sign'] * t['value'] for t in out['watch'])
+    out['compare_value'] = sum(t['sign'] * t['value'] for t in out['compare']) + a['amount']
+    out['met'] = alert_test(a['op'], out['watch_value'], out['compare_value'])
+    out['summary'] = alert_summary(a['op'], out['watch'], out['compare'], a['amount'])
+    return out
+
+
+def alert_names(db):
+    return {r[0]: r[1] for r in db.execute('SELECT id, name FROM accounts')}
+
+
+def evaluate_alerts(db, only=None):
+    """Every alert (or just id `only`) with current values and status, saving triggered/re-armed state."""
+    vals, names = alert_values(db), alert_names(db)
+    sql = 'SELECT * FROM alerts' + (' WHERE id=?' if only else '') + ' ORDER BY name COLLATE NOCASE'
+    alerts = rows(db.execute(sql, (only,) if only else ()))
+    terms = {}
+    for t in rows(db.execute('SELECT * FROM alert_terms ORDER BY id')):
+        terms.setdefault(t['alert_id'], []).append(t)
+    out = []
+    for a in alerts:
+        e = evaluate_alert(a, terms.get(a['id'], []), vals, names)
+        on = bool(a['active']) and e['met']
+        if on and not a['triggered_since']:
+            e['triggered_since'], e['dismissed'] = today(), 0
+            db.execute('UPDATE alerts SET triggered_since=?, dismissed=0 WHERE id=?', (e['triggered_since'], a['id']))
+        elif not on and (a['triggered_since'] or a['dismissed']):
+            e['triggered_since'], e['dismissed'] = None, 0
+            db.execute('UPDATE alerts SET triggered_since=NULL, dismissed=0 WHERE id=?', (a['id'],))
+        e['status'] = 'off' if not a['active'] else ('seen' if e['dismissed'] else 'triggered') if on else 'ok'
+        out.append(e)
+    return out
+
+
+def get_alert(db, aid):
+    r = evaluate_alerts(db, as_int(aid))
+    if not r:
+        raise ApiError('Alert not found', 404)
+    return r[0]
+
+
+def alert_terms_payload(db, items, side):
+    if not isinstance(items, list):
+        raise ApiError('The account list is not valid')
+    out, seen = [], set()
+    for it in items:
+        if not isinstance(it, dict):
+            raise ApiError('The account list is not valid')
+        if not it.get('account_id'):
+            raise ApiError('Choose an account in every row, or remove the empty row')
+        a = account(db, as_int(it['account_id'], 'Account'))
+        if a['id'] in seen:
+            raise ApiError(f'{a["name"]} is in the list twice. Remove one of them.')
+        seen.add(a['id'])
+        sign = as_int(it.get('sign', 1), 'Add or take away')
+        if sign not in (1, -1):
+            raise ApiError('Choose add or take away for each account')
+        out.append({'side': side, 'account_id': a['id'], 'sign': sign})
+    return out
+
+
+def alert_payload(db, body, exclude=0):
+    name = text(body.get('name'))
+    if not name:
+        raise ApiError('Give the alert a name, e.g. "Offset below home loan"')
+    for r in db.execute('SELECT id, name FROM alerts WHERE id<>?', (exclude,)):
+        if name_key(r[1]) == name_key(name):
+            raise ApiError(f'There is already an alert called "{r[1]}". Choose a different name.')
+    op = body.get('op')
+    if op not in ALERT_OPS:
+        raise ApiError('Choose when the alert should go off, e.g. "goes below"')
+    watch = alert_terms_payload(db, body.get('watch') or [], 'watch')
+    if not watch:
+        raise ApiError('Choose the account to watch')
+    compare = alert_terms_payload(db, body.get('compare') or [], 'compare')
+    amount = as_cents(body.get('amount') or 0, 'Amount')
+    return {'name': name, 'op': op, 'amount': amount, 'active': 0 if body.get('active') is False else 1}, watch + compare
+
+
+def save_alert_terms(db, aid, terms):
+    db.execute('DELETE FROM alert_terms WHERE alert_id=?', (aid,))
+    for t in terms:
+        db.execute('INSERT INTO alert_terms(alert_id, side, account_id, sign) VALUES (?,?,?,?)',
+                   (aid, t['side'], t['account_id'], t['sign']))
+
+
+@route('GET', '/api/alerts')
+def api_alerts(db, q, body):
+    return evaluate_alerts(db)
+
+
+@route('GET', '/api/alerts/count')
+def api_alerts_count(db, q, body):
+    return {'count': sum(1 for a in evaluate_alerts(db) if a['status'] in ('triggered', 'seen'))}
+
+
+@route('POST', '/api/alerts/preview')
+def api_alert_preview(db, q, body):
+    """Values for an alert that hasn't been saved, for the live preview in the form. Saves nothing."""
+    # The name isn't checked here (it may still be blank or match another alert while the user types).
+    p, terms = alert_payload(db, {**body, 'name': PREVIEW_NAME})
+    return evaluate_alert(p, terms, alert_values(db), alert_names(db))
+
+
+@route('GET', '/api/alerts/:aid')
+def api_alert_get(db, q, body, aid):
+    return get_alert(db, aid)
+
+
+@route('POST', '/api/alerts')
+def api_alert_create(db, q, body):
+    p, terms = alert_payload(db, body)
+    aid = db.execute('INSERT INTO alerts(name, op, amount, active, created_at) VALUES (?,?,?,?,?)',
+                     (p['name'], p['op'], p['amount'], p['active'], now())).lastrowid
+    save_alert_terms(db, aid, terms)
+    audit(db, 'alert_create', 'alert', aid, {**p, 'terms': terms})
+    return get_alert(db, aid)
+
+
+@route('PUT', '/api/alerts/:aid')
+def api_alert_update(db, q, body, aid):
+    old = get_alert(db, aid)
+    p, terms = alert_payload(db, body, old['id'])
+    # A changed condition starts fresh: it goes off (again) if the new condition is true.
+    db.execute('UPDATE alerts SET name=?, op=?, amount=?, active=?, triggered_since=NULL, dismissed=0 WHERE id=?',
+               (p['name'], p['op'], p['amount'], p['active'], old['id']))
+    save_alert_terms(db, old['id'], terms)
+    audit(db, 'alert_update', 'alert', old['id'], {**p, 'terms': terms})
+    return get_alert(db, old['id'])
+
+
+@route('DELETE', '/api/alerts/:aid')
+def api_alert_delete(db, q, body, aid):
+    a = get_alert(db, aid)
+    db.execute('DELETE FROM alert_terms WHERE alert_id=?', (a['id'],))
+    db.execute('DELETE FROM alerts WHERE id=?', (a['id'],))
+    audit(db, 'alert_delete', 'alert', a['id'], {'name': a['name'], 'summary': a['summary']})
+    return {'ok': True}
+
+
+@route('POST', '/api/alerts/:aid/dismiss')
+def api_alert_dismiss(db, q, body, aid):
+    a = get_alert(db, aid)
+    if a['status'] != 'triggered':
+        raise ApiError("This alert isn't waiting to be seen, so there's nothing to mark.")
+    db.execute('UPDATE alerts SET dismissed=1 WHERE id=?', (a['id'],))
+    audit(db, 'alert_dismiss', 'alert', a['id'], {'name': a['name']})
+    return get_alert(db, a['id'])
+
+
 @route('GET', '/api/dashboard')
 def api_dashboard(db, q, body):
     t = today()
@@ -3271,7 +3508,8 @@ def api_dashboard(db, q, body):
         u['total'] = sum(l['amount'] for l in json.loads(u.pop('lines')))
     return {'banks': banks, 'receivable': ar_ap('sale'), 'payable': ar_ap('bill'), 'contributions': ar_ap('sale', 1),
             'this_month': month_pl(this_m), 'last_month': month_pl(last_m),
-            'recent_recurring': recent, 'upcoming_recurring': upcoming}
+            'recent_recurring': recent, 'upcoming_recurring': upcoming,
+            'alerts': [a for a in evaluate_alerts(db) if a['status'] in ('triggered', 'seen')]}
 
 
 @route('GET', '/api/audit')

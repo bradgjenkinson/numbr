@@ -1,7 +1,7 @@
 """Backend scenario test: runs the app against a temporary database and checks the books tie out.
 Run: python tests/test_api.py"""
 import json, os, sqlite3, subprocess, sys, time, urllib.request, tempfile, shutil, calendar
-from datetime import date
+from datetime import date, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'app.py')
@@ -1083,6 +1083,102 @@ try:
     check(call('GET', '/api/budgets') == [] and call('GET', f'/api/budgets/builder?fy={nfy}')['prior'] is None,
           'deleting a budget removes it and its choices')
     check('budget_delete' in [a['action'] for a in call('GET', '/api/audit')], 'budget delete is audited')
+
+    # ---------------------------------------------------------------- alerts
+    T = date.today()
+    t_iso = T.isoformat()
+    oa = call('POST', '/api/accounts', {'name': 'Offset A', 'type': 'asset', 'subtype': 'bank'})['id']
+    ob2 = call('POST', '/api/accounts', {'name': 'Offset B', 'type': 'asset', 'subtype': 'bank', 'share_pct': 50})['id']
+    loan = call('POST', '/api/accounts', {'name': 'Home Loan', 'type': 'liability', 'subtype': 'other'})['id']
+    asales = call('POST', '/api/accounts', {'name': 'Alert Sales', 'type': 'income', 'subtype': 'other'})['id']
+    cap = A['3-1000']
+
+    def gj(dr, cr, amt, d=t_iso):
+        call('POST', '/api/txn/journal', {'date': d, 'memo': 'alert test', 'lines': [
+            {'account_id': dr, 'debit': amt}, {'account_id': cr, 'credit': amt}]})
+
+    def alert_count():
+        return call('GET', '/api/alerts/count')['count']
+
+    gj(oa, cap, 500000)        # Offset A $5,000
+    gj(ob2, cap, 300000)       # Offset B $3,000 (half of it is someone else's)
+    gj(cap, loan, 900000)      # Home loan $9,000 owed
+    c0 = alert_count()
+    low = call('POST', '/api/alerts', {'name': 'Low offset', 'op': 'lt', 'watch': [{'account_id': oa}], 'amount': 600000})
+    check(low['status'] == 'triggered' and low['watch_value'] == 500000 and low['compare_value'] == 600000,
+          f"a fixed-amount alert goes off when the balance is below it ({low['status']}, {low['watch_value']})")
+    check(low['summary'] == 'Offset A goes below $6,000.00', f"alert summary reads plainly ({low['summary']})")
+    check(alert_count() == c0 + 1, 'the alert count includes an alert that is going off')
+    check(low['id'] in [a['id'] for a in call('GET', '/api/dashboard')['alerts']], 'the dashboard lists alerts going off')
+    r = call('POST', '/api/alerts', {'name': 'No account', 'op': 'lt', 'watch': [], 'amount': 0}, expect_ok=False)
+    check('account to watch' in r.get('error', ''), 'an alert needs an account to watch')
+    r = call('POST', '/api/alerts', {'name': 'Bad op', 'op': 'zz', 'watch': [{'account_id': oa}]}, expect_ok=False)
+    check('go off' in r.get('error', ''), 'an alert needs a valid condition')
+    r = call('POST', '/api/alerts', {'name': ' low  OFFSET', 'op': 'gt', 'watch': [{'account_id': oa}]}, expect_ok=False)
+    check('already an alert' in r.get('error', ''), 'alert names must be unique ignoring case and spacing')
+    r = call('POST', '/api/alerts', {'name': 'Twice', 'op': 'gt', 'watch': [{'account_id': oa}, {'account_id': oa}]}, expect_ok=False)
+    check('twice' in r.get('error', ''), 'an account cannot be in the same total twice')
+
+    # offsets compared with a loan less $1,000; shared accounts count at their full balance
+    off = call('POST', '/api/alerts', {'name': 'Offsets vs loan', 'op': 'lt', 'watch': [{'account_id': oa}, {'account_id': ob2}],
+                                       'compare': [{'account_id': loan}], 'amount': -100000})
+    check(off['watch_value'] == 800000, f"a shared bank account counts at its full balance ({off['watch_value']})")
+    check(off['compare_value'] == 800000 and off['status'] == 'ok', f"loan less $1,000 is compared ({off['compare_value']}, {off['status']})")
+    check(off['summary'] == 'Offset A + Offset B goes below Home Loan - $1,000.00', f"compare summary ({off['summary']})")
+    off = call('PUT', f"/api/alerts/{off['id']}", {'name': 'Offsets vs loan', 'op': 'lte', 'watch': [{'account_id': oa}, {'account_id': ob2}],
+                                                    'compare': [{'account_id': loan}], 'amount': -100000})
+    check(off['status'] == 'triggered', '"is at or below" goes off when the totals are equal')
+    mixed = call('POST', '/api/alerts/preview', {'op': 'eq', 'watch': [{'account_id': oa}, {'account_id': ob2, 'sign': -1}], 'amount': 200000})
+    check(mixed['met'] and mixed['watch_value'] == 200000, 'a "minus" account is taken away from the total')
+    n_alerts = len(call('GET', '/api/alerts'))
+    pv = call('POST', '/api/alerts/preview', {'op': 'gt', 'watch': [{'account_id': oa}], 'amount': 0})
+    check(pv['met'] and len(call('GET', '/api/alerts')) == n_alerts, 'preview shows the result without saving an alert')
+
+    # "Got it" marks a triggered alert seen, but it keeps counting until the condition stops
+    c1 = alert_count()
+    seen = call('POST', f"/api/alerts/{low['id']}/dismiss")
+    check(seen['status'] == 'seen' and alert_count() == c1, 'Got it marks the alert seen and it still counts')
+    check(low['id'] in [a['id'] for a in call('GET', '/api/dashboard')['alerts']], 'a seen alert stays on the dashboard')
+    r = call('POST', f"/api/alerts/{low['id']}/dismiss", expect_ok=False)
+    check('nothing to mark' in r.get('error', ''), 'an alert already seen cannot be marked again')
+    gj(oa, cap, 200000)
+    check(call('GET', f"/api/alerts/{low['id']}")['status'] == 'ok' and
+          low['id'] not in [a['id'] for a in call('GET', '/api/dashboard')['alerts']] and alert_count() < c1,
+          'the alert is quiet and leaves the count once the balance recovers')
+    gj(cap, oa, 200000)
+    check(call('GET', f"/api/alerts/{low['id']}")['status'] == 'triggered' and alert_count() == c1,
+          'the alert goes off again when the balance drops again')
+    gj(oa, cap, 400000, (T + timedelta(days=5)).isoformat())
+    check(call('GET', f"/api/alerts/{low['id']}")['watch_value'] == 500000, 'transactions dated after today are ignored')
+    off_alert = call('PUT', f"/api/alerts/{low['id']}", {'name': 'Low offset', 'op': 'lt', 'watch': [{'account_id': oa}],
+                                                         'amount': 600000, 'active': False})
+    check(off_alert['status'] == 'off' and alert_count() == c1 - 1, 'a turned-off alert never counts')
+
+    # income accounts use this financial year so far
+    prev = date(T.year - (T.month == 1), (T.month - 2) % 12 + 1, 1)
+    if prev.isoformat() > call('GET', '/api/state')['settings']['lock_date']:
+        call('PUT', '/api/settings', {'fy_start_month': T.month})
+        gj(cap, asales, 100000, prev.isoformat())
+        gj(cap, asales, 250000)
+        inc = call('POST', '/api/alerts', {'name': 'Income target', 'op': 'gte', 'watch': [{'account_id': asales}], 'amount': 300000})
+        check(inc['watch_value'] == 250000 and inc['status'] == 'ok', f"income alerts use this financial year only ({inc['watch_value']})")
+        call('PUT', '/api/settings', {'fy_start_month': 7})
+    else:
+        print('SKIP income financial-year alert check (previous month is locked)')
+
+    # accounts used in an alert can't be deleted until the alert is changed or deleted
+    spare_w = call('POST', '/api/accounts', {'name': 'Spare Watch', 'type': 'asset', 'subtype': 'other'})['id']
+    sw = call('POST', '/api/alerts', {'name': 'Spare', 'op': 'gt', 'watch': [{'account_id': spare_w}], 'amount': 0})
+    r = call('DELETE', f'/api/accounts/{spare_w}', expect_ok=False)
+    check('used in the alert "Spare"' in r.get('error', ''), 'an account in an alert cannot be deleted')
+    call('DELETE', f"/api/alerts/{sw['id']}")
+    call('DELETE', f'/api/accounts/{spare_w}')
+    check(spare_w not in [a['id'] for a in call('GET', '/api/accounts')], 'the account can be deleted once its alert is gone')
+    acts = [a['action'] for a in call('GET', '/api/audit')]
+    check(all(x in acts for x in ('alert_create', 'alert_update', 'alert_dismiss', 'alert_delete')), 'alert changes are audited')
+    tb_ = call('GET', '/api/reports/tb')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances with alerts')
+    check(call('GET', f'/api/reports/bs?to={t_iso[:7]}&count=1')['balanced'], 'BS still balances with alerts')
 
     # security header
     try:
