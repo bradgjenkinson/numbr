@@ -168,6 +168,37 @@ try:
         assert want in page.locator('tr.ghead').inner_text()
         shot(page, '10d-pl-groups-only')
         page.uncheck('#f-gonly'); page.wait_for_selector('tr.ghead')
+        # projects: made from the chart of accounts, an account added from its own form, then filter the P&L
+        assert page.locator('#f-proj').count() == 0, 'no project picker until a project exists'
+        page.goto(URL + '#/accounts'); page.wait_for_selector('#p-list')
+        page.click('#p-list'); page.wait_for_selector('#modal [data-x=new]'); page.click('#modal [data-x=new]')
+        page.wait_for_selector('#pm-name'); page.fill('#pm-name', 'Office')
+        page.fill('#pm-find', 'softw'); page.wait_for_timeout(250)
+        assert page.locator('#pm-list label:visible').count() == 1, page.locator('#pm-list label:visible').all_inner_texts()
+        page.check(f'#pm-list input[value="{sw}"]'); page.fill('#pm-find', '')
+        page.click('#modal [data-x=yes]'); page.wait_for_timeout(500)
+        pid = page.evaluate("S.projects.find(p=>p.name=='Office').id")
+        page.click(f'tr[data-id="{fees}"]'); page.wait_for_selector('.am-proj')
+        page.check(f'.am-proj input[value="{pid}"]'); page.click('#modal [data-x=yes]'); page.wait_for_timeout(500)
+        assert sorted(page.evaluate("S.projects[0].account_ids")) == sorted([sw, fees])
+        assert page.locator(f'tr[data-id="{fees}"] .pill', has_text='Office').count() == 1
+        shot(page, '10e-projects')
+        page.goto(URL + '#/reports/pl'); page.wait_for_selector('#f-proj')
+        page.select_option('#f-proj', str(pid)); page.wait_for_timeout(500)
+        txt = page.inner_text('.report')
+        sales_name = page.evaluate("S.accounts.find(a=>a.code=='4-1000').name")
+        assert 'Project: Office' in txt and 'Bank Fees' in txt and sales_name not in txt, txt
+        want_np = page.evaluate(f"""(async () => {{ const d = await GET('/api/reports/pl?from=2026-07&to=2026-10&project={pid}');
+            return fmt(d.net_profit_total, {{paren: true, dashZero: true}}); }})()""")
+        assert want_np in page.locator('tr.grand').inner_text(), (want_np, page.locator('tr.grand').inner_text())
+        shot(page, '10f-pl-project')
+        page.goto(URL + '#/reports/bs'); page.wait_for_selector('#f-proj')
+        page.select_option('#f-proj', str(pid)); page.wait_for_timeout(500)
+        assert 'Showing only the accounts in the project' in page.inner_text('main') and 'Project earnings' in page.inner_text('.report')
+        page.select_option('#f-proj', ''); page.wait_for_timeout(400)
+        page.goto(URL + '#/reports/pl'); page.wait_for_selector('#f-proj')
+        page.select_option('#f-proj', ''); page.wait_for_timeout(400)
+        assert sales_name in page.inner_text('.report')
         page.goto(URL + '#/reports/bs'); page.wait_for_selector('.report')
         # defaults to this financial year: one month-end column per month, same headings as the P&L
         heads = page.locator('.rep-grid thead th').all_inner_texts()

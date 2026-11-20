@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS account_groups (
   type TEXT NOT NULL CHECK (type IN ('asset','liability','equity','income','cos','expense')),
   parent_id INTEGER REFERENCES account_groups(id)
 );
+-- Projects (e.g. an investment property) are named sets of accounts, so the P&L and Balance Sheet can be
+-- filtered to one project. An account can be in any number of projects. Presentation only, like groups.
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_accounts (
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  PRIMARY KEY (project_id, account_id)
+);
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -701,6 +712,7 @@ def api_state(db, q, body):
         s = all_settings(db)
     return {'settings': s, 'accounts': list_accounts(db), 'contacts': list_contacts(db),
             'groups': rows(db.execute('SELECT * FROM account_groups ORDER BY name COLLATE NOCASE')),
+            'projects': list_projects(db),
             'today': today(), 'generated': generated, 'server_current': code_stamp() == STARTED_STAMP}
 
 
@@ -906,6 +918,8 @@ def api_account_create(db, q, body):
     code, name, typ, sub, share, gid = account_payload(db, body)
     cur = db.execute('INSERT INTO accounts(code, name, type, subtype, share_bp, group_id) VALUES (?,?,?,?,?,?)',
                      (code, name, typ, sub, share, gid))
+    if 'project_ids' in body:
+        set_account_projects(db, cur.lastrowid, body.get('project_ids'))
     audit(db, 'account_create', 'account', cur.lastrowid, body)
     return {'id': cur.lastrowid}
 
@@ -929,6 +943,8 @@ def api_account_update(db, q, body, aid):
             raise ApiError('Only accounts with a zero balance can be archived. Move the balance to another account first.')
     db.execute('UPDATE accounts SET code=?, name=?, type=?, subtype=?, archived=?, share_bp=?, group_id=? WHERE id=?',
                (code, name, typ, sub, archived, share, gid, a['id']))
+    if 'project_ids' in body:
+        set_account_projects(db, a['id'], body.get('project_ids'))
     audit(db, 'account_update', 'account', a['id'], body)
     return {'id': a['id']}
 
@@ -957,6 +973,7 @@ def api_account_delete(db, q, body, aid):
     if used_by:
         raise ApiError(f'This account is used in the alert "{used_by}". Edit or delete that alert first.')
     db.execute('DELETE FROM budget_methods WHERE account_id=?', (a['id'],))
+    db.execute('DELETE FROM project_accounts WHERE account_id=?', (a['id'],))
     db.execute('UPDATE contacts SET default_account_id=NULL WHERE default_account_id=?', (a['id'],))
     db.execute('DELETE FROM accounts WHERE id=?', (a['id'],))
     audit(db, 'account_delete', 'account', a['id'], a)
@@ -1070,6 +1087,94 @@ def api_group_delete(db, q, body, gid):
     db.execute('DELETE FROM account_groups WHERE id=?', (g['id'],))
     audit(db, 'group_delete', 'account_group', g['id'], g)
     return {'ok': True}
+
+
+# Projects: named sets of accounts (many-to-many) used to filter the P&L and Balance Sheet. Presentation
+# only: they never change balances and are never used in ledger maths.
+
+def list_projects(db):
+    out = rows(db.execute('SELECT * FROM projects ORDER BY name COLLATE NOCASE'))
+    links = {}
+    for pid, aid in db.execute('SELECT project_id, account_id FROM project_accounts'):
+        links.setdefault(pid, []).append(aid)
+    for p in out:
+        p['account_ids'] = sorted(links.get(p['id'], []))
+    return out
+
+
+def project(db, pid):
+    p = one(db.execute('SELECT * FROM projects WHERE id=?', (as_int(pid, 'Project'),)))
+    if not p:
+        raise ApiError('Project not found. Refresh the page and try again.')
+    return p
+
+
+def project_account_ids(db, pid):
+    return {r[0] for r in db.execute('SELECT account_id FROM project_accounts WHERE project_id=?', (pid,))}
+
+
+def project_payload(db, body, existing=None):
+    name = ' '.join(text(body.get('name', existing and existing['name'])).split())
+    if not name:
+        raise ApiError('Give the project a name')
+    for _, oname in db.execute('SELECT id, name FROM projects WHERE id<>?', (existing['id'] if existing else 0,)):
+        if name_key(oname) == name_key(name):
+            raise ApiError(f'There is already a project called “{oname}”. Choose a different name.')
+    ids = None
+    if 'account_ids' in body:
+        ids = sorted({account(db, as_int(v, 'Account'))['id'] for v in body.get('account_ids') or []})
+    return name, ids
+
+
+def set_project_accounts(db, pid, ids):
+    db.execute('DELETE FROM project_accounts WHERE project_id=?', (pid,))
+    db.executemany('INSERT INTO project_accounts(project_id, account_id) VALUES (?,?)', [(pid, a) for a in ids])
+
+
+def set_account_projects(db, aid, pids):
+    """Replace the projects one account belongs to (the project tick-boxes in the account form)."""
+    pids = sorted({project(db, p)['id'] for p in pids or []})
+    db.execute('DELETE FROM project_accounts WHERE account_id=?', (aid,))
+    db.executemany('INSERT INTO project_accounts(project_id, account_id) VALUES (?,?)', [(p, aid) for p in pids])
+
+
+@route('POST', '/api/projects')
+def api_project_create(db, q, body):
+    name, ids = project_payload(db, body)
+    pid = db.execute('INSERT INTO projects(name) VALUES (?)', (name,)).lastrowid
+    set_project_accounts(db, pid, ids or [])
+    audit(db, 'project_create', 'project', pid, body)
+    return {'id': pid}
+
+
+@route('PUT', '/api/projects/:pid')
+def api_project_update(db, q, body, pid):
+    p = project(db, pid)
+    name, ids = project_payload(db, body, p)
+    db.execute('UPDATE projects SET name=? WHERE id=?', (name, p['id']))
+    if ids is not None:
+        set_project_accounts(db, p['id'], ids)
+    audit(db, 'project_update', 'project', p['id'], body)
+    return {'id': p['id']}
+
+
+@route('DELETE', '/api/projects/:pid')
+def api_project_delete(db, q, body, pid):
+    """Remove a project. Its accounts, transactions and balances are untouched."""
+    p = project(db, pid)
+    p['account_ids'] = sorted(project_account_ids(db, p['id']))
+    db.execute('DELETE FROM project_accounts WHERE project_id=?', (p['id'],))
+    db.execute('DELETE FROM projects WHERE id=?', (p['id'],))
+    audit(db, 'project_delete', 'project', p['id'], p)
+    return {'ok': True}
+
+
+def report_project(db, q):
+    """The project a report is filtered to (?project=id) as ({id, name}, account ids), or (None, None)."""
+    if q.get('project') in (None, ''):
+        return None, None
+    p = project(db, q['project'])
+    return {'id': p['id'], 'name': p['name']}, project_account_ids(db, p['id'])
 
 
 def contact_payload(db, body):
@@ -2446,9 +2551,10 @@ def balances_as_at(db, date):
     return out
 
 
-def profit_between(db, frm, to):
-    """Net profit (natural sign) for frm <= date <= to. frm may be None."""
-    return -sum(amt for _, typ, _, amt in report_lines(db, to=to, frm=frm) if typ in PL_TYPES)
+def profit_between(db, frm, to, only=None):
+    """Net profit (natural sign) for frm <= date <= to. frm may be None. only: just these account ids."""
+    return -sum(amt for aid, typ, _, amt in report_lines(db, to=to, frm=frm)
+                if typ in PL_TYPES and (only is None or aid in only))
 
 
 def fy_start(db, date_s):
@@ -2465,9 +2571,12 @@ def api_report_pl(db, q, body):
     start, end = month_start(months[0]).isoformat(), month_end(months[-1]).isoformat()
     idx = {m: i for i, m in enumerate(months)}
     accts = {a['id']: a for a in rows(db.execute("SELECT * FROM accounts WHERE type IN ('income','cos','expense') ORDER BY name COLLATE NOCASE"))}
+    proj, only = report_project(db, q)
+    if only is not None:
+        accts = {k: a for k, a in accts.items() if k in only}
     data = {}
     for aid, typ, date, amt in report_lines(db, to=end, frm=start):
-        if typ in PL_TYPES:
+        if typ in PL_TYPES and aid in accts:
             data.setdefault(aid, [0] * len(months))[idx[date[:7]]] += SIGN[typ] * amt
     n = len(months)
     cover = budget_cover(db, months)
@@ -2509,7 +2618,7 @@ def api_report_pl(db, q, body):
     np_ = [gp[i] - exp['totals'][i] for i in range(n)]
     out = {'months': months, 'from': start, 'to': end, 'sections': [inc, cos, exp],
            'gross_profit': gp, 'gross_profit_total': sum(gp), 'net_profit': np_, 'net_profit_total': sum(np_),
-           'business_name': get_setting(db, 'business_name'), 'budget_cover': cover}
+           'business_name': get_setting(db, 'business_name'), 'budget_cover': cover, 'project': proj}
     if bud is not None:
         bgp = [inc['budget_totals'][i] - cos['budget_totals'][i] for i in range(n)]
         bnp = [bgp[i] - exp['budget_totals'][i] for i in range(n)]
@@ -2548,14 +2657,19 @@ def api_report_bs(db, q, body):
         months = [add_months(last, -(count - 1 - i), 1).strftime('%Y-%m') for i in range(count)]
     dates = [month_end(m).isoformat() for m in months]
     accts = rows(db.execute("SELECT * FROM accounts WHERE type IN ('asset','liability','equity') ORDER BY name COLLATE NOCASE"))
+    # With a project, only its accounts show and earnings are the project's own profit. That view can't
+    # balance: the project's money moves through accounts outside it (usually the bank).
+    proj, only = report_project(db, q)
+    if only is not None:
+        accts = [a for a in accts if a['id'] in only]
     cols = [balances_as_at(db, d) for d in dates]
     n = len(dates)
     re_vals, cye_vals = [], []
     for d in dates:
         fs = fy_start(db, d)
-        prior = profit_between(db, None, (D(fs) - dt.timedelta(days=1)).isoformat())
+        prior = profit_between(db, None, (D(fs) - dt.timedelta(days=1)).isoformat(), only)
         re_vals.append(prior)
-        cye_vals.append(profit_between(db, fs, d))
+        cye_vals.append(profit_between(db, fs, d, only))
 
     def section(typ, title):
         rs = []
@@ -2563,12 +2677,17 @@ def api_report_bs(db, q, body):
             if a['type'] != typ:
                 continue
             vals = [SIGN[typ] * (c.get(a['id']) or 0) for c in cols]
-            if a['subtype'] == 're':
+            if a['subtype'] == 're' and not proj:
                 vals = [vals[i] + re_vals[i] for i in range(n)]
-            if any(vals) or a['subtype'] == 're':
+            if any(vals) or (a['subtype'] == 're' and not proj):
                 rs.append({'account_id': a['id'], 'code': a['code'], 'name': a['name'], 'values': vals,
                            'subtype': a['subtype'], 'group_id': a['group_id']})
-        if typ == 'equity':
+        if typ == 'equity' and proj:
+            if any(re_vals):
+                rs.append({'account_id': None, 'code': '', 'name': 'Project earnings, earlier years', 'values': re_vals,
+                           'computed': True, 'earlier': True})
+            rs.append({'account_id': None, 'code': '', 'name': 'Project earnings', 'values': cye_vals, 'computed': True})
+        elif typ == 'equity':
             partner = [-(c.get(PARTNER) or 0) for c in cols]
             if any(partner):
                 rs.append({'account_id': None, 'code': '', 'name': PARTNER_NAME, 'values': partner, 'partner': True})
@@ -2579,8 +2698,8 @@ def api_report_bs(db, q, body):
     assets, liabs, equity = section('asset', 'Assets'), section('liability', 'Liabilities'), section('equity', 'Equity')
     net = [assets['totals'][i] - liabs['totals'][i] for i in range(n)]
     return {'months': months, 'dates': dates, 'sections': [assets, liabs, equity], 'net_assets': net,
-            'balanced': all(net[i] == equity['totals'][i] for i in range(n)),
-            'business_name': get_setting(db, 'business_name')}
+            'balanced': None if proj else all(net[i] == equity['totals'][i] for i in range(n)),
+            'business_name': get_setting(db, 'business_name'), 'project': proj}
 
 
 @route('GET', '/api/reports/aged')

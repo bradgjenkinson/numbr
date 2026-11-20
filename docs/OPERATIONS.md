@@ -50,6 +50,12 @@ To rework a budget with the builder's methods (e.g. switch an account to a quart
 
 Near the end of each financial year, build next year's budget: each account starts the way you did it this year (marked "as last year"), so just adjust anything that's changed.
 
+## Projects
+
+To see how one part of your affairs is going (say an investment property), make a project for it: **Chart of Accounts → Projects → New project**, name it, and tick the accounts that belong to it (e.g. Rent Income, Property Expenses, the property and its loan). You can also tick projects when you open an account. An account can be in more than one project, e.g. Insurance if one policy covers two properties.
+
+On the **Profit & Loss** or **Balance Sheet**, choose the project in the **Project** box to see only its accounts; choose **All accounts** to go back. Budget vs actual works the same way. The project balance sheet shows the project's assets and loans plus "Project earnings" (its profit). It won't balance on its own, because the rent and bills go through your bank account, which usually isn't in the project. Projects never change any figures; deleting one leaves the accounts and transactions alone.
+
 ## Alerts
 
 **Alerts → New alert** tells numbr to keep an eye on a figure for you. Pick an example to start from, or fill in the three steps: a name, the account (or accounts, added together) to watch, and when it should go off, compared with a dollar amount or with other accounts (plus or minus an amount). For example: *Offset A plus Offset B goes below Home Loan minus $1,000*. The **Right now** box shows today's figures and whether the alert would go off as you type.

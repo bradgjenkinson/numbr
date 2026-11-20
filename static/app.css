@@ -124,6 +124,10 @@ td.gname::before { content: ''; position: absolute; left: var(--x); top: 50%; wi
   background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 td[style*="background-image"] { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 .gm-list { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 6px; }
+.pm-type { display: grid; gap: 6px; }
+.pm-type + .pm-type { margin-top: 8px; }
+.pm-type b { font-size: 12.5px; color: var(--ink-3); }
+.am-proj { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 td.muted, .muted { color: var(--ink-3); }
 .empty { padding: 30px; text-align: center; color: var(--ink-3); }
 .neg { color: var(--bad); }
