@@ -156,6 +156,17 @@ try:
     check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], 'BS balances after opening edit')
     ob = call('PUT', '/api/opening', {'balances': {k: v for k, v in orig.items() if k != A['1-1100']}})
     check(ob['balances'][str(A['1-1100'])] == 1000000 and ob['historical_balancing'] == 0, 'omitted locked account keeps its balance')
+    # an archived, unreconciled account left out of the form keeps its opening balance
+    call('PUT', '/api/opening', {'balances': {**orig, A['1-2000']: 350000, A['3-1000']: 1460000}})
+    # (archived directly: the API only archives zero-balance accounts, but the account's history may predate that)
+    db = sqlite3.connect(os.path.join(data, 'books.db'))
+    db.execute('UPDATE accounts SET archived=1 WHERE id=?', (A['1-2000'],)); db.commit(); db.close()
+    ob = call('PUT', '/api/opening', {'balances': {k: v for k, v in orig.items() if k != A['1-2000']} | {A['3-1000']: 1460000}})
+    check(ob['balances'][str(A['1-2000'])] == 350000 and ob['historical_balancing'] == 0, 'omitted archived account keeps its opening balance')
+    db = sqlite3.connect(os.path.join(data, 'books.db'))
+    db.execute('UPDATE accounts SET archived=0 WHERE id=?', (A['1-2000'],)); db.commit(); db.close()
+    ob = call('PUT', '/api/opening', {'balances': {k: v for k, v in orig.items() if k != A['1-1100']}})
+    check(ob['historical_balancing'] == 0, 'opening balances restored after archived check')
     call('POST', '/api/reconcile/undo', {'account_id': A['1-1100']})
     call('POST', '/api/reconcile', {'account_id': A['1-1100'], 'statement_date': '2026-07-31', 'statement_balance': expected,
                                     'line_ids': [l['id'] for l in july]})
