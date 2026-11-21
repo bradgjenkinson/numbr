@@ -58,11 +58,18 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 
 - **Alerts:** `alerts` + `alert_terms` (`watch`/`compare` sides, sign ±1). Read-only: never in journals or ledger maths. Current values only (`alert_values()`): balance sheet accounts as at today, P&L accounts for this financial year so far, nothing dated after today, and full ledger amounts (deliberately not `report_lines()`, so shared bank accounts match the bank). `evaluate_alerts()` saves `triggered_since`/`dismissed` as conditions change; "Got it" only marks an alert seen: it keeps counting in the menu and on the Dashboard while the condition is true (on purpose, so it can't be forgotten) and re-arms when the condition goes false. The nav count is `updateAlertCount()`, run after every route.
 
+- **Dashboard:** this is presentation only and stores nothing except which visuals to show.
+  - **Layout:** `settings.dashboard_layout` holds a JSON list of `{id, type, opts}`. `clean_layout()` checks it and `PUT /api/dashboard/layout` saves it.
+  - **Data:** `GET /api/dashboard` computes every visual's figures through `DashBooks`, which reads `report_lines()` up to today plus `budget_amounts`.
+  - **Account references:** a visual can point at an account or a group; a group counts all its subgroups' accounts too (`group_account_ids()`).
+  - **Charts:** they are plain SVG drawn in `app.js`, with one `DASH_DRAW` function per type and tiles drawn by `drawTile`. Lines are straight on purpose, because curves overshoot the real figures.
+  - **Alerts:** alerts going off still show at the top of the dashboard.
+
 ### Invariants the code enforces (keep them)
 
 1. Journals balance (`check_lines`).
 2. **Lock date:** nothing dated on or before `settings.lock_date` can be created, edited or deleted (`check_lock`). It defaults to the day before the start date.
-3. **Reconciled lines are immutable.** A journal with any line where `recon_id` is set can't be edited or deleted. The user must undo the reconciliation (only the latest one can be undone).
+3. **Reconciled lines are immutable.** A journal with any line where `recon_id` is set can't be deleted, and its date and reconciled lines (account and amount) can't change; the user must undo the reconciliation (only the latest one can be undone). Its other lines can still be recategorised or split: `PUT /api/journals/:id` runs `keep_reconciled_lines()`, which checks this and carries each `recon_id` onto the matching new line (`get_txn` sets `recategorise` for the form). Lock date still applies.
 4. **Paid invoices are immutable.** Delete the payment(s) first, then edit or void.
 5. **Opening items:** invoices and bills dated before `settings.conversion_date` are `historical=1`. They post **no journal**, because the opening AR/AP balance already includes them, but they appear in aged reports and accept payments (payments always post).
 6. Opening balances are one `source='opening'` journal dated the day before the start date. Any imbalance goes to Historical Balancing. Opening bank lines are pre-reconciled via `reconciliations.note='opening'`. An account's opening balance locks once that account has a real reconciliation (`opening_locked_accounts()`); other accounts stay editable.
@@ -86,6 +93,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
   - `ROUTES` hash router → one async function per screen (`dashboard`, `invoiceForm`, `reconcilePage`, `reportPL`, …)
   - global `S` holds settings, accounts and contacts (refresh with `refreshState()`)
   - budgets: `budgetList`, `budgetBuilder` (3 steps, state in `BB`; `#/budgets/:id/rebuild` reopens a built budget at step 2 with `BB.rebuild` set, `ownAmountsModal` for schedules/typed months; amounts can repeat monthly, weekly, fortnightly, quarterly or annually (same month each year); a "Total for the year" can be spread evenly by month, by quarter between months, or by weekday, fortnight or day between dates, see `schedule_amounts()`), `budgetView` (editable grid; `budgetTable` lays budget figures out like the P&L)
+  - dashboard: `dashboard` (fetch), `drawDashboard` (tiles strip + card grid, Customise mode), `dashSettings` (per-visual options modal), `refOptions` (account-or-group chooser, values `a:ID`/`g:ID`)
   - alerts: `alertsList`, `alertForm` (state `st`, live sentence `alertSentence`, debounced `POST /api/alerts/preview`), `updateAlertCount`, `dismissAlert`; triggered alerts also show at the top of `dashboard`
   - CSV statement parsing and matching are client-side (`parseCSV`, `csvMapping`, `drawCsv` inside `reconcilePage`)
 - `docs/ARCHITECTURE.md`: schema, API reference, design decisions

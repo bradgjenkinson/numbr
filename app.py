@@ -600,10 +600,11 @@ def check_lines(db, lines, allow_archived=False):
 
 def insert_lines(db, jid, lines, contact_id):
     for l in lines:
-        db.execute('INSERT INTO journal_lines(journal_id, account_id, amount, description, contact_id, role, bank_text, bank_date) '
-                   'VALUES (?,?,?,?,?,?,?,?)',
+        db.execute('INSERT INTO journal_lines(journal_id, account_id, amount, description, contact_id, role, bank_text, bank_date, recon_id) '
+                   'VALUES (?,?,?,?,?,?,?,?,?)',
                    (jid, l['account_id'], l['amount'], l.get('description') or None,
-                    l.get('contact_id', contact_id), l.get('role'), l.get('bank_text') or None, l.get('bank_date') or None))
+                    l.get('contact_id', contact_id), l.get('role'), l.get('bank_text') or None, l.get('bank_date') or None,
+                    l.get('recon_id')))
 
 
 def post_journal(db, date, source, lines, memo=None, reference=None, contact_id=None,
@@ -619,14 +620,36 @@ def post_journal(db, date, source, lines, memo=None, reference=None, contact_id=
     return jid
 
 
-def assert_journal_editable(db, jid):
+def assert_journal_editable(db, jid, allow_reconciled=False):
     j = one(db.execute('SELECT * FROM journals WHERE id=?', (jid,)))
     if not j:
         raise ApiError('Transaction not found', 404)
-    if db.execute('SELECT 1 FROM journal_lines WHERE journal_id=? AND recon_id IS NOT NULL', (jid,)).fetchone():
+    if not allow_reconciled and db.execute('SELECT 1 FROM journal_lines WHERE journal_id=? AND recon_id IS NOT NULL',
+                                           (jid,)).fetchone():
         raise ApiError('This transaction has been reconciled. Undo that reconciliation first if you need to change it.')
     check_lock(db, j['date'])
     return j
+
+
+def keep_reconciled_lines(db, j, date, lines):
+    """A reconciled journal can still be recategorised, but what the bank saw can't change: the date, and every
+    reconciled line's account and amount, must stay as they were. Carries each recon_id onto its matching new line."""
+    recon = rows(db.execute('SELECT l.account_id, l.amount, l.recon_id, a.name FROM journal_lines l '
+                            'JOIN accounts a ON a.id=l.account_id WHERE l.journal_id=? AND l.recon_id IS NOT NULL '
+                            'ORDER BY l.id', (j['id'],)))
+    if not recon:
+        return
+    if date != j['date']:
+        raise ApiError(f'This transaction is reconciled, so its date has to stay {"/".join(reversed(j["date"].split("-")))}. '
+                       'You can still change its categories, or undo the reconciliation to change the date.')
+    for r in recon:
+        m = next((l for l in lines if not l.get('recon_id') and l['account_id'] == r['account_id']
+                  and l['amount'] == r['amount']), None)
+        if not m:
+            raise ApiError(f'This transaction is reconciled in {r["name"]}, so that account and the amount '
+                           f'({money(abs(r["amount"]))}) have to stay the same. You can still change its categories, '
+                           'or undo the reconciliation to change the amount.')
+        m['recon_id'] = r['recon_id']
 
 
 def delete_journal(db, jid):
@@ -1703,6 +1726,8 @@ def get_txn(db, jid):
     j['reconciled'] = any(l['recon_id'] for l in lines)
     j['locked'] = bool(get_setting(db, 'lock_date') and j['date'] <= get_setting(db, 'lock_date'))
     j['editable'] = j['source'] in EDITABLE_SOURCES and not j['reconciled'] and not j['locked']
+    # Reconciled: the bank side (date, bank accounts, amounts) is fixed, but the categories can still change.
+    j['recategorise'] = j['source'] in EDITABLE_SOURCES and j['reconciled'] and not j['locked']
     if j['source'] in ('spend', 'receive'):
         s = 1 if j['source'] == 'spend' else -1
         bank = next((l for l in lines if l['role'] == 'bank'), None)
@@ -1757,12 +1782,13 @@ def api_txn_create(db, q, body, source):
 
 @route('PUT', '/api/journals/:jid')
 def api_journal_update(db, q, body, jid):
-    j = assert_journal_editable(db, as_int(jid))
+    j = assert_journal_editable(db, as_int(jid), allow_reconciled=True)
     if j['source'] not in EDITABLE_SOURCES:
         raise ApiError('Edit this from its invoice, bill or payment instead')
     p = build_txn(db, j['source'], body)
     check_lock(db, p['date'])
     lines = check_lines(db, p['lines'])
+    keep_reconciled_lines(db, j, p['date'], lines)
     # Keep the statement text an imported line came with, so re-importing the statement still sees it as a duplicate.
     # Matched by bank account, so both sides of a transfer keep their own text.
     btext = {r[0]: (r[1], r[2]) for r in db.execute("SELECT account_id, bank_text, bank_date FROM journal_lines "
@@ -3602,58 +3628,482 @@ def api_alert_dismiss(db, q, body, aid):
     return get_alert(db, a['id'])
 
 
+# ----------------------------------------------------------------------------
+# Dashboard
+# ----------------------------------------------------------------------------
+# The dashboard is presentation only: its visuals are computed from report_lines() (so shared accounts and
+# shared invoices count at the user's share) and budget_amounts on every request, and never post anything.
+# The user's choice of visuals is a JSON list in settings.dashboard_layout: [{id, type, opts}].
+
+DASH_TYPES = ('tile', 'profit_forecast', 'next_days', 'in_out', 'dollar', 'profit_budget', 'budget_used', 'yoy',
+              'calendar', 'net_worth', 'goals', 'two_years')
+DASH_MAX = 40
+DASH_ID = re.compile(r'^[A-Za-z0-9_-]{1,40}$')
+
+
+def group_account_ids(db, gid):
+    """Ids of the accounts in a group and in all of its subgroups."""
+    seen, todo = set(), [gid]
+    while todo:
+        g = todo.pop()
+        if g in seen:
+            continue
+        seen.add(g)
+        todo += [r[0] for r in db.execute('SELECT id FROM account_groups WHERE parent_id=?', (g,))]
+    marks = ','.join('?' * len(seen))
+    return {r[0] for r in db.execute(f'SELECT id FROM accounts WHERE group_id IN ({marks})', list(seen))}
+
+
+def dash_ref(db, ref):
+    """{'name', 'type', 'ids', 'bank'} for {'account_id': n} or {'group_id': n}, or None if it no longer exists."""
+    if not isinstance(ref, dict):
+        return None
+    if ref.get('group_id') is not None:
+        g = one(db.execute('SELECT * FROM account_groups WHERE id=?', (ref['group_id'],)))
+        if not g:
+            return None
+        return {'name': g['name'], 'type': g['type'], 'ids': group_account_ids(db, g['id']), 'bank': None}
+    a = one(db.execute('SELECT * FROM accounts WHERE id=?', (ref.get('account_id'),)))
+    if not a:
+        return None
+    return {'name': a['name'], 'type': a['type'], 'ids': {a['id']}, 'bank': a['id'] if a['subtype'] == 'bank' else None}
+
+
+def clean_ref(db, ref, label):
+    try:
+        ref = {'group_id': int(ref['group_id'])} if ref.get('group_id') is not None else {'account_id': int(ref['account_id'])}
+    except Exception:
+        raise ApiError(f'{label}: choose an account or group')
+    if not dash_ref(db, ref):
+        raise ApiError(f'{label}: that account or group no longer exists. Choose another one.')
+    return ref
+
+
+def pick(opts, key, allowed, label):
+    v = opts.get(key, allowed[0])
+    if v not in allowed:
+        raise ApiError(f'{label} is not one of the choices')
+    return v
+
+
+def clean_layout(db, layout):
+    if not isinstance(layout, list):
+        raise ApiError('The dashboard layout must be a list of visuals')
+    if len(layout) > DASH_MAX:
+        raise ApiError(f'The dashboard can hold up to {DASH_MAX} visuals. Remove some before adding more.')
+    out, ids = [], set()
+    for w in layout:
+        if not isinstance(w, dict) or w.get('type') not in DASH_TYPES:
+            raise ApiError("One of the visuals isn't a kind numbr knows. Remove it and add it again.")
+        wid = text(w.get('id'))
+        if not DASH_ID.match(wid) or wid in ids:
+            raise ApiError('Each visual needs its own id')
+        ids.add(wid)
+        o, typ, c = w.get('opts') or {}, w['type'], {}
+        if not isinstance(o, dict):
+            raise ApiError('Visual settings are not valid')
+        if typ == 'tile':
+            c['ref'] = clean_ref(db, o.get('ref') or {}, 'Account tile')
+            c['period'] = pick(o, 'period', ('fy', 'month'), 'Tile period')
+        elif typ == 'two_years':
+            c['ref'] = clean_ref(db, o.get('ref') or {}, 'Same account, two years')
+        elif typ == 'next_days':
+            c['days'] = pick(o, 'days', (30, 14, 60), 'Number of days')
+        elif typ == 'dollar':
+            c['by'] = pick(o, 'by', ('account', 'group'), 'Show spending by')
+        elif typ == 'budget_used':
+            c['mode'] = pick(o, 'mode', ('to_date', 'full_year'), 'Budget comparison')
+        elif typ == 'yoy':
+            c['mode'] = pick(o, 'mode', ('year', 'month'), 'Comparison')
+            c['side'] = pick(o, 'side', ('spending', 'income'), 'Income or spending')
+        elif typ == 'calendar':
+            src = o.get('source', 'overall')
+            if src != 'overall':
+                src = as_int(src, 'Bank account')
+                if not scalar(db, "SELECT id FROM accounts WHERE id=? AND subtype='bank'", (src,)):
+                    raise ApiError('Spending calendar: choose a bank account or credit card')
+            c['source'] = src
+        elif typ == 'goals':
+            goals = o.get('goals') or []
+            if not isinstance(goals, list) or len(goals) > 12:
+                raise ApiError('Savings goals: add up to 12 goals')
+            c['goals'] = []
+            for g in goals:
+                if not isinstance(g, dict):
+                    raise ApiError('Savings goals: a goal is not valid')
+                name = text(g.get('name'))
+                if not name:
+                    raise ApiError('Savings goals: give each goal a name')
+                target = as_cents(g.get('target'), f'Target for {name}')
+                if target <= 0:
+                    raise ApiError(f'Savings goals: the target for {name} must be more than zero')
+                d = as_date(g['date'], f'Date for {name}') if text(g.get('date')) else None
+                c['goals'].append({'name': name, 'ref': clean_ref(db, g.get('ref') or {}, f'Goal {name}'),
+                                   'target': target, 'date': d})
+        out.append({'id': wid, 'type': typ, 'opts': c})
+    return out
+
+
+def default_layout(db):
+    tiles = [{'id': f'tile{r[0]}', 'type': 'tile', 'opts': {'ref': {'account_id': r[0]}, 'period': 'fy'}}
+             for r in db.execute("SELECT id FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY type, name COLLATE NOCASE")]
+    rest = [('profit_forecast', {}), ('in_out', {}), ('profit_budget', {}), ('budget_used', {'mode': 'to_date'}),
+            ('dollar', {'by': 'account'}), ('yoy', {'mode': 'year', 'side': 'spending'}), ('next_days', {'days': 30}),
+            ('calendar', {'source': 'overall'}), ('net_worth', {})]
+    return tiles + [{'id': typ, 'type': typ, 'opts': o} for typ, o in rest]
+
+
+def dash_layout(db):
+    raw = get_setting(db, 'dashboard_layout')
+    if not raw:
+        return default_layout(db)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return default_layout(db)
+
+
+def same_day(d, years=0, months=0):
+    """d moved back by whole years/months, clamped to the end of a shorter month (29 Feb -> 28 Feb)."""
+    y, m = d.year - years, d.month - months
+    while m < 1:
+        m, y = m + 12, y - 1
+    return dt.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+class DashBooks:
+    """One pass over report_lines() up to today, kept by account and day, for every dashboard visual."""
+
+    def __init__(self, db):
+        self.db = db
+        self.t = today()
+        self.cur = self.t[:7]
+        self.fy = fy_start(db, self.t)[:7]
+        self.fy_months = [ym_add(self.fy, i) for i in range(12)]
+        self.first = ym_add(self.fy, -12)          # start of last financial year
+        self.months = months_between(self.first, self.cur)
+        self.types = {r[0]: r[1] for r in db.execute('SELECT id, type FROM accounts')}
+        self.before, self.daily = {}, {}
+        start = month_start(self.first).isoformat()
+        for aid, typ, date, amt in report_lines(db, to=self.t):
+            if date < start:
+                self.before[aid] = self.before.get(aid, 0) + amt
+            else:
+                dd = self.daily.setdefault(aid, {})
+                dd[date] = dd.get(date, 0) + amt
+        self.monthly = {}
+        for aid, dd in self.daily.items():
+            mm = self.monthly.setdefault(aid, {})
+            for d, v in dd.items():
+                mm[d[:7]] = mm.get(d[:7], 0) + v
+        self.budget = {}
+        for aid, m, amt in db.execute('SELECT account_id, month, amount FROM budget_amounts'):
+            self.budget.setdefault(m, {})[aid] = self.budget.get(m, {}).get(aid, 0) + amt
+        self.budget_fys = {r[0] for r in db.execute('SELECT fy_start FROM budgets')}
+
+    def ids_of(self, *types):
+        return {a for a, t in self.types.items() if t in types}
+
+    def balance(self, ids, ym):
+        """Natural balance of balance sheet accounts at the end of ym (today for the current month)."""
+        tot = 0
+        for a in ids:
+            raw = self.before.get(a, 0) + sum(v for m, v in self.monthly.get(a, {}).items() if m <= ym)
+            tot += SIGN[self.types[a]] * raw
+        return tot
+
+    def between(self, ids, frm, to):
+        """Natural total of accounts for frm <= date <= to (ISO dates)."""
+        tot = 0
+        for a in ids:
+            tot += SIGN[self.types[a]] * sum(v for d, v in self.daily.get(a, {}).items() if frm <= d <= to)
+        return tot
+
+    def month(self, ids, ym):
+        return sum(SIGN[self.types[a]] * self.monthly.get(a, {}).get(ym, 0) for a in ids)
+
+    def profit(self, ym):
+        return -sum(self.monthly.get(a, {}).get(ym, 0) for a in self.ids_of(*PL_TYPES))
+
+    def profit_between(self, frm, to):
+        return -sum(v for a in self.ids_of(*PL_TYPES) for d, v in self.daily.get(a, {}).items() if frm <= d <= to)
+
+    def has_budget(self, months):
+        return all(any(m in budget_months(fy) for fy in self.budget_fys) for m in months)
+
+    def budget_profit(self, ym):
+        b = self.budget.get(ym, {})
+        return sum(-SIGN[self.types[a]] * v for a, v in b.items() if a in self.types)
+
+    def budget_to_date_part(self, amount_for_month):
+        """The current month's budget counted up to today (days so far / days in the month), in whole cents."""
+        d = D(self.t)
+        return round_div(amount_for_month * d.day, calendar.monthrange(d.year, d.month)[1])
+
+    def last12(self):
+        return [ym_add(self.cur, i - 11) for i in range(12)]
+
+
+def dash_tile(b, ref):
+    r = dash_ref(b.db, ref['ref'])
+    if not r:
+        return {'missing': True}
+    out = {'name': r['name'], 'type': r['type'], 'kind': 'bs' if r['type'] not in PL_TYPES else 'pl',
+           'href': f"#/register/{r['bank']}" if r['bank'] else None}
+    months = b.last12()
+    if out['kind'] == 'bs':
+        out['spark'] = [b.balance(r['ids'], m) for m in months]
+        out['value'] = out['spark'][-1]
+        out['compare'] = out['spark'][-2]
+        out['compare_label'] = 'since the end of last month'
+    else:
+        out['spark'] = [b.month(r['ids'], m) for m in months]
+        if ref['period'] == 'month':
+            out['value'] = out['spark'][-1]
+            out['period_label'] = 'This month so far'
+            out['compare'] = out['spark'][-2]
+            out['compare_label'] = 'Last month'
+        else:
+            out['value'] = b.between(r['ids'], month_start(b.fy).isoformat(), b.t)
+            out['period_label'] = f'This financial year ({fy_label(b.fy)})'
+            out['compare'] = out['spark'][-1]
+            out['compare_label'] = 'This month'
+    out['months'] = months
+    return out
+
+
+def dash_profit_forecast(b):
+    cur_i = b.fy_months.index(b.cur)
+    actual, run = [], 0
+    for m in b.fy_months[:cur_i + 1]:
+        run += b.profit(m)
+        actual.append(run)
+    later = b.fy_months[cur_i + 1:]
+    has = b.has_budget(later) if later else True
+    forecast = []
+    if has:
+        for m in later:
+            run += b.budget_profit(m)
+            forecast.append(run)
+    return {'months': b.fy_months, 'actual': actual, 'forecast': forecast if has else None, 'has_budget': has,
+            'fy_label': fy_label(b.fy)}
+
+
+def dash_profit_budget(b):
+    cur_i = b.fy_months.index(b.cur)
+    has = b.has_budget(b.fy_months)
+    actual, run = [], 0
+    for m in b.fy_months[:cur_i + 1]:
+        run += b.profit(m)
+        actual.append(run)
+    budget, brun = [], 0
+    for m in b.fy_months:
+        brun += b.budget_profit(m)
+        budget.append(brun)
+    to_date = (budget[cur_i - 1] if cur_i else 0) + b.budget_to_date_part(b.budget_profit(b.cur))
+    return {'months': b.fy_months, 'actual': actual, 'budget': budget if has else None, 'has_budget': has,
+            'budget_to_date': to_date if has else None, 'fy_label': fy_label(b.fy)}
+
+
+def dash_budget_used(b, o):
+    has = b.has_budget(b.fy_months)
+    if not has:
+        return {'has_budget': False, 'fy_label': fy_label(b.fy)}
+    cur_i = b.fy_months.index(b.cur)
+    spend = b.ids_of('cos', 'expense')
+    names = {r[0]: r[1] for r in b.db.execute('SELECT id, name FROM accounts')}
+    rows_ = []
+    for a in spend:
+        months = [b.budget.get(m, {}).get(a, 0) for m in b.fy_months]
+        if not any(months):
+            continue
+        if o['mode'] == 'full_year':
+            bud = sum(months)
+        else:
+            bud = sum(months[:cur_i]) + b.budget_to_date_part(months[cur_i])
+        rows_.append({'account_id': a, 'name': names[a], 'budget': bud,
+                      'actual': b.between({a}, month_start(b.fy).isoformat(), b.t)})
+    rows_.sort(key=lambda r: (-r['budget'], r['name'].lower()))
+    return {'has_budget': True, 'mode': o['mode'], 'rows': rows_[:8], 'more': max(0, len(rows_) - 8),
+            'fy_label': fy_label(b.fy)}
+
+
+def top_group(db, gid, parents):
+    while parents.get(gid) is not None:
+        gid = parents[gid]
+    return gid
+
+
+def dash_dollar(b, o):
+    frm = month_start(b.fy).isoformat()
+    income = b.between(b.ids_of('income'), frm, b.t)
+    accts = {r['id']: r for r in rows(b.db.execute("SELECT id, name, group_id FROM accounts WHERE type IN ('cos','expense')"))}
+    groups = {r['id']: r for r in rows(b.db.execute('SELECT id, name, parent_id FROM account_groups'))}
+    parents = {g: r['parent_id'] for g, r in groups.items()}
+    parts = {}
+    for a, r in accts.items():
+        v = b.between({a}, frm, b.t)
+        if not v:
+            continue
+        if o['by'] == 'group' and r['group_id'] is not None:
+            key = groups[top_group(b.db, r['group_id'], parents)]['name']
+        else:
+            key = r['name']
+        parts[key] = parts.get(key, 0) + v
+    spent = sum(parts.values())
+    ordered = sorted(parts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    top = [{'name': k, 'amount': v} for k, v in ordered[:5]]
+    other = sum(v for _, v in ordered[5:])
+    if other:
+        top.append({'name': 'Everything else', 'amount': other})
+    return {'income': income, 'spent': spent, 'kept': income - spent, 'parts': top, 'by': o['by'],
+            'fy_label': fy_label(b.fy)}
+
+
+def dash_in_out(b):
+    months = b.last12()
+    inc = [b.month(b.ids_of('income'), m) for m in months]
+    out = [b.month(b.ids_of('cos', 'expense'), m) for m in months]
+    return {'months': months, 'income': inc, 'spending': out, 'profit': [i - o for i, o in zip(inc, out)]}
+
+
+def dash_yoy(b, o):
+    t = D(b.t)
+    if o['mode'] == 'year':
+        frm = month_start(b.fy)
+        pf, pt = same_day(frm, years=1), same_day(t, years=1)
+        labels = ['This financial year so far', 'Same dates last year']
+    else:
+        frm = t.replace(day=1)
+        pf, pt = same_day(frm, months=1), same_day(t, months=1)
+        labels = ['This month so far', 'Same days last month']
+    ids = b.ids_of('income') if o['side'] == 'income' else b.ids_of('cos', 'expense')
+    names = {r[0]: r[1] for r in b.db.execute('SELECT id, name FROM accounts')}
+    rows_ = []
+    for a in ids:
+        now_v, then_v = b.between({a}, frm.isoformat(), b.t), b.between({a}, pf.isoformat(), pt.isoformat())
+        if now_v or then_v:
+            rows_.append({'account_id': a, 'name': names[a], 'now': now_v, 'then': then_v})
+    rows_.sort(key=lambda r: (-max(abs(r['now']), abs(r['then'])), r['name'].lower()))
+    return {'mode': o['mode'], 'side': o['side'], 'labels': labels, 'rows': rows_[:8],
+            'now_range': [frm.isoformat(), b.t], 'then_range': [pf.isoformat(), pt.isoformat()],
+            'now_total': sum(r['now'] for r in rows_), 'then_total': sum(r['then'] for r in rows_)}
+
+
+def dash_calendar(b, o):
+    t = D(b.t)
+    start = t - dt.timedelta(days=364)
+    start -= dt.timedelta(days=start.weekday())    # start on a Monday
+    days = {}
+    if o['source'] == 'overall':
+        name = 'All spending'
+        for a in b.ids_of('cos', 'expense'):
+            for d, v in b.daily.get(a, {}).items():
+                if d >= start.isoformat():
+                    days[d] = days.get(d, 0) + v
+    else:
+        a = one(b.db.execute('SELECT * FROM accounts WHERE id=?', (o['source'],)))
+        if not a:
+            return {'missing': True}
+        name = a['name']
+        # Money out of this account, leaving out transfers between the user's own accounts. Shared accounts
+        # count at the user's share, like the reports.
+        for d, amt in b.db.execute("SELECT j.date, l.amount FROM journal_lines l JOIN journals j ON j.id=l.journal_id "
+                                   "WHERE l.account_id=? AND l.amount<0 AND j.source<>'transfer' AND j.date>=? AND j.date<=?",
+                                   (a['id'], start.isoformat(), b.t)):
+            days[d] = days.get(d, 0) - cut(amt, a['share_bp'])
+    return {'name': name, 'start': start.isoformat(), 'end': b.t,
+            'days': {d: v for d, v in days.items() if v > 0}}
+
+
+def dash_net_worth(b):
+    months = b.last12()
+    assets, liabs = b.ids_of('asset'), b.ids_of('liability')
+    a = [b.balance(assets, m) for m in months]
+    l_ = [b.balance(liabs, m) for m in months]
+    return {'months': months, 'assets': a, 'liabilities': l_, 'net': [x - y for x, y in zip(a, l_)]}
+
+
+def dash_next_days(b, o):
+    t = D(b.t)
+    end = (t + dt.timedelta(days=o['days'])).isoformat()
+    items = []
+    for r in rows(b.db.execute('SELECT * FROM recurring WHERE active=1 ORDER BY next_date, name COLLATE NOCASE')):
+        total = sum(l['amount'] for l in json.loads(r['lines']))
+        if r['kind'] in ('sale', 'bill'):
+            total = cut(total, r['share_bp'])
+        d, n = r['next_date'], 0
+        while d <= end and (not r['end_date'] or d <= r['end_date']) and n < 100:
+            items.append({'recurring_id': r['id'], 'name': r['name'], 'date': max(d, b.t), 'amount': total,
+                          'dir': 'in' if r['kind'] in ('sale', 'receive') else 'out'})
+            d, n = advance(d, r['frequency'], r['anchor_day']), n + 1
+    items.sort(key=lambda i: (i['date'], i['name'].lower()))
+    return {'days': o['days'], 'start': b.t, 'end': end, 'items': items,
+            'in': sum(i['amount'] for i in items if i['dir'] == 'in'),
+            'out': sum(i['amount'] for i in items if i['dir'] == 'out')}
+
+
+def ref_value(b, r):
+    """A goal's progress: balance today for balance sheet accounts, this financial year so far for income/expenses."""
+    if r['type'] in PL_TYPES:
+        return b.between(r['ids'], month_start(b.fy).isoformat(), b.t)
+    return b.balance(r['ids'], b.cur)
+
+
+def dash_goals(b, o):
+    out = []
+    for g in o.get('goals', []):
+        r = dash_ref(b.db, g['ref'])
+        out.append({'name': g['name'], 'target': g['target'], 'date': g['date'],
+                    'value': ref_value(b, r) if r else None, 'account': r['name'] if r else None})
+    return {'goals': out}
+
+
+def dash_two_years(b, o):
+    r = dash_ref(b.db, o['ref'])
+    if not r:
+        return {'missing': True}
+    cur_i = b.fy_months.index(b.cur)
+    last = [ym_add(m, -12) for m in b.fy_months]
+    pl = r['type'] in PL_TYPES
+    val = (lambda m: b.month(r['ids'], m)) if pl else (lambda m: b.balance(r['ids'], m))
+    return {'name': r['name'], 'kind': 'pl' if pl else 'bs', 'months': b.fy_months,
+            'this': [val(m) for m in b.fy_months[:cur_i + 1]], 'last': [val(m) for m in last],
+            'this_label': fy_label(b.fy), 'last_label': fy_label(ym_add(b.fy, -12))}
+
+
+DASH_BUILD = {
+    'tile': dash_tile, 'profit_forecast': lambda b, o: dash_profit_forecast(b), 'next_days': dash_next_days,
+    'in_out': lambda b, o: dash_in_out(b), 'dollar': dash_dollar, 'profit_budget': lambda b, o: dash_profit_budget(b),
+    'budget_used': dash_budget_used, 'yoy': dash_yoy, 'calendar': dash_calendar,
+    'net_worth': lambda b, o: dash_net_worth(b), 'goals': dash_goals, 'two_years': dash_two_years,
+}
+
+
+def dashboard_data(db):
+    layout = dash_layout(db)
+    b = DashBooks(db)
+    widgets = {}
+    for w in layout:
+        try:
+            widgets[w['id']] = DASH_BUILD[w['type']](b, w.get('opts') or {})
+        except (KeyError, TypeError):
+            widgets[w['id']] = {'missing': True}
+    return {'layout': layout, 'widgets': widgets, 'today': b.t,
+            'alerts': [a for a in evaluate_alerts(db) if a['status'] in ('triggered', 'seen')]}
+
+
 @route('GET', '/api/dashboard')
 def api_dashboard(db, q, body):
-    t = today()
-    banks = []
-    for a in rows(db.execute("SELECT * FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY name COLLATE NOCASE")):
-        s = SIGN[a['type']]
-        bal = s * scalar(db, 'SELECT COALESCE(SUM(amount),0) FROM journal_lines WHERE account_id=?', (a['id'],))
-        last = one(db.execute('SELECT * FROM reconciliations WHERE account_id=? ORDER BY statement_date DESC, id DESC LIMIT 1',
-                              (a['id'],)))
-        unc = scalar(db, 'SELECT COUNT(*) FROM journal_lines WHERE account_id=? AND recon_id IS NULL', (a['id'],))
-        banks.append({'id': a['id'], 'name': a['name'], 'type': a['type'], 'balance': bal,
-                      'share_bp': a['share_bp'], 'my_balance': cut(bal, a['share_bp']),
-                      'last_reconciled': last['statement_date'] if last else None,
-                      'last_reconciled_balance': last['statement_balance'] if last else None, 'uncleared': unc})
+    return dashboard_data(db)
 
-    def ar_ap(kind, partner=0):
-        tot = over = cnt = 0
-        for r in db.execute("SELECT i.total - COALESCE((SELECT SUM(amount) FROM allocations a WHERE a.invoice_id=i.id),0), "
-                            "i.due_date FROM invoices i WHERE i.kind=? AND i.partner=? AND i.status='open'", (kind, partner)):
-            if r[0] > 0:
-                tot += r[0]
-                cnt += 1
-                if r[1] < t:
-                    over += r[0]
-        return {'total': tot, 'overdue': over, 'count': cnt}
 
-    this_m = t[:7]
-    last_m = add_months(month_start(this_m), -1, 1).strftime('%Y-%m')
-
-    def month_pl(ym):
-        inc = exp = 0
-        for _, typ, _, amt in report_lines(db, to=month_end(ym).isoformat(), frm=month_start(ym).isoformat()):
-            if typ == 'income':
-                inc -= amt
-            elif typ in ('cos', 'expense'):
-                exp += amt
-        return {'month': ym, 'income': inc, 'expenses': exp, 'profit': inc - exp}
-
-    recent = []
-    for r in rows(db.execute("SELECT * FROM audit_log WHERE action IN ('recurring_generated','recurring_skipped') "
-                             "ORDER BY id DESC LIMIT 8")):
-        d = json.loads(r['detail'] or '{}')
-        recent.append(d)
-    upcoming = rows(db.execute("SELECT r.id, r.name, r.kind, r.next_date, r.lines, c.name AS contact_name FROM recurring r "
-                               "LEFT JOIN contacts c ON c.id=r.contact_id WHERE r.active=1 AND r.next_date<=? "
-                               "ORDER BY r.next_date LIMIT 8", ((D(t) + dt.timedelta(days=30)).isoformat(),)))
-    for u in upcoming:
-        u['total'] = sum(l['amount'] for l in json.loads(u.pop('lines')))
-    return {'banks': banks, 'receivable': ar_ap('sale'), 'payable': ar_ap('bill'), 'contributions': ar_ap('sale', 1),
-            'this_month': month_pl(this_m), 'last_month': month_pl(last_m),
-            'recent_recurring': recent, 'upcoming_recurring': upcoming,
-            'alerts': [a for a in evaluate_alerts(db) if a['status'] in ('triggered', 'seen')]}
+@route('PUT', '/api/dashboard/layout')
+def api_dashboard_layout(db, q, body):
+    layout = clean_layout(db, body.get('layout'))
+    set_setting(db, 'dashboard_layout', json.dumps(layout))
+    audit(db, 'dashboard_layout', detail={'visuals': [w['type'] for w in layout]})
+    return dashboard_data(db)
 
 
 @route('GET', '/api/audit')

@@ -63,7 +63,7 @@ try:
         page.click('#f-save'); page.wait_for_selector('#s-finish')
         assert 'Matches' in page.inner_text('main'), 'AR check'
         shot(page, '03-unpaid')
-        page.click('#s-finish'); page.wait_for_selector('.stat')
+        page.click('#s-finish'); page.wait_for_selector('.dtile')
         shot(page, '04-dashboard')
 
         # new invoice
@@ -596,6 +596,21 @@ try:
         assert page.locator('.al-dash .al-gotit').count() == 0 and 'Seen' in page.inner_text('.al-dash')
         assert page.inner_text('#alert-count') == '1', 'a seen alert still counts'
         page.goto(URL + '#/alerts'); page.wait_for_selector('text=Seen')
+
+        # dashboard: add a visual for an account, change a choice on a card, then remove it again
+        page.goto(URL + '#/dashboard'); page.wait_for_selector('.dcard')
+        n0 = page.locator('.dcard').count()
+        page.click('#dash-edit'); page.wait_for_selector('.dadd')
+        page.click('.dadd button[data-add=two_years]'); page.wait_for_selector('#ds-ref')
+        page.evaluate("document.querySelector('#ds-ref').value = 'a:' + S.accounts.find(a => a.subtype == 'bank').id")
+        page.click('#modal [data-x=yes]'); page.wait_for_selector('.dcard[data-id^="two_years-"] svg')
+        assert page.locator('.dcard').count() == n0 + 1
+        page.click('.dcard[data-id=budget_used] .dseg button[data-v=full_year]')
+        page.wait_for_selector('.dcard[data-id=budget_used] .dseg button.on[data-v=full_year]')
+        shot(page, '25-dashboard-edit')
+        page.click('.dcard[data-id^="two_years-"] [data-act=remove]'); page.wait_for_timeout(400)
+        assert page.locator('.dcard').count() == n0
+        page.click('#dash-edit'); page.wait_for_selector('.dadd', state='detached')
 
         page.goto(URL + '#/settings'); page.wait_for_selector('#st-lock'); page.click('#st-lock-last'); page.wait_for_timeout(400)
         page.goto(URL + '#/journal/new'); page.wait_for_selector('#t-jlines'); shot(page, '15-journal')

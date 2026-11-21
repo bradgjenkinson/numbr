@@ -117,6 +117,33 @@ An alert goes off while `sum(sign * value of watch accounts) <op> sum(sign * val
 - **State.** `evaluate_alerts()` runs whenever alerts are read (`GET /alerts`, `/alerts/count`, `/dashboard`). When the condition becomes true it sets `triggered_since`; when it becomes false it clears `triggered_since` and `dismissed`, re-arming the alert. "Got it" (`POST /alerts/:id/dismiss`) sets `dismissed` (status `seen`); a seen alert still counts in the menu and shows on the Dashboard until its condition stops, so it can't be forgotten. Editing an alert starts it fresh. Statuses: `triggered`, `seen`, `ok`, `off` (turned off).
 - The nav count (`updateAlertCount()` in `app.js`) refreshes after every screen change. An account in an alert can't be deleted.
 
+### Dashboard
+
+The Dashboard shows the visuals the user picks, in the order they choose. Like reports, it is presentation only: every figure is computed on request and nothing is stored except the choice of visuals.
+
+- **Layout.** `settings.dashboard_layout` is a JSON list of `{id, type, opts}`, checked by `clean_layout()` and saved with `PUT /dashboard/layout`. That call writes a `dashboard_layout` audit row. When the setting is unset, `default_layout()` gives one tile per bank account plus the standard visuals.
+- **Types:**
+  - `tile`: one account or group, with a 12-month trend.
+  - `profit_forecast`
+  - `in_out`
+  - `profit_budget`
+  - `budget_used`: `to_date` or `full_year`.
+  - `dollar`: `account` or `group`.
+  - `yoy`: `year` or `month`, and `spending` or `income`.
+  - `next_days`: 14, 30 or 60 days.
+  - `calendar`: `overall` or a bank account id.
+  - `net_worth`
+  - `goals`: a name, account or group, target and optional date for each goal.
+  - `two_years`
+- **Account references.** A reference is `{account_id}` or `{group_id}`. A group means every account in it and in its subgroups (`group_account_ids()`). If a referenced account or group is deleted, its visual comes back as `{missing: true}` and asks the user to edit or remove it.
+- **Figures.**
+  - `DashBooks` makes one pass over `report_lines()` up to today, so shared accounts and shared invoices count at the user's share. Budgets are read from `budget_amounts`.
+  - Balance sheet accounts use the balance at month end, and today for the current month. P&L accounts use the total for the period.
+  - The profit forecast adds each later month's budgeted net profit to the actual profit so far. Comparisons with the budget "so far" include the current month's budget pro rata by day.
+  - The bank spending calendar leaves out `transfer` journals.
+  - Coming up projects active recurring templates with `advance()`.
+- **Drawing.** The charts are hand-drawn SVG in `app.js` (`DASH_DRAW`), with no library, so the app still works offline.
+
 ## API reference
 
 All endpoints are under `/api`, take and return JSON, and require header `X-Ledger: 1`. Money is integer cents.
@@ -134,7 +161,7 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `GET/PUT /invoices/:id`, `POST /invoices`, `POST /invoices/:id/void` | Invoices and bills |
 | `GET/POST /payments`, `GET/DELETE /payments/:id` | Receipts and payments with allocations |
 | `POST /txn/:source` (spend, receive, transfer, journal) | Create a bank transaction or journal |
-| `GET /journals?source=&from=&to=`, `GET/PUT/DELETE /journals/:id` | List, edit and delete those transactions |
+| `GET /journals?source=&from=&to=`, `GET/PUT/DELETE /journals/:id` | List, edit and delete those transactions. A reconciled one can't be deleted, but PUT may change its categories and unreconciled lines as long as the date and every reconciled line (account and amount) stay the same; the lines keep their `recon_id` |
 | `GET /register?account_id=&from=&to=` | Account transactions with running balance; when shared accounts affect it, also `share`/`share_balance` per line and `share_opening`/`share_closing` |
 | `GET /reconcile?account_id=`, `POST /reconcile` (optional `bank_text: {line_id: text or {text, date}}`), `POST /reconcile/undo` | Bank reconciliation |
 | `POST /reconcile/import` | Statement lines for one account: skip duplicates, apply bank rules (`{account_id, lines: [{date, amount, description}], mapping?}`; `mapping` = the column choices, saved on the account and returned as `csv_map` in `/state`) |
@@ -153,7 +180,8 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 | `POST /alerts`, `GET/PUT/DELETE /alerts/:id` | `{name, op, active?, watch: [{account_id, sign?}], compare: [{account_id, sign?}], amount}` (cents) |
 | `POST /alerts/preview` | Same body (name not needed): the evaluated alert, nothing saved. Used for the live "Right now" box |
 | `POST /alerts/:id/dismiss` | "Got it": marks a triggered alert as seen. It still counts until the condition stops |
-| `GET /dashboard`, `GET /audit`, `POST /backup` | Dashboard figures (including `alerts` going off), audit log, manual backup |
+| `GET /dashboard`, `PUT /dashboard/layout` | The dashboard's `layout`, the data for each visual (`widgets`, keyed by visual id) and `alerts` going off; save the list of visuals (body `{layout}`, returns the same as GET) |
+| `GET /audit`, `POST /backup` | Audit log, manual backup |
 
 ## Design decisions
 
