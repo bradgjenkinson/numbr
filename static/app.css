@@ -354,3 +354,7 @@ td.mtot, th.mtot { background-color: #f6f8fb; }
 .al-dash table { margin-top: 6px; background: transparent; }
 .al-dash td { border: 0; padding: 4px 8px 4px 0; }
 @media (max-width: 600px) { .al-sign-gap { display: none; } }
+
+/* opening balances: reconciled accounts are fixed */
+tr.ob-locked td { opacity: .55; }
+tr.ob-locked input:disabled { background: var(--bg); cursor: not-allowed; }

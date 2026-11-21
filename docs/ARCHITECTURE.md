@@ -125,7 +125,7 @@ All endpoints are under `/api`, take and return JSON, and require header `X-Ledg
 |---|---|
 | `GET /state` | Settings, accounts (with balances), contacts, account groups, projects (`{id, name, account_ids}`); runs due recurring once per day |
 | `PUT /settings` | Update settings (business name, FY month, invoice number, start date, lock date, setup_done) |
-| `GET/PUT /opening` | Read or replace opening balances (`{balances: {account_id: natural_cents}}`) |
+| `GET/PUT /opening` | Read or replace opening balances (`{balances: {account_id: natural_cents}}`). `locked_accounts` lists accounts with a real reconciliation; their opening balance can't change (PUT keeps it and their opening reconciliation) |
 | `GET/POST /accounts`, `PUT/DELETE /accounts/:id` | Chart of accounts. `code` is optional (generated on create, kept on edit). A name already used by another account is refused; a pre-existing duplicate can still be edited until it is renamed. `group_id` puts the account in a group; `new_group: {name, parent_id}` creates one and joins it in the same request. Changing an account's type takes it out of a group of the old type. `project_ids` (optional) sets exactly which projects the account is in |
 | `POST /groups`, `PUT/DELETE /groups/:id` | Account groups (`{name, type, parent_id, account_ids}`; `account_ids` sets the exact members). Delete moves the group's accounts and subgroups up one level |
 | `POST /projects`, `PUT/DELETE /projects/:id` | Projects (`{name, account_ids}`; `account_ids` sets the exact members). Delete removes only the project, never accounts or transactions |
