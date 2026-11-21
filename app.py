@@ -585,7 +585,7 @@ def contact(db, cid):
 # Journals (the ledger)
 # ----------------------------------------------------------------------------
 
-def check_lines(db, lines):
+def check_lines(db, lines, allow_archived=False):
     lines = [l for l in lines if l['amount'] != 0]
     if len(lines) < 2:
         raise ApiError('A transaction needs at least one non-zero amount')
@@ -593,7 +593,7 @@ def check_lines(db, lines):
         raise ApiError('Transaction does not balance (debits must equal credits)')
     for l in lines:
         a = account(db, l['account_id'])
-        if a['archived']:
+        if a['archived'] and not allow_archived:
             raise ApiError(f'The account “{a["name"]}” is archived. Un-archive it in the chart of accounts, or choose another account.')
     return lines
 
@@ -607,10 +607,10 @@ def insert_lines(db, jid, lines, contact_id):
 
 
 def post_journal(db, date, source, lines, memo=None, reference=None, contact_id=None,
-                 source_id=None, recurring_id=None, skip_lock=False):
+                 source_id=None, recurring_id=None, skip_lock=False, allow_archived=False):
     if not skip_lock:
         check_lock(db, date)
-    lines = check_lines(db, lines)
+    lines = check_lines(db, lines, allow_archived)
     cur = db.execute('INSERT INTO journals(date, memo, reference, source, source_id, contact_id, recurring_id, created_at) '
                      'VALUES (?,?,?,?,?,?,?,?)',
                      (date, memo or None, reference or None, source, source_id, contact_id, recurring_id, now()))
@@ -808,6 +808,10 @@ def api_opening_put(db, q, body):
                            'Undo its reconciliations (Banking → Reconcile) first.')
         balances.pop(aid, None)
         balances[str(aid)] = cur_val
+    # An archived account left out of the form keeps its opening balance rather than silently dropping to zero.
+    for (aid,) in db.execute('SELECT id FROM accounts WHERE archived=1'):
+        if aid not in balances and str(aid) not in balances and existing.get(str(aid)):
+            balances[str(aid)] = existing[str(aid)]
     kept_recons = {r[0]: r[1] for r in db.execute("SELECT account_id, id FROM reconciliations WHERE note='opening'")
                    if r[0] in locked_ids}
     old = scalar(db, "SELECT id FROM journals WHERE source='opening'")
@@ -828,7 +832,8 @@ def api_opening_put(db, q, body):
     if diff:
         lines.append({'account_id': system_account(db, 'hist')['id'], 'amount': diff})
     if len(lines) >= 2:
-        jid = post_journal(db, od, 'opening', lines, memo='Opening balances', skip_lock=True)
+        # Archived accounts keep the opening balance they had: archiving only stops new transactions.
+        jid = post_journal(db, od, 'opening', lines, memo='Opening balances', skip_lock=True, allow_archived=True)
         for l in rows(db.execute("SELECT l.id, l.account_id, l.amount, a.type FROM journal_lines l "
                                  "JOIN accounts a ON a.id=l.account_id WHERE l.journal_id=? AND l.role='bank'", (jid,))):
             if l['account_id'] in kept_recons:

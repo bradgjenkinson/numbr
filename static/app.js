@@ -810,13 +810,14 @@ async function openingPage(inSetup = false, steps = '') {
   const ob = await GET('/api/opening');
   const conv = ob.conversion_date;
   if (!conv) { main.innerHTML = `<div class="notice warn">Set your start date first. <a href="#/setup">Go to setup</a></div>`; return; }
-  const accts = S.accounts.filter(a => ['asset', 'liability', 'equity'].includes(a.type) && a.subtype !== 'hist' && !a.archived);
+  // Archived accounts still count if they had an opening balance, or Historical Balancing would show their amount.
+  const accts = S.accounts.filter(a => ['asset', 'liability', 'equity'].includes(a.type) && a.subtype !== 'hist' && (!a.archived || ob.balances[a.id]));
   const vals = {}; accts.forEach(a => { vals[a.id] = ob.balances[a.id] || 0; });
   const lockedSet = new Set((ob.locked_accounts || []).map(String));
   const rowsHtml = TYPE_GROUPS.filter(([t]) => ['asset', 'liability', 'equity'].includes(t)).map(([t, label]) =>
     `<tr class="sechead"><td colspan="2">${label}</td></tr>` + accts.filter(a => a.type === t).sort(byName).map(a => {
       const lk = lockedSet.has(String(a.id));
-      return `<tr class="sub${lk ? ' ob-locked' : ''}"><td>${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}${lk ? ' <span class="pill" title="This account has been reconciled">reconciled</span>' : ''}</td>
+      return `<tr class="sub${lk ? ' ob-locked' : ''}"><td>${esc(a.name)}${a.archived ? ' <span class="muted">(archived)</span>' : ''}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}${lk ? ' <span class="pill" title="This account has been reconciled">reconciled</span>' : ''}</td>
        <td style="width:180px"><input class="num ob" data-id="${a.id}" value="${vals[a.id] ? fmt(vals[a.id]) : ''}" placeholder="0.00" ${lk ? 'disabled title="Reconciled: undo this account\'s reconciliations to change its opening balance"' : ''}></td></tr>`;
     }).join('')).join('');
   const body = `${lockedSet.size ? `<div class="notice info">Greyed-out accounts have been reconciled, so their opening balances are fixed. Undo that account's reconciliations to change them. Everything else can still be edited.</div>` : ''}
