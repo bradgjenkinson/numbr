@@ -140,8 +140,22 @@ try:
                                     'line_ids': [l['id'] for l in july]})
     r = call('DELETE', f"/api/journals/{fee['id']}", expect_ok=False)
     check('reconciled' in r.get('error', ''), 'reconciled txn cannot be deleted')
-    r = call('PUT', '/api/opening', {'balances': {}}, expect_ok=False)
-    check('reconciled' in r.get('error', ''), 'opening balances locked after reconcile')
+    # opening balances lock per account: only the reconciled bank account is frozen
+    ob = call('GET', '/api/opening')
+    check(ob['locked_accounts'] == [A['1-1100']], f"only reconciled account locked {ob['locked_accounts']}")
+    orig = {A['1-1100']: 1000000, A['1-1300']: 150000, A['2-1200']: 40000, A['1-2000']: 300000, A['3-1000']: 1410000}
+    r = call('PUT', '/api/opening', {'balances': {**orig, A['1-1100']: 999999}}, expect_ok=False)
+    check('reconciled' in r.get('error', ''), 'reconciled account opening balance locked')
+    recon_before = [h for h in call('GET', f"/api/reconcile?account_id={A['1-1100']}")['history'] if h['note'] == 'opening']
+    ob = call('PUT', '/api/opening', {'balances': {**orig, A['1-2000']: 350000, A['3-1000']: 1460000}})
+    check(ob['balances'][str(A['1-2000'])] == 350000 and ob['historical_balancing'] == 0, 'unreconciled account opening editable')
+    check(ob['balances'][str(A['1-1100'])] == 1000000, 'locked bank opening kept')
+    recon_after = [h for h in call('GET', f"/api/reconcile?account_id={A['1-1100']}")['history'] if h['note'] == 'opening']
+    check([h['id'] for h in recon_after] == [h['id'] for h in recon_before], 'opening reconciliation kept for locked account')
+    check(call('GET', '/api/reports/tb')['debit'] == call('GET', '/api/reports/tb')['credit'], 'TB balances after opening edit')
+    check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], 'BS balances after opening edit')
+    ob = call('PUT', '/api/opening', {'balances': {k: v for k, v in orig.items() if k != A['1-1100']}})
+    check(ob['balances'][str(A['1-1100'])] == 1000000 and ob['historical_balancing'] == 0, 'omitted locked account keeps its balance')
     call('POST', '/api/reconcile/undo', {'account_id': A['1-1100']})
     call('POST', '/api/reconcile', {'account_id': A['1-1100'], 'statement_date': '2026-07-31', 'statement_balance': expected,
                                     'line_ids': [l['id'] for l in july]})

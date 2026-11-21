@@ -812,12 +812,14 @@ async function openingPage(inSetup = false, steps = '') {
   if (!conv) { main.innerHTML = `<div class="notice warn">Set your start date first. <a href="#/setup">Go to setup</a></div>`; return; }
   const accts = S.accounts.filter(a => ['asset', 'liability', 'equity'].includes(a.type) && a.subtype !== 'hist' && !a.archived);
   const vals = {}; accts.forEach(a => { vals[a.id] = ob.balances[a.id] || 0; });
-  const locked = ob.locked;
+  const lockedSet = new Set((ob.locked_accounts || []).map(String));
   const rowsHtml = TYPE_GROUPS.filter(([t]) => ['asset', 'liability', 'equity'].includes(t)).map(([t, label]) =>
-    `<tr class="sechead"><td colspan="2">${label}</td></tr>` + accts.filter(a => a.type === t).sort(byName).map(a =>
-      `<tr class="sub"><td>${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}</td>
-       <td style="width:180px"><input class="num ob" data-id="${a.id}" value="${vals[a.id] ? fmt(vals[a.id]) : ''}" placeholder="0.00" ${locked ? 'disabled' : ''}></td></tr>`).join('')).join('');
-  const body = `${locked ? `<div class="notice info">Opening balances are locked because you've reconciled a bank account since. Undo reconciliations to change them.</div>` : ''}
+    `<tr class="sechead"><td colspan="2">${label}</td></tr>` + accts.filter(a => a.type === t).sort(byName).map(a => {
+      const lk = lockedSet.has(String(a.id));
+      return `<tr class="sub${lk ? ' ob-locked' : ''}"><td>${esc(a.name)}${a.subtype === 'ar' ? ' <span class="muted">(total of unpaid invoices)</span>' : ''}${a.subtype === 'ap' ? ' <span class="muted">(total of unpaid bills)</span>' : ''}${lk ? ' <span class="pill" title="This account has been reconciled">reconciled</span>' : ''}</td>
+       <td style="width:180px"><input class="num ob" data-id="${a.id}" value="${vals[a.id] ? fmt(vals[a.id]) : ''}" placeholder="0.00" ${lk ? 'disabled title="Reconciled: undo this account\'s reconciliations to change its opening balance"' : ''}></td></tr>`;
+    }).join('')).join('');
+  const body = `${lockedSet.size ? `<div class="notice info">Greyed-out accounts have been reconciled, so their opening balances are fixed. Undo that account's reconciliations to change them. Everything else can still be edited.</div>` : ''}
     <div class="panel"><p class="muted" style="margin-top:0">Enter each balance as at close of business on <b>${dfmt(addDays(conv, -1))}</b>, taken from your previous balance sheet at that date.
     Enter amounts as positive numbers in their normal direction (e.g. a credit card you owe $500 on is 500). A contra account like accumulated depreciation is entered as a negative.</p>
     <table><tbody>${rowsHtml}
@@ -826,7 +828,7 @@ async function openingPage(inSetup = false, steps = '') {
       <tr class="total"><td>Total liabilities + equity</td><td class="num" id="ob-le"></td></tr>
     </tbody></table>
     ${inSetup ? `<div class="modal-foot"><button onclick="go('#/setup/2')">Back</button><button class="primary" id="ob-save">Save &amp; continue</button></div>`
-      : `<div class="modal-foot">${locked ? '' : '<button class="primary" id="ob-save">Save opening balances</button>'}</div>`}</div>`;
+      : `<div class="modal-foot"><button class="primary" id="ob-save">Save opening balances</button></div>`}</div>`;
   if (inSetup) main.innerHTML = `<div class="setup">${steps}<h1>Opening balances</h1>${body}</div>`;
   else page('Opening balances', `As at ${dfmt(addDays(conv, -1))}`, `<a class="btn" href="#/sales/new?hist=1">+ Unpaid invoice at start</a><a class="btn" href="#/purchases/new?hist=1">+ Unpaid bill at start</a>`,
     `${ob.ar_opening !== ob.historical_sales ? `<div class="notice warn">Accounts Receivable opening balance (${$fmt(ob.ar_opening)}) doesn't match the unpaid invoices dated before your start date (${$fmt(ob.historical_sales)}).</div>` : ''}

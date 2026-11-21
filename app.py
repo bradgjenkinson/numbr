@@ -777,11 +777,17 @@ def api_opening_get(db, q, body):
     hist_sales = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind='sale' AND partner=0 AND historical=1 "
                             "AND status='open'")
     hist_bills = scalar(db, "SELECT COALESCE(SUM(total),0) FROM invoices WHERE kind='bill' AND historical=1 AND status='open'")
-    locked = bool(scalar(db, "SELECT COUNT(*) FROM reconciliations WHERE note IS NOT 'opening'"))
+    locked_ids = opening_locked_accounts(db)
     return {'conversion_date': conv, 'balances': balances, 'historical_balancing': hist,
             'ar_account_id': ar['id'], 'ap_account_id': ap['id'],
             'ar_opening': balances.get(str(ar['id']), 0), 'ap_opening': balances.get(str(ap['id']), 0),
-            'historical_sales': hist_sales, 'historical_bills': hist_bills, 'locked': locked}
+            'historical_sales': hist_sales, 'historical_bills': hist_bills,
+            'locked': bool(locked_ids), 'locked_accounts': sorted(locked_ids)}
+
+
+def opening_locked_accounts(db):
+    """Accounts whose opening balance is frozen: any with a real (non-opening) reconciliation."""
+    return {r[0] for r in db.execute("SELECT DISTINCT account_id FROM reconciliations WHERE note IS NOT 'opening'")}
 
 
 @route('PUT', '/api/opening')
@@ -789,15 +795,26 @@ def api_opening_put(db, q, body):
     conv = get_setting(db, 'conversion_date')
     if not conv:
         raise ApiError('Set your start date first')
-    if scalar(db, "SELECT COUNT(*) FROM reconciliations WHERE note IS NOT 'opening'"):
-        raise ApiError('Opening balances can\'t be changed after you\'ve reconciled a bank account. '
-                       'Undo the reconciliations first.')
     od = (D(conv) - dt.timedelta(days=1)).isoformat()
+    balances = dict(body.get('balances') or {})
+    # Reconciled accounts keep their opening balance: their reconciled history starts from it.
+    locked_ids = opening_locked_accounts(db)
+    existing = api_opening_get(db, q, body)['balances']
+    for aid in locked_ids:
+        cur_val = existing.get(str(aid), 0)
+        sent = balances.get(str(aid), balances.get(aid))
+        if sent is not None and as_cents(sent, 'Opening balance') != cur_val:
+            raise ApiError(f"{account(db, aid)['name']} has been reconciled, so its opening balance can't change. "
+                           'Undo its reconciliations (Banking → Reconcile) first.')
+        balances.pop(aid, None)
+        balances[str(aid)] = cur_val
+    kept_recons = {r[0]: r[1] for r in db.execute("SELECT account_id, id FROM reconciliations WHERE note='opening'")
+                   if r[0] in locked_ids}
     old = scalar(db, "SELECT id FROM journals WHERE source='opening'")
     if old:
         db.execute('DELETE FROM journals WHERE id=?', (old,))
-    db.execute("DELETE FROM reconciliations WHERE note='opening'")
-    balances = body.get('balances') or {}
+    for aid in {r[0] for r in db.execute("SELECT account_id FROM reconciliations WHERE note='opening'")} - set(kept_recons):
+        db.execute("DELETE FROM reconciliations WHERE note='opening' AND account_id=?", (aid,))
     lines = []
     for aid, nat in balances.items():
         nat = as_cents(nat, 'Opening balance')
@@ -814,6 +831,9 @@ def api_opening_put(db, q, body):
         jid = post_journal(db, od, 'opening', lines, memo='Opening balances', skip_lock=True)
         for l in rows(db.execute("SELECT l.id, l.account_id, l.amount, a.type FROM journal_lines l "
                                  "JOIN accounts a ON a.id=l.account_id WHERE l.journal_id=? AND l.role='bank'", (jid,))):
+            if l['account_id'] in kept_recons:
+                db.execute('UPDATE journal_lines SET recon_id=? WHERE id=?', (kept_recons[l['account_id']], l['id']))
+                continue
             cur = db.execute("INSERT INTO reconciliations(account_id, statement_date, statement_balance, note, created_at) "
                              "VALUES (?,?,?,'opening',?)", (l['account_id'], od, SIGN[l['type']] * l['amount'], now()))
             db.execute('UPDATE journal_lines SET recon_id=? WHERE id=?', (cur.lastrowid, l['id']))

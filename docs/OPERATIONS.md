@@ -98,7 +98,7 @@ In Banking, transactions a rule made show a badge with the rule's name: **Auto**
 | Wrong invoice that's already paid | Open the payment → Delete payment, then edit/void the invoice and re-enter the payment |
 | Wrong bank transaction that's reconciled | Reconcile → history → Undo (latest only), fix it, then reconcile again |
 | Anything in a locked month | Settings → move the lock date back, fix it, then re-lock (the change is recorded in the audit log) |
-| Opening balances wrong after reconciling | Undo reconciliations back to the opening one, then edit opening balances |
+| Opening balance wrong for a reconciled account | Undo that account's reconciliations back to the opening one, then edit it. Accounts you haven't reconciled can be edited any time |
 
 ## Backups and recovery
 

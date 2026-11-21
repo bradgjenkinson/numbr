@@ -65,7 +65,7 @@ Double-entry ledger. **Every financial event becomes one `journals` row with two
 3. **Reconciled lines are immutable.** A journal with any line where `recon_id` is set can't be edited or deleted. The user must undo the reconciliation (only the latest one can be undone).
 4. **Paid invoices are immutable.** Delete the payment(s) first, then edit or void.
 5. **Opening items:** invoices and bills dated before `settings.conversion_date` are `historical=1`. They post **no journal**, because the opening AR/AP balance already includes them, but they appear in aged reports and accept payments (payments always post).
-6. Opening balances are one `source='opening'` journal dated the day before the start date. Any imbalance goes to Historical Balancing. Opening bank lines are pre-reconciled via `reconciliations.note='opening'`. Opening balances lock once any real reconciliation exists.
+6. Opening balances are one `source='opening'` journal dated the day before the start date. Any imbalance goes to Historical Balancing. Opening bank lines are pre-reconciled via `reconciliations.note='opening'`. An account's opening balance locks once that account has a real reconciliation (`opening_locked_accounts()`); other accounts stay editable.
 7. Every request runs in one SQLite transaction (`BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` in `Handler.handle_api`). Raise `ApiError` for user-facing validation; it rolls back and returns `{error}` with status 400.
 8. Every create/edit/delete writes an `audit_log` row.
 
