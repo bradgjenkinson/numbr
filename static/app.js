@@ -2120,8 +2120,9 @@ async function reportPL() {
 }
 
 // ---- Budget vs actual (P&L). Budgets are planning figures only; this compares them with the ledger.
-// Two views: 'budget' (YTD accumulative: one set of totals for the range) and 'monthly' (month by month).
-const PL_VIEWS = { actual: 'Actual', budget: 'YTD accumulative', monthly: 'Month by month' };
+// Three views: 'budget' (YTD accumulative: one set of totals for the range), 'monthly' (month by month) and
+// 'cumulative' (the month by month grid with running totals from the first month to the end of each month).
+const PL_VIEWS = { actual: 'Actual', budget: 'YTD accumulative', monthly: 'Month by month', cumulative: 'Cumulative' };
 const plPeriod = d => d.months.length === 1 ? monthLong(d.months[0]) : `${monthLong(d.months[0])} to ${monthLong(d.months[d.months.length - 1])}`;
 const monthSpan = ms => ms.length === 1 ? monthLabel(ms[0]) : `${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}`;
 // The view switch. The budget views are only offered when every month has a budget.
@@ -2165,7 +2166,11 @@ function mmCells(a, b, dir, extra = '') {
 }
 
 async function plBudgetView(d, r) {
-  const monthly = r.view === 'monthly', n = d.months.length;
+  // Cumulative reuses the month by month grid with running totals and no Total column (the last month is the total).
+  const cum = r.view === 'cumulative', monthly = r.view === 'monthly' || cum, n = d.months.length;
+  const mtot = n > 1 && !cum;
+  const run = v => { let t = 0; return v.map(x => (t += x)); };
+  const acc = v => (cum ? run(v) : v);
   const hasGroups = d.sections.some(s => groupsOfType(s.type).length);
   // Rows carry [actuals..., budgets...] (YTD view: [actual total, budget total]) so groupTree adds
   // group subtotals for both at once.
@@ -2176,13 +2181,14 @@ async function plBudgetView(d, r) {
   const sum = v => v.reduce((t, x) => t + x, 0);
   // A line of the report from per-month (or single) actual and budget arrays.
   const row = (label, A, B, dir, cls = '', href = '', tdAttr = '') => {
-    const cells = monthly ? A.map((a, i) => mmCells(a, B[i], dir)).join('') + (n > 1 ? mmCells(sum(A), sum(B), dir, ' mtot') : '')
+    if (cum) { A = run(A); B = run(B); }
+    const cells = monthly ? A.map((a, i) => mmCells(a, B[i], dir)).join('') + (mtot ? mmCells(sum(A), sum(B), dir, ' mtot') : '')
       : `${repCell(B[0])}${repCell(A[0])}${varCells(A[0], B[0], dir)}`;
     return `<tr class="${cls}${href ? ' click' : ''}" ${href ? `data-href="${href}"` : ''}><td ${tdAttr}>${label}</td>${cells}</tr>`;
   };
   const tot = (s, which) => (monthly ? s[which === 'a' ? 'totals' : 'budget_totals'] : [s[which === 'a' ? 'total' : 'budget_total']]);
   const prof = (key) => (monthly ? [d[key], d[`${key}_budget`]] : [[d[`${key}_total`]], [d[`${key}_budget_total`]]]);
-  const cols = monthly ? 3 * (n + (n > 1 ? 1 : 0)) : 5;
+  const cols = monthly ? 3 * (n + (mtot ? 1 : 0)) : 5;
   let rowsHtml = '';
   d.sections.forEach(s => {
     if (!s.rows.length && s.type === 'cos') return;
@@ -2198,25 +2204,27 @@ async function plBudgetView(d, r) {
   });
   rowsHtml += row('Net profit', ...prof('net_profit'), 1, 'grand');
   const head = monthly
-    ? `<tr><th rowspan="2"></th>${d.months.map(m => `<th colspan="3" class="mgrp">${monthLabel(m)}</th>`).join('')}${n > 1 ? '<th colspan="3" class="mgrp mtot">Total</th>' : ''}</tr>
-       <tr>${'<th class="num mb">Budget</th><th class="num">Actual</th><th class="num">Difference</th>'.repeat(n)}${n > 1 ? '<th class="num mb mtot">Budget</th><th class="num mtot">Actual</th><th class="num mtot">Difference</th>' : ''}</tr>`
+    ? `<tr><th rowspan="2"></th>${d.months.map(m => `<th colspan="3" class="mgrp">${monthLabel(m)}</th>`).join('')}${mtot ? '<th colspan="3" class="mgrp mtot">Total</th>' : ''}</tr>
+       <tr>${'<th class="num mb">Budget</th><th class="num">Actual</th><th class="num">Difference</th>'.repeat(n)}${mtot ? '<th class="num mb mtot">Budget</th><th class="num mtot">Actual</th><th class="num mtot">Difference</th>' : ''}</tr>`
     : `<tr><th></th><th class="num">Budget</th><th class="num">Actual</th><th class="num">Variance</th><th class="num">Var %</th><th class="vb">Against budget</th></tr>`;
   const names = d.budget_cover.budgets.map(b => b.name).join(' and ');
-  const title = monthly ? 'Budget vs Actual, Month by Month' : 'Budget vs Actual, YTD Accumulative';
+  const title = cum ? 'Budget vs Actual, Cumulative' : monthly ? 'Budget vs Actual, Month by Month' : 'Budget vs Actual, YTD Accumulative';
   page('Profit &amp; Loss', '', `<button id="x-csv">Export CSV</button><button onclick="window.print()">Print / PDF</button>`,
     `${monthRangeFilters('pl', hasGroups)}${plViewSwitch(d, r.view)}
     <div class="report bva${monthly ? ' bva-mm' : ''}">${reportHead(title, `${plPeriod(d)} · compared with ${esc(names)}${projTag(d)}`)}
-      ${monthly ? `<div class="mm-key no-print">Whole dollars. A positive difference is better than budget (spent less, or earned more). <span class="bad">Red</span> is worse than budget: over spent, or income short. Hover a difference for the exact figures.</div>` : ''}
+      ${monthly ? `<div class="mm-key no-print">${cum ? `Running totals from the start of ${monthLong(d.months[0])} to the end of each month. ` : ''}Whole dollars. A positive difference is better than budget (spent less, or earned more). <span class="bad">Red</span> is worse than budget: over spent, or income short. Hover a difference for the exact figures.</div>` : ''}
       ${repTable(head, rowsHtml)}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
   wireMonthRange('pl', reportPL); wirePlView(r);
   $('#x-csv').onclick = () => {
     // Budget before Actual, the same order as the screen.
-    const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Budget`, `${m} Actual`, `${m} Variance`]), 'Total Budget', 'Total Actual', 'Total Variance']
+    const td = cum ? ' to date' : '';
+    const hdr = monthly ? ['Account', ...d.months.flatMap(m => [`${m} Budget${td}`, `${m} Actual${td}`, `${m} Variance${td}`]), ...(cum ? [] : ['Total Budget', 'Total Actual', 'Total Variance'])]
       : ['Account', 'Budget', 'Actual', 'Variance', 'Variance %'];
     const out = [[S.settings.business_name], [title], [`${plPeriod(d)}, compared with ${names}`], ...(d.project ? [[`Project: ${d.project.name}`]] : []), [], hdr];
     const line = (label, A, B) => {
-      if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(B[i]), c2d(a), c2d(a - B[i])]), c2d(sum(B)), c2d(sum(A)), c2d(sum(A) - sum(B))]);
+      if (cum) { A = acc(A); B = acc(B); out.push([label, ...A.flatMap((a, i) => [c2d(B[i]), c2d(a), c2d(a - B[i])])]); }
+      else if (monthly) out.push([label, ...A.flatMap((a, i) => [c2d(B[i]), c2d(a), c2d(a - B[i])]), c2d(sum(B)), c2d(sum(A)), c2d(sum(A) - sum(B))]);
       else { const p = varPct(A[0], B[0]); out.push([label, c2d(B[0]), c2d(A[0]), c2d(A[0] - B[0]), p === null ? '' : p.toFixed(1)]); }
     };
     d.sections.forEach(s => {
@@ -2227,7 +2235,7 @@ async function plBudgetView(d, r) {
       if (s.type === 'cos' && s.rows.length) line('Gross profit', ...prof('gross_profit'));
     });
     line('Net profit', ...prof('net_profit'));
-    download(`Budget-vs-Actual${projFile(d)}-${monthly ? 'monthly' : 'YTD'}-${r.from}-to-${r.to}.csv`, out);
+    download(`Budget-vs-Actual${projFile(d)}-${cum ? 'cumulative' : monthly ? 'monthly' : 'YTD'}-${r.from}-to-${r.to}.csv`, out);
   };
 }
 

@@ -555,9 +555,22 @@ try:
         assert ed == '' or (ed.startswith('−') == (int(ea.replace(',', '') or 0) > int(eb.replace(',', '') or 0))), (eb, ea, ed)
         assert 'Month by Month' in page.inner_text('.report-title')
         shot(page, '22b-budget-vs-actual-monthly')
+        # cumulative: the same grid with running totals to the end of each month and no Total column
+        page.click('[data-view="cumulative"]'); page.wait_for_selector('.bva-mm td.mm')
+        page.wait_for_function("document.querySelector('.report-title').innerText.includes('Cumulative')")
+        np_cells = page.locator('.rep-grid tr.grand td.mm')
+        assert np_cells.count() == 36, np_cells.count()
+        ca = cb = 0
+        for i in range(12):
+            ca += want[2][i]; cb += want[3][i]
+            bt, ac, df = (np_cells.nth(3 * i + k).inner_text() for k in range(3))
+            diff = round(ca / 100) - round(cb / 100)
+            assert (bt, ac) == (dol(cb), dol(ca)), (i, bt, ac)
+            assert df == ('' if not diff else f"{'−' if diff < 0 else ''}{abs(diff):,}"), (i, df, diff)
+        shot(page, '22c-budget-vs-actual-cumulative')
         nxt = page.evaluate(f"addMonthsYM('{bend}', 2)")
         page.fill('#f-to', nxt); page.dispatch_event('#f-to', 'change'); page.wait_for_selector('.seg-hint')
-        assert page.is_disabled('[data-view="budget"]') and page.is_disabled('[data-view="monthly"]') and page.locator('.report.bva').count() == 0
+        assert page.is_disabled('[data-view="budget"]') and page.is_disabled('[data-view="monthly"]') and page.is_disabled('[data-view="cumulative"]') and page.locator('.report.bva').count() == 0
         assert 'No budget for' in page.inner_text('.seg-hint')
         page.click('[data-view="actual"]')
         assert len(errors) == n_err, errors
