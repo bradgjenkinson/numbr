@@ -171,6 +171,33 @@ try:
     call('POST', '/api/reconcile', {'account_id': A['1-1100'], 'statement_date': '2026-07-31', 'statement_balance': expected,
                                     'line_ids': [l['id'] for l in july]})
 
+    # a reconciled transaction can still be recategorised, but its bank side can't change
+    fj = call('GET', f"/api/journals/{fee['id']}")
+    check(fj['reconciled'] and not fj['editable'] and fj['recategorise'], 'reconciled spend offers recategorising')
+    rc_before = call('GET', f"/api/reconcile?account_id={A['1-1100']}")
+    fee_body = {'date': '2026-07-31', 'bank_account_id': A['1-1100'], 'memo': 'Monthly fee'}
+    call('PUT', f"/api/journals/{fee['id']}", {**fee_body, 'lines': [{'account_id': A['6-1700'], 'amount': 600},
+                                                                     {'account_id': A['6-1200'], 'amount': 400}]})
+    fj = call('GET', f"/api/journals/{fee['id']}")
+    bank_line = [l for l in fj['lines'] if l['role'] == 'bank'][0]
+    check(fj['reconciled'] and bank_line['recon_id'] and sorted(i['amount'] for i in fj['items']) == [400, 600],
+          'recategorised and split reconciled spend keeps its reconciliation')
+    rc_after = call('GET', f"/api/reconcile?account_id={A['1-1100']}")
+    check(rc_after['cleared_balance'] == rc_before['cleared_balance'] and rc_after['history'] == rc_before['history'],
+          'recategorising leaves the reconciliation untouched')
+    for bad, word in ((dict(fee_body, lines=[{'account_id': A['6-1200'], 'amount': 1001}]), 'amount'),
+                      (dict(fee_body, date='2026-07-30', lines=[{'account_id': A['6-1200'], 'amount': 1000}]), 'date'),
+                      (dict(fee_body, bank_account_id=A['1-1200'], lines=[{'account_id': A['6-1200'], 'amount': 1000}]), 'amount')):
+        r = call('PUT', f"/api/journals/{fee['id']}", bad, expect_ok=False)
+        check(word in r.get('error', ''), f'reconciled spend {word} change rejected')
+    call('PUT', f"/api/journals/{fee['id']}", {**fee_body, 'lines': [{'account_id': A['6-1200'], 'amount': 1000}]})
+    fj = call('GET', f"/api/journals/{fee['id']}")
+    check(fj['reconciled'] and [i['account_id'] for i in fj['items']] == [A['6-1200']], 'reconciled spend recategorised back')
+    r = call('DELETE', f"/api/journals/{fee['id']}", expect_ok=False)
+    check('reconciled' in r.get('error', ''), 'recategorised reconciled txn still cannot be deleted')
+    check(call('GET', '/api/reports/tb')['debit'] == call('GET', '/api/reports/tb')['credit'], 'TB still balances after recategorising')
+    check(call('GET', '/api/reports/bs?to=2026-10&count=1')['balanced'], 'BS still balances after recategorising')
+
     # credit card reconcile (liability; owed 49.99)
     rc = call('GET', f"/api/reconcile?account_id={A['2-1100']}")
     call('POST', '/api/reconcile', {'account_id': A['2-1100'], 'statement_date': '2026-07-31', 'statement_balance': 4999,
@@ -215,7 +242,10 @@ try:
     call('POST', f"/api/invoices/{inv2['id']}/void")
     check(call('GET', '/api/reports/tb')['debit'] == call('GET', '/api/reports/tb')['credit'], 'TB balances after void')
     dash = call('GET', '/api/dashboard')
-    check(dash['receivable']['total'] == 120000, 'dashboard AR')
+    tiles = [w['opts']['ref']['account_id'] for w in dash['layout'] if w['type'] == 'tile']
+    check(sorted(tiles) == sorted(a['id'] for a in call('GET', '/api/accounts') if a['subtype'] == 'bank' and not a['archived'])
+          and 'profit_forecast' in [w['type'] for w in dash['layout']] and dash['alerts'] == [],
+          'the default dashboard has a tile for each bank account and the standard visuals')
     jl = call('GET', '/api/journals')
     check(len(jl) >= 5, f'journal list {len(jl)}')
     # general journal
@@ -281,9 +311,8 @@ try:
     reg = call('GET', f'/api/register?account_id={joint}&from=2026-10-01')
     check(reg['shared'] and reg['closing'] == 75001 and reg['share_closing'] == jrow['values'][0],
           f"register shows full and share balances {reg['closing']} {reg.get('share_closing')}")
-    dash = call('GET', '/api/dashboard')
-    jd = [b for b in dash['banks'] if b['id'] == joint][0]
-    check(jd['balance'] == 75001 and jd['my_balance'] == 45001, f"dashboard shows user share {jd['my_balance']}")
+    jd = call('GET', '/api/dashboard')['widgets'][f'tile{joint}']
+    check(jd['value'] == 45001 and jd['kind'] == 'bs', f"dashboard tile shows the user's share {jd['value']}")
     rc = call('GET', f'/api/reconcile?account_id={joint}')
     check(sum(l['amount'] for l in rc['lines']) == 75001, 'reconcile uses full amounts')
     # back to 100%: reports go back to full amounts
@@ -385,7 +414,6 @@ try:
           'unpaid contribution is not in aged receivables')
     check(c1 in [i['id'] for i in call('GET', '/api/invoices?kind=partner')] and
           c1 not in [i['id'] for i in call('GET', '/api/invoices?kind=sale&status=all')], 'contributions list apart from invoices')
-    check(call('GET', '/api/dashboard')['contributions']['total'] == 107500, 'dashboard shows contributions due')
     check([c for c in call('GET', '/api/contacts') if c['id'] == pal][0]['contribution_due'] == 107500,
           'contact shows contribution due')
     all_balanced('with an unpaid contribution')
@@ -1281,6 +1309,140 @@ try:
     tb_ = call('GET', '/api/reports/tb')
     check(tb_['debit'] == tb_['credit'], 'TB still balances with alerts')
     check(call('GET', f'/api/reports/bs?to={t_iso[:7]}&count=1')['balanced'], 'BS still balances with alerts')
+
+    # ---------------------------------------------------------------- dashboard (presentation only)
+    T = date.today()
+    t_iso, cur = T.isoformat(), T.isoformat()[:7]
+    dfy = f'{T.year if T.month >= 7 else T.year - 1}-07'
+    dfy_months = [ym_add(dfy, i) for i in range(12)]
+    dgrp = call('POST', '/api/groups', {'name': 'Dash savings', 'type': 'asset'})['id']
+    dsave1 = call('POST', '/api/accounts', {'name': 'Dash saver 1', 'type': 'asset', 'subtype': 'bank', 'group_id': dgrp})['id']
+    dsave2 = call('POST', '/api/accounts', {'name': 'Dash saver 2', 'type': 'asset', 'subtype': 'other', 'group_id': dgrp})['id']
+    dexp = call('POST', '/api/accounts', {'name': 'Dash expense', 'type': 'expense'})['id']
+    dinc = call('POST', '/api/accounts', {'name': 'Dash income', 'type': 'income'})['id']
+    call('POST', '/api/txn/transfer', {'date': t_iso, 'from_account_id': A['1-1100'], 'to_account_id': dsave1, 'amount': 50000})
+    call('POST', '/api/txn/transfer', {'date': t_iso, 'from_account_id': dsave1, 'to_account_id': A['1-1100'], 'amount': 10000})
+    call('POST', '/api/txn/spend', {'date': t_iso, 'bank_account_id': dsave1, 'lines': [{'account_id': dexp, 'amount': 1234}]})
+    call('POST', '/api/txn/journal', {'date': t_iso, 'memo': 'Dash', 'lines': [
+        {'account_id': dsave2, 'debit': 20000}, {'account_id': dinc, 'credit': 20000}]})
+    dbid = call('POST', '/api/budgets', {'fy': dfy, 'accounts': [
+        {'account_id': dinc, 'method': 'manual', 'config': {'amounts': [300000] * 12}},
+        {'account_id': dexp, 'method': 'manual', 'config': {'amounts': [100000] * 12}}]})['id']
+    rw = call('POST', '/api/recurring', {'name': 'Dash weekly', 'kind': 'spend', 'bank_account_id': A['1-1100'], 'frequency': 'weekly',
+                                         'next_date': (T + timedelta(days=1)).isoformat(),
+                                         'lines': [{'account_id': dexp, 'amount': 2500}]})
+    layout = [
+        {'id': 'g', 'type': 'tile', 'opts': {'ref': {'group_id': dgrp}}},
+        {'id': 's1', 'type': 'tile', 'opts': {'ref': {'account_id': dsave1}}},
+        {'id': 's2', 'type': 'tile', 'opts': {'ref': {'account_id': dsave2}}},
+        {'id': 'inc', 'type': 'tile', 'opts': {'ref': {'account_id': dinc}, 'period': 'month'}},
+        {'id': 'pf', 'type': 'profit_forecast'},
+        {'id': 'bu', 'type': 'budget_used', 'opts': {'mode': 'full_year'}},
+        {'id': 'nd', 'type': 'next_days', 'opts': {'days': 14}},
+        {'id': 'cal', 'type': 'calendar', 'opts': {'source': dsave1}}, {'id': 'calall', 'type': 'calendar'},
+        {'id': 'goals', 'type': 'goals', 'opts': {'goals': [{'name': 'Rainy day', 'ref': {'group_id': dgrp}, 'target': 120000}]}},
+        {'id': 'two', 'type': 'two_years', 'opts': {'ref': {'account_id': dexp}}},
+        {'id': 'yoy', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'income'}},
+        {'id': 'io', 'type': 'in_out'}, {'id': 'dl', 'type': 'dollar', 'opts': {'by': 'group'}}, {'id': 'nw', 'type': 'net_worth'}]
+    for bad, why in [([{'id': 'x', 'type': 'pie'}], 'an unknown visual'),
+                     ([{'id': 'x', 'type': 'tile', 'opts': {'ref': {'account_id': 999999}}}], 'a tile for an account that does not exist'),
+                     ([{'id': 'x', 'type': 'tile'}], 'a tile with no account'),
+                     ([{'id': 'x', 'type': 'yoy', 'opts': {'mode': 'week'}}], 'a choice that is not offered'),
+                     ([{'id': 'x', 'type': 'in_out'}, {'id': 'x', 'type': 'net_worth'}], 'two visuals with the same id'),
+                     ([{'id': 'x', 'type': 'calendar', 'opts': {'source': dexp}}], 'a calendar for an account that is not a bank account'),
+                     ([{'id': 'x', 'type': 'goals', 'opts': {'goals': [{'name': 'G', 'ref': {'account_id': dsave1}, 'target': 0}]}}], 'a goal with no target'),
+                     ([{'id': f'x{i}', 'type': 'in_out'} for i in range(41)], 'more than 40 visuals')]:
+        check(call('PUT', '/api/dashboard/layout', {'layout': bad}, expect_ok=False).get('error'), f'dashboard refuses {why}')
+    d = call('PUT', '/api/dashboard/layout', {'layout': layout})
+    W = d['widgets']
+    check([w['id'] for w in d['layout']] == [w['id'] for w in layout] and W['bu']['mode'] == 'full_year',
+          'the dashboard layout saves in order with its choices')
+    check(call('GET', '/api/dashboard')['layout'] == d['layout'], 'the saved layout is used from then on')
+    check(W['s1']['value'] == 50000 - 10000 - 1234 and W['s2']['value'] == 20000 and W['g']['value'] == W['s1']['value'] + W['s2']['value'],
+          f"a group tile adds up its accounts ({W['g']['value']})")
+    check(W['g']['spark'][-1] == W['g']['value'] and len(W['g']['spark']) == 12, 'tiles carry a 12-month trend ending today')
+    check(W['inc']['value'] == 20000 and W['inc']['kind'] == 'pl', 'an income tile shows this month so far')
+    pf = W['pf']
+    later = dfy_months[dfy_months.index(cur) + 1:]
+    exp_, ok = pf['actual'][-1], True
+    for i, m in enumerate(later):
+        exp_ += 300000 - 100000
+        ok = ok and pf['forecast'][i] == exp_
+    check(pf['has_budget'] and ok and len(pf['actual']) == dfy_months.index(cur) + 1,
+          "profit forecast adds each later month's budgeted profit to the profit so far")
+    check(pf['budget'][-1] == 12 * 200000 and pf['forecast'][-1] - pf['budget'][-1] == pf['actual'][-1] - pf['budget'][len(pf['actual']) - 1],
+          'profit outlook adds up the budget, and the forecast keeps the gap to budget at the end of this month')
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
+    bu = [r for r in W['bu']['rows'] if r['ref'] == {'account_id': dexp}]
+    check(bu and bu[0]['budget'] == 1200000 and bu[0]['actual'] >= 1234, "budget used compares spending with the whole year's budget")
+    bug = call('POST', '/api/groups', {'name': 'Dash budget group', 'type': 'expense'})['id']
+    call('PUT', f'/api/accounts/{dexp}', {'name': 'Dash expense', 'type': 'expense', 'group_id': bug})
+    bw = call('PUT', '/api/dashboard/layout', {'layout': [
+        {'id': 'bg', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'by': 'group'}},
+        {'id': 'bt', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'track': [{'account_id': dexp}, {'group_id': bug}]}}]})['widgets']
+    check([r for r in bw['bg']['rows'] if r['name'] == 'Dash budget group' and r['budget'] == 1200000],
+          'budget used can add up by group')
+    check([r['name'] for r in bw['bt']['rows']] == ['Dash expense', 'Dash budget group'] and bw['bt']['chosen']
+          and bw['bt']['rows'][1]['budget'] == 1200000, 'budget used shows the accounts and groups the user chose, in order')
+    for bad, why in [({'track': [{'account_id': dinc}]}, 'an income account'),
+                     ({'track': [{'account_id': dexp}] * 2}, 'the same account twice'),
+                     ({'track': [{'account_id': dexp}] * 9}, 'more than 8 rows')]:
+        check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'b', 'type': 'budget_used', 'opts': bad}]}, expect_ok=False).get('error'),
+              f'budget used refuses {why}')
+    call('PUT', f'/api/accounts/{dexp}', {'name': 'Dash expense', 'type': 'expense', 'group_id': None})
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
+    nd = [i for i in W['nd']['items'] if i['recurring_id'] == rw['id']]
+    check(len(nd) == 2 and all(i['dir'] == 'out' and i['amount'] == 2500 for i in nd), f'coming up repeats a weekly item within 14 days ({len(nd)})')
+    check(W['cal']['days'].get(t_iso) == 1234, f"the bank spending calendar leaves out transfers ({W['cal']['days'].get(t_iso)})")
+    check(W['calall']['days'].get(t_iso, 0) >= 1234, 'the overall spending calendar counts expenses')
+    g = W['goals']['goals'][0]
+    check(g['value'] == W['g']['value'] and g['target'] == 120000, 'a savings goal tracks its group balance')
+    check(W['two']['this'][-1] >= 1234 and len(W['two']['last']) == 12, 'same account, two years has both years')
+    check(W['yoy']['rows'] and W['yoy']['side'] == 'income', 'this month vs last month lists income accounts')
+    ch_ = [r['now'] - r['then'] for r in W['yoy']['rows']]
+    check(ch_ == sorted(ch_, reverse=True), 'this month vs last month shows the biggest increase first')
+    dcg = call('POST', '/api/groups', {'name': 'Dash costs', 'type': 'expense'})['id']
+    dexp2 = call('POST', '/api/accounts', {'name': 'Dash expense 2', 'type': 'expense', 'group_id': dcg})['id']
+    call('POST', '/api/txn/spend', {'date': t_iso, 'bank_account_id': A['1-1100'], 'lines': [{'account_id': dexp2, 'amount': 777}]})
+    yg = call('PUT', '/api/dashboard/layout', {'layout': layout + [{'id': 'yg', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'spending', 'by': 'group'}}]})['widgets']['yg']
+    check(yg['by'] == 'group' and any(r['name'] == 'Dash costs' and r['now'] >= 777 for r in yg['rows'])
+          and not any(r['name'] == 'Dash expense 2' for r in yg['rows']), 'this month vs last month can add up by group')
+    check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'x', 'type': 'yoy', 'opts': {'by': 'team'}}]}, expect_ok=False).get('error'),
+          'dashboard refuses an unknown accounts-or-groups choice')
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
+    check(len(W['io']['months']) == 12 and W['io']['months'][-1] == cur, 'money in vs out covers the last 12 months')
+    check(W['dl']['spent'] == sum(p_['amount'] for p_ in W['dl']['parts']), 'where each dollar went splits all spending')
+    check(W['nw']['net'][-1] == W['nw']['assets'][-1] - W['nw']['liabilities'][-1], 'net worth is what you own minus what you owe')
+    call('DELETE', f'/api/budgets/{dbid}')
+    W = call('GET', '/api/dashboard')['widgets']
+    check(W['pf']['forecast'] is None or not later, 'without a budget the forecast is left off')
+    check('dashboard_layout' in [a['action'] for a in call('GET', '/api/audit')], 'dashboard changes are audited')
+    # A layout saved with the retired visuals shows Net worth over time in the first one's place, moved from lower down.
+    con = sqlite3.connect(os.path.join(data, 'books.db'))
+    con.execute("UPDATE settings SET value=? WHERE key='dashboard_layout'", (json.dumps([
+        {'id': 'a', 'type': 'in_out', 'opts': {}}, {'id': 'old', 'type': 'cash_runway', 'opts': {'basis': 'average', 'months': 6, 'banks': []}},
+        {'id': 'b', 'type': 'dollar', 'opts': {'by': 'account'}}, {'id': 'old2', 'type': 'profit_budget', 'opts': {}},
+        {'id': 'mine', 'type': 'net_worth', 'opts': {}}]),))
+    con.commit(); con.close()
+    old = call('GET', '/api/dashboard')
+    check([(w['id'], w['type']) for w in old['layout']] == [('a', 'in_out'), ('mine', 'net_worth'), ('b', 'dollar')] and 'net' in old['widgets']['mine'],
+          f"retired Cash runway and Profit against budget visuals give their place to Net worth ({old['layout']})")
+    check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'r', 'type': 'cash_runway', 'opts': {}}]}, expect_ok=False).get('error'),
+          'Cash runway can no longer be added')
+    # With the Profit outlook earlier on, it takes Cash runway's place and Net worth takes the outlook's.
+    con = sqlite3.connect(os.path.join(data, 'books.db'))
+    con.execute("UPDATE settings SET value=? WHERE key='dashboard_layout'", (json.dumps([
+        {'id': 'pf', 'type': 'profit_forecast', 'opts': {}}, {'id': 'a', 'type': 'in_out', 'opts': {}},
+        {'id': 'old', 'type': 'cash_runway', 'opts': {}}, {'id': 'bu', 'type': 'budget_used', 'opts': {'mode': 'to_date'}},
+        {'id': 'mine', 'type': 'net_worth', 'opts': {}}]),))
+    con.commit(); con.close()
+    check([w['id'] for w in call('GET', '/api/dashboard')['layout']] == ['mine', 'a', 'pf', 'bu'],
+          'Net worth and the Profit outlook swap so the outlook sits beside Budget used')
+    call('PUT', '/api/dashboard/layout', {'layout': old['layout']})
+    call('DELETE', f"/api/recurring/{rw['id']}")
+    tb_ = call('GET', '/api/reports/tb')
+    check(tb_['debit'] == tb_['credit'], 'TB still balances with the dashboard')
+    check(call('GET', f'/api/reports/bs?to={cur}&count=1')['balanced'], 'BS still balances with the dashboard')
 
     # security header
     try:

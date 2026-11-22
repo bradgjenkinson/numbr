@@ -8,10 +8,15 @@ let RETURN_TO = null;        // where to go after saving a prefilled form
 
 // ---------------------------------------------------------------- utilities
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method, headers: { 'X-Ledger': '1', 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const opts = { method, headers: { 'X-Ledger': '1', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) };
+  let res;
+  // A dropped connection (not an error reply) is tried again for reads only; a save is never sent twice.
+  for (let tries = method === 'GET' ? 3 : 1; ; ) {
+    try { res = await fetch(path, opts); break; } catch (e) {
+      if (--tries <= 0) throw new Error('numbr could not be reached. Check it is still running, then try again.');
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
   let data;
   try { data = await res.json(); } catch { data = { error: 'The app returned an unexpected response' }; }
   if (!res.ok) throw new Error(data.error || 'Request failed');
@@ -282,7 +287,7 @@ async function refreshState() {
   const made = (st.generated || []).filter(g => !g.skipped);
   const skipped = (st.generated || []).filter(g => g.skipped);
   if (made.length) toast(`Created ${made.length} recurring transaction${made.length > 1 ? 's' : ''}`);
-  if (skipped.length) toast(`${skipped.length} recurring transaction(s) were skipped – see the Dashboard`, true);
+  if (skipped.length) toast(`${skipped.length} recurring transaction(s) were skipped – see Settings → Audit log for why`, true);
 }
 
 function page(title, sub, actions, body) {
@@ -448,6 +453,8 @@ async function router() {
   const hash = location.hash || '#/dashboard';
   const [path, qs] = hash.split('?');
   QS = new URLSearchParams(qs || '');
+  // The Dashboard uses the darker colours (body.dash-dark in app.css); every other screen stays light.
+  document.body.classList.toggle('dash-dark', path === '#/dashboard');
   const sec = path.slice(2);
   $$('#nav nav a', document).forEach(a => {
     const s = a.dataset.sec;
@@ -679,48 +686,593 @@ async function alertForm(id) {
 }
 
 // ---------------------------------------------------------------- dashboard
+// The user picks which visuals show (settings.dashboard_layout, a list of {id, type, opts}). The server works out
+// every figure from the ledger (report_lines, so shared accounts count at the user's share) and budgets; the
+// charts below are hand-drawn SVG, no libraries. Money arrives in cents.
+const DASH_KINDS = {
+  tile: { name: 'Account tile', multi: true, setup: true, desc: 'Any account or group: its figure now and a 12-month trend. Tiles sit together along the top.' },
+  net_worth: { name: 'Net worth over time', desc: 'Everything you own minus everything you owe, month by month.' },
+  profit_forecast: { name: 'Profit outlook', desc: 'Profit so far this financial year against your budget, and where both are heading by June.' },
+  in_out: { name: 'Money in vs money out', desc: 'Income and spending for each of the last 12 months, with profit as a line.' },
+  budget_used: { name: 'Budget used so far', setup: true, desc: 'How much of each spending budget you have used.' },
+  dollar: { name: 'Where each dollar went', desc: '100 squares showing how every dollar that came in this year was spent or kept.' },
+  yoy: { name: 'This year vs last year', desc: 'Each account now, against the same dates last year or last month.' },
+  next_days: { name: 'Coming up', wide: true, desc: 'Recurring money due in and out over the next few weeks.' },
+  calendar: { name: 'Spending calendar', wide: true, multi: true, setup: true, desc: 'One square per day for the last year. Darker days had more spending.' },
+  goals: { name: 'Savings goals', setup: true, desc: 'Set a target for any account and watch the ring fill up.' },
+  two_years: { name: 'Same account, two years', multi: true, setup: true, desc: 'This financial year drawn over last year, month by month.' },
+};
+const DASH = { layout: [], widgets: {}, edit: false };
+const BU_MAX = 8;   // Budget used so far: most rows the card can show (BU_ROWS in app.py)
+
+// Chart helpers. Values are cents; labels show whole dollars.
+const wfmt = c => (c < 0 ? '-$' : '$') + Math.round(Math.abs(c) / 100).toLocaleString('en-AU');
+const sfmt = c => (c > 0 ? '+' : '') + wfmt(c);
+const kfmt = c => {
+  const a = Math.abs(c) / 100, s = c < 0 ? '-' : '';
+  if (a >= 1e6) return `${s}$${(a / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
+  if (a >= 1000) return `${s}$${(a / 1000).toFixed(a >= 100000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  return `${s}$${Math.round(a)}`;
+};
+const monShort = ym => new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1, 1).toLocaleDateString('en-AU', { month: 'short' });
+const dayShort = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-AU', { day: 'numeric', month: 'short' });
+const lin = (d0, d1, r0, r1) => v => (d1 === d0 ? (r0 + r1) / 2 : r0 + (v - d0) / (d1 - d0) * (r1 - r0));
+const sumOf = a => a.reduce((s, v) => s + v, 0);
+// Straight lines between points: smoothed curves overshoot and would show figures that never happened.
+const pathOf = pts => pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('');
+// fixed: keep the drawn size (inside a scrolling box) instead of shrinking to fit the card.
+const svgBox = (w, h, body, label, fixed = false) => `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}"${fixed ? ` style="width:${w}px;max-width:none"` : ''}>${body}</svg>`;
+const fillOf = v => `style="fill:var(--${v})"`;
+const strokeOf = (v, w = 2, dash = '') => `style="stroke:var(--${v});stroke-width:${w};fill:none${dash ? `;stroke-dasharray:${dash}` : ''}"`;
+const tipOf = t => `data-tip="${esc(t)}"`;
+const gradOf = (id, c, a = .3) => `<defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:var(--${c});stop-opacity:${a}"/><stop offset="1" style="stop-color:var(--${c});stop-opacity:0"/></linearGradient></defs>`;
+const legendOf = items => `<div class="dlegend">${items.map(([c, t, kind]) => `<span><i class="${kind || ''}" style="--c:var(--${c})"></i>${t}</span>`).join('')}</div>`;
+// Round axis ends and 3-5 ticks for a set of cent values (always including zero).
+function niceScale(vals, n = 4) {
+  let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  if (lo === hi) hi = lo + 100000;
+  const raw = (hi - lo) / n, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  const a = Math.floor(lo / step) * step, b = Math.ceil(hi / step) * step, ticks = [];
+  for (let v = a; v <= b + step / 2; v += step) ticks.push(Math.round(v));
+  return { lo: a, hi: b, ticks };
+}
+const yAxisOf = (y, ticks, x0, x1) => ticks.map(t => `<line class="${t === 0 ? 'zl' : 'gl'}" x1="${x0}" x2="${x1}" y1="${y(t)}" y2="${y(t)}"/><text x="${x0 - 6}" y="${y(t) + 3.5}" text-anchor="end">${kfmt(t)}</text>`).join('');
+const monthTicks = (months, x, y0, every = 1, strong = -1) => months.map((m, i) => i % every && i !== strong ? '' :
+  `<text x="${x(i)}" y="${y0}" text-anchor="middle" class="${i === strong ? 'strong' : ''}">${monShort(m)}</text>`).join('');
+// Is a rise good news for this kind of account? Assets, income and equity: yes. Spending and debts: no.
+const riseIsGood = type => !['liability', 'expense', 'cos'].includes(type);
+const toneOf = type => (['liability', 'expense', 'cos'].includes(type) ? 'out' : type === 'equity' ? 'profit' : 'in');
+const shorten = (s, n = 18) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const seg = (key, choices, cur) => `<span class="dseg" data-k="${key}">${choices.map(([v, t]) =>
+  `<button type="button" data-v="${v}" class="${String(v) === String(cur) ? 'on' : ''}">${t}</button>`).join('')}</span>`;
+const budgetLink = '<a href="#/budgets">Build a budget</a>';
+
+// Each draw function returns {title, sub, tools, body} for a card (tiles return their own html).
+function drawTile(w, d) {
+  if (d.missing) return `<div class="dtile missing" data-id="${w.id}"><div class="t">Account tile</div><div class="muted">This account or group no longer exists. Edit or remove this tile.</div>${DASH.edit ? editTools(w, true) : ''}</div>`;
+  const x = lin(0, 11, 3, 177), lo = Math.min(...d.spark), hi = Math.max(...d.spark), pad = (hi - lo) * .12 || 100;
+  const y = lin(lo - pad, hi + pad, 42, 4), pts = d.spark.map((v, i) => [x(i), y(v)]), tone = toneOf(d.type);
+  let note;
+  if (d.kind === 'bs' || w.opts.period === 'month') {
+    const ch = d.value - d.compare, good = ch === 0 ? null : (ch > 0) === riseIsGood(d.type);
+    note = `<div class="d ${good === null ? '' : good ? 'up' : 'down'}">${ch === 0 ? 'No change' : `${ch > 0 ? '▲' : '▼'} ${wfmt(Math.abs(ch))}`} <span>${d.kind === 'bs' ? d.compare_label : 'on last month'}</span></div>`;
+  } else note = `<div class="d"><span>${d.compare_label} ${wfmt(d.compare)}</span></div>`;
+  const val = `<span class="v${d.value < 0 ? ' neg' : ''}">${wfmt(d.value)}</span>`;
+  return `<div class="dtile" data-id="${w.id}"><div class="t" title="${esc(d.name)}">${esc(d.name)}</div>
+    ${d.kind === 'pl' ? `<div class="p">${esc(d.period_label)}</div>` : ''}
+    ${d.href ? `<a href="${d.href}" class="vlink">${val}</a>` : val}${note}
+    ${svgBox(180, 46, gradOf('tg-' + w.id, tone, .22) + `<path d="${pathOf(pts)}L177 46L3 46Z" style="fill:url(#tg-${w.id})"/><path d="${pathOf(pts)}" ${strokeOf(tone, 1.8)}/>` +
+      pts.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === 11 ? 3 : 6}" style="fill:${i === 11 ? `var(--${tone})` : 'transparent'}" ${tipOf(`${monShort(d.months[i])}: ${wfmt(d.spark[i])}`)}/>`).join(''), `${d.name}, last 12 months`)}
+    ${DASH.edit ? editTools(w, true) : ''}</div>`;
+}
+
+// Every 2nd month label when the chart is too narrow for all 12.
+const monthEvery = W => (W >= 440 ? 1 : 2);
+
+function drawProfitForecast(w, d, W = 520, H = 240) {
+  // Profit outlook: profit so far against the budget, and where both end up by June. H grows to fill the card's row.
+  const title = 'Profit outlook', L = 40, R = 58, T = 32, B = 22, ci = d.actual.length - 1, now = d.actual[ci];
+  const fc = d.forecast ? [now, ...d.forecast] : [];
+  const sc = niceScale([...d.actual, ...fc, ...(d.budget || [])]), x = lin(0, 11, L + 8, W - R), y = lin(sc.lo, sc.hi, H - B, T);
+  const ap = d.actual.map((v, i) => [x(i), y(v)]), fp = fc.map((v, i) => [x(ci + i), y(v)]);
+  let body = yAxisOf(y, sc.ticks, L, W), sub;
+  if (d.budget) {
+    const bp = d.budget.map((v, i) => [x(i), y(v)]), bNow = [x(ci), y(d.budget_to_date)], gap = now - d.budget_to_date, ahead = gap >= 0, tone = ahead ? 'good' : 'bad';
+    const end = fc.length ? fc[fc.length - 1] : now, goal = d.budget[11];
+    // The gap to budget so far, then the same gap carried on between the forecast and the budget.
+    body += `<path d="${pathOf([...ap, bNow, ...bp.slice(0, ci).reverse()])}Z" style="fill:var(--${tone});opacity:.18"/>`;
+    if (fp.length > 1) body += `<path d="${pathOf([...fp, ...bp.slice(ci + 1).reverse(), bNow])}Z" style="fill:var(--${tone});opacity:.07"/>`;
+    body += `<line x1="${x(ci)}" x2="${x(ci)}" y1="${T - 6}" y2="${H - B}" style="stroke:var(--ink-3);stroke-width:1;stroke-dasharray:2 3"/><text x="${x(ci)}" y="${T - 12}" text-anchor="${ci > 7 ? 'end' : ci < 3 ? 'start' : 'middle'}" class="strong" style="fill:var(--${tone})">Today: ${kfmt(Math.abs(gap))} ${ahead ? 'ahead of' : 'behind'} budget</text>`;
+    body += `<path d="${pathOf(bp)}" ${strokeOf('ink-3', 1.3, '4 3')}/>` +
+      bp.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="5" style="fill:transparent" ${tipOf(`${monShort(d.months[i])} budget (added up): ${wfmt(d.budget[i])}`)}/>`).join('');
+    if (fp.length > 1) body += `<path d="${pathOf(fp)}" ${strokeOf('in', 1.5, '4 4')}/>` + fp.slice(1).map((p, i) => { const m = ci + 1 + i;
+      return `<circle cx="${p[0]}" cy="${p[1]}" r="2.4" style="fill:var(--panel);stroke:var(--in);stroke-width:1.4" ${tipOf(`${monShort(d.months[m])} expected: ${wfmt(d.forecast[i])}\nBudget: ${wfmt(d.budget[m])}\nDifference: ${sfmt(d.forecast[i] - d.budget[m])}`)}/>`; }).join('');
+    // Today's two figures: the higher one labelled above-left of its point, the lower one below-right, so they
+    // never sit on each other or on the lines. In June the end labels already show them.
+    if (ci < 11) {
+      const pts = [[y(now), `${kfmt(now)} so far`, 'strong', `fill:var(--in)`], [y(d.budget_to_date), `${kfmt(d.budget_to_date)} budget`, 'lbl', 'font-weight:600']];
+      const [up, low] = pts[0][0] <= pts[1][0] ? pts : [pts[1], pts[0]];
+      const lx = ci < 2 ? [x(ci) + 7, 'start'] : [x(ci) - 7, 'end'], rx = ci > 9 ? [x(ci) - 7, 'end'] : [x(ci) + 7, 'start'];
+      body += `<text x="${lx[0]}" y="${Math.max(T + 4, up[0] - 8)}" text-anchor="${lx[1]}" class="${up[2]}" style="${up[3]}">${up[1]}</text>` +
+        `<text x="${rx[0]}" y="${Math.min(H - B - 4, low[0] + 16)}" text-anchor="${rx[1]}" class="${low[2]}" style="${low[3]}">${low[1]}</text>`;
+    }
+    // End-of-year labels, pushed apart when the two lines finish close together.
+    const e1 = fp.length > 1 ? fp[fp.length - 1] : ap[ci], e2 = bp[11], near = Math.abs(e1[1] - e2[1]) < 28, hiFirst = e1[1] <= e2[1];
+    const y1 = near ? (hiFirst ? Math.min(e1[1], e2[1] - 14) : Math.max(e1[1], e2[1] + 14)) : e1[1];
+    const y2 = near ? (hiFirst ? y1 + 28 : y1 - 28) : e2[1];
+    body += `<text x="${e1[0] + 7}" y="${y1}" class="strong" style="fill:var(--in)">${kfmt(end)}</text><text x="${e1[0] + 7}" y="${y1 + 13}">${fp.length > 1 ? 'expected' : 'so far'}</text>`;
+    body += `<text x="${e2[0] + 7}" y="${y2}" class="lbl" style="font-weight:600">${kfmt(goal)}</text><text x="${e2[0] + 7}" y="${y2 + 13}">budget</text>`;
+    sub = `Profit for ${d.fy_label}, added up month by month. ` + (fp.length > 1 ?
+      `The expected line assumes every month from ${monShort(d.months[ci + 1])} goes exactly to budget, so today's gap carries through to ${monShort(d.months[11])}.` :
+      'Hover over a month for its figures.');
+  } else sub = `Profit for ${d.fy_label}, added up month by month. ${budgetLink} for the year to compare against it and see where it is heading.`;
+  body += gradOf('pf-' + w.id, 'in', .12) + `<path d="${pathOf(ap)}L${ap[ci][0]} ${y(Math.max(sc.lo, 0))}L${ap[0][0]} ${y(Math.max(sc.lo, 0))}Z" style="fill:url(#pf-${w.id})"/>` +
+    `<path d="${pathOf(ap)}" ${strokeOf('in', 1.8)}/>` + ap.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === ci ? 3.5 : 2.2}" style="fill:var(--in);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}${i === ci ? ' (so far)' : ''}: ${wfmt(d.actual[i])}${d.budget ? `\nBudget: ${wfmt(i === ci ? d.budget_to_date : d.budget[i])}` : ''}`)}/>`).join('');
+  if (!d.budget) body += `<text x="${ap[ci][0]}" y="${ap[ci][1] - 9}" text-anchor="${ci > 9 ? 'end' : 'middle'}" class="strong" style="fill:var(--in)">${kfmt(now)} so far</text>`;
+  body += monthTicks(d.months, x, H - 6, monthEvery(W), ci);
+  const legend = legendOf([['in', 'Profit so far, added up', 'ln'], ...(d.budget ? [['in', 'Expected, adding each later month\'s budget', 'dash'], ['ink-3', 'Budget, added up', 'dash']] : [])]);
+  return { title, sub, body: svgBox(W, H, body, 'Profit so far and expected profit against budget') + legend };
+}
+
+function drawInOut(w, d, W = 520) {
+  const H = 210, L = 40, R = 6, B = 22, n = d.months.length, bw = (W - L - R) / n, every = monthEvery(W);
+  const sc = niceScale([...d.income, ...d.spending, ...d.profit]), y = lin(sc.lo, sc.hi, H - B, 12), cx = i => L + i * bw + bw / 2;
+  const body = [yAxisOf(y, sc.ticks, L, W - R)];
+  d.months.forEach((m, i) => {
+    const bwid = Math.min(bw * .2, 9), hIn = Math.abs(y(d.income[i]) - y(0)), hOut = Math.abs(y(d.spending[i]) - y(0));
+    body.push(`<rect x="${cx(i) - bwid - 1}" y="${Math.min(y(d.income[i]), y(0))}" width="${bwid}" height="${hIn}" rx="1.5" ${fillOf('in')} ${tipOf(`${monShort(m)} money in: ${wfmt(d.income[i])}`)}/>`,
+      `<rect x="${cx(i) + 1}" y="${Math.min(y(d.spending[i]), y(0))}" width="${bwid}" height="${hOut}" rx="1.5" ${fillOf('out')} ${tipOf(`${monShort(m)} money out: ${wfmt(d.spending[i])}`)}/>`);
+  });
+  const pp = d.profit.map((v, i) => [cx(i), y(v)]);
+  body.push(`<path d="${pathOf(pp)}" ${strokeOf('profit', 1.6)}/>`, ...pp.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="2.4" style="fill:var(--panel);stroke:var(--profit);stroke-width:1.4" ${tipOf(`${monShort(d.months[i])} profit: ${wfmt(d.profit[i])}`)}/>`));
+  body.push(d.months.map((m, i) => (i % every && i !== n - 1 ? '' : `<text x="${cx(i)}" y="${H - 6}" text-anchor="middle" class="${i === n - 1 ? 'strong' : ''}">${monShort(m)}</text>`)).join(''));
+  const tin = sumOf(d.income), tout = sumOf(d.spending);
+  return { title: 'Money in vs money out', sub: `Last 12 months: ${wfmt(tin)} in, ${wfmt(tout)} out, leaving <b class="${tin - tout < 0 ? 'neg' : ''}">${wfmt(tin - tout)}</b>.`,
+    body: svgBox(W, H, body.join(''), 'Income and spending by month') + legendOf([['in', 'Money in'], ['out', 'Money out'], ['profit', 'Profit (what was left)', 'ln']]) };
+}
+
+function drawBudgetUsed(w, d) {
+  const chosen = (w.opts.track || []).length > 0;
+  const tools = seg('mode', [['to_date', 'So far'], ['full_year', 'Whole year']], w.opts.mode) +
+    (chosen ? '' : seg('by', [['account', 'Accounts'], ['group', 'Groups']], w.opts.by || 'account')) +
+    `<button type="button" class="small dbu-pick" title="Choose which accounts or groups to track">${chosen ? 'Change' : 'Choose'}</button>`;
+  if (!d.has_budget) return { title: 'Budget used so far', tools, sub: `There is no budget for ${d.fy_label} yet. ${budgetLink} to track spending against it.`, body: '' };
+  if (!d.rows.length) return { title: 'Budget used so far', tools, sub: chosen ? 'The accounts or groups chosen for this visual no longer exist. Choose others.' : `Your ${d.fy_label} budget has no spending accounts in it.`, body: '' };
+  const full = d.mode === 'full_year';
+  const body = d.rows.map(r => {
+    const pct = r.budget ? r.actual / r.budget * 100 : 0, over = r.actual > r.budget, max = Math.max(r.budget, r.actual) * 1.15 || 1;
+    const of = r.budget ? `<span class="muted">of ${wfmt(r.budget)}</span> <b style="color:var(--${over ? 'out' : 'in'})">${Math.round(pct)}%</b>` : '<span class="muted">no budget</span>';
+    return `<div class="bul"><div class="bul-h"><span>${esc(r.name)}</span><span><b>${wfmt(r.actual)}</b> ${of}</span></div>
+      <div class="bul-t" ${tipOf(`${r.name}: ${Math.round(pct)}% of the ${full ? 'year\'s budget' : 'budget so far'} used`)}><i style="width:${Math.min(r.actual / max, 1) * 100}%;background:var(--${over ? 'out' : 'in'})"></i><b style="left:${r.budget / max * 100}%"></b></div></div>`;
+  }).join('') + (d.more ? `<div class="muted" style="font-size:12px">and ${d.more} more ${d.by === 'group' ? 'group' : 'account'}${d.more === 1 ? '' : 's'} with a budget. Use Choose to pick which ones show.</div>` : '');
+  return { title: 'Budget used so far', tools,
+    sub: (full ? `Spending so far in ${d.fy_label} against the budget for the whole year.` : `Spending so far in ${d.fy_label} against the budget up to today.`) +
+      (chosen ? '' : ` Showing the ${d.by === 'group' ? 'groups' : 'accounts'} with the biggest budgets.`),
+    body: body + `<div class="dlegend"><span><i style="--c:var(--in)"></i>Within budget</span><span><i style="--c:var(--out)"></i>Over budget</span><span><i class="tick"></i>${full ? 'Budget for the year' : 'Budget up to today'}</span></div>` };
+}
+
+const SQUARE_COLOURS = ['s2', 's4', 's3', 's5', 's7', 's6'];
+function drawDollar(w, d) {
+  const tools = seg('by', [['account', 'Accounts'], ['group', 'Groups']], w.opts.by);
+  const title = 'Where each dollar went';
+  if (d.income <= 0 && d.spent <= 0) return { title, tools, sub: `Nothing has come in or gone out yet in ${d.fy_label}.`, body: '' };
+  const kept = d.kept > 0, base = kept ? d.income : d.spent;
+  const cats = (kept ? [['Kept as profit', d.kept, 'in']] : []).concat(d.parts.map((p, i) => [p.name, p.amount, p.name === 'Everything else' ? 's6' : SQUARE_COLOURS[i % 5]]));
+  const raw = cats.map(c => c[1] / base * 100), cells = raw.map(Math.floor);
+  raw.map((v, i) => [v - cells[i], i]).sort((a, b) => b[0] - a[0]).slice(0, Math.max(0, 100 - sumOf(cells))).forEach(([, i]) => cells[i]++);
+  const order = cells.flatMap((n, i) => Array(n).fill(i)).slice(0, 100), s = 17, g = 3;
+  const grid = order.map((ci, k) => `<rect x="${(k % 10) * (s + g)}" y="${Math.floor(k / 10) * (s + g)}" width="${s}" height="${s}" rx="4" ${fillOf(cats[ci][2])} ${tipOf(`${cats[ci][0]}: ${wfmt(cats[ci][1])} (${cells[ci]}c of every $1)`)}/>`).join('');
+  const head = kept ? `<div class="bignum" style="color:var(--in)">${cells[0]}c</div><div class="dcap">kept from every $1 that came in during ${d.fy_label}</div>`
+    : `<div class="bignum neg">${wfmt(d.spent - d.income)}</div><div class="dcap">more went out than came in during ${d.fy_label}. Squares show how the spending splits.</div>`;
+  return { title, tools, body: `<div class="waffle"><div class="wgrid">${svgBox(197, 197, grid, '100 squares, each one cent of every dollar')}</div>
+    <div class="wkey">${head}${cats.map((c, i) => `<div class="wrow"><span><i style="background:var(--${c[2]})"></i>${esc(c[0])}</span><b>${cells[i]}c</b></div>`).join('')}</div></div>` };
+}
+
+function drawYoy(w, d, W = 520) {
+  const by = w.opts.by || 'account';
+  const tools = seg('mode', [['year', 'Year'], ['month', 'Month']], w.opts.mode) + seg('side', [['spending', 'Spending'], ['income', 'Income']], w.opts.side) +
+    seg('by', [['account', 'Accounts'], ['group', 'Groups']], by);
+  const title = d.mode === 'year' ? 'This year vs last year' : 'This month vs last month';
+  const what = d.side === 'income' ? 'income' : 'spending';
+  const range = r => `${dayShort(r[0])} – ${dfmt(r[1])}`;
+  if (!d.rows.length) return { title, tools, sub: `No ${what} in either period yet.`, body: '' };
+  const RH = 21, L = Math.min(170, Math.max(110, W * .3)), R = 56, H = RH * d.rows.length + 26;
+  const sc = niceScale(d.rows.flatMap(r => [r.now, r.then]), W >= 440 ? 4 : 3), x = lin(sc.lo, sc.hi, L, W - R);
+  const upTone = d.side === 'income' ? 'in' : 'out', downTone = d.side === 'income' ? 'out' : 'in';
+  const body = sc.ticks.map(t => `<line class="gl" x1="${x(t)}" x2="${x(t)}" y1="4" y2="${H - 20}"/><text x="${x(t)}" y="${H - 6}" text-anchor="middle">${kfmt(t)}</text>`).join('') +
+    d.rows.map((r, i) => {
+      const yy = 12 + i * RH, ch = r.now - r.then, c = ch > 0 ? upTone : ch < 0 ? downTone : 'ink-3';
+      return `<text x="${L - 8}" y="${yy + 3.5}" text-anchor="end" class="lbl">${esc(shorten(r.name, Math.floor(L / 6.2)))}<title>${esc(r.name)}</title></text>` +
+        `<line x1="${x(r.then)}" x2="${x(r.now)}" y1="${yy}" y2="${yy}" style="stroke:var(--${c});stroke-width:2;opacity:.5"/>` +
+        `<circle cx="${x(r.then)}" cy="${yy}" r="3.5" style="fill:var(--panel);stroke:var(--ink-3);stroke-width:1.4" ${tipOf(`${r.name}, ${d.labels[1].toLowerCase()}: ${wfmt(r.then)}`)}/>` +
+        `<circle cx="${x(r.now)}" cy="${yy}" r="4" ${fillOf(c === 'ink-3' ? 'ink-2' : c)} ${tipOf(`${r.name}, ${d.labels[0].toLowerCase()}: ${wfmt(r.now)}`)}/>` +
+        `<text x="${W}" y="${yy + 3.5}" text-anchor="end" class="strong" style="fill:var(--${c})">${ch ? (ch > 0 ? '+' : '-') + kfmt(Math.abs(ch)) : 'same'}</text>`;
+    }).join('');
+  const ch = d.now_total - d.then_total;
+  return { title, tools, sub: `Total ${what} ${wfmt(d.now_total)}, ${ch === 0 ? 'the same as' : `${wfmt(Math.abs(ch))} ${ch > 0 ? 'more' : 'less'} than`} the same period before. Biggest increase first.`,
+    body: svgBox(W, H, body, `${what} compared with the same period before`) +
+      `<div class="dlegend"><span><i class="ring"></i>${range(d.then_range)}</span><span><i class="dot"></i>${range(d.now_range)}</span>` +
+      `${d.more ? `<span class="muted">and ${d.more} more ${by === 'group' ? 'group' : 'account'}${d.more === 1 ? '' : 's'} with smaller changes</span>` : ''}</div>` };
+}
+
+function drawNextDays(w, d, W = 1060) {
+  const tools = seg('days', [[14, '14 days'], [30, '30 days'], [60, '60 days']], w.opts.days);
+  const title = `Coming up in the next ${d.days} days`;
+  if (!d.items.length) return { title, tools, sub: `No recurring transactions are due in the next ${d.days} days. <a href="#/recurring">Set some up</a>.`, body: '' };
+  const H = 180, cy = 84, t0 = new Date(d.start + 'T00:00:00');
+  const off = iso => Math.round((new Date(iso + 'T00:00:00') - t0) / 864e5), x = lin(0, d.days, 24, W - 24), dayW = (W - 48) / d.days;
+  // One stem up (money in) and one down (money out) per day, each the total for that day.
+  const byDay = new Map();
+  d.items.forEach(it => {
+    const k = it.date, e = byDay.get(k) || { in: 0, out: 0, items: [] };
+    e[it.dir] += it.amount; e.items.push(it); byDay.set(k, e);
+  });
+  const big = Math.max(...[...byDay.values()].flatMap(e => [e.in, e.out])), h = v => 8 + Math.sqrt(v / big) * 54;
+  // Label each day's total, biggest first, skipping any that would overlap a label already placed on the same side.
+  const labelled = new Set(), placed = { in: [], out: [] };
+  [...byDay].flatMap(([date, e]) => ['in', 'out'].filter(k => e[k]).map(k => [k, x(off(date)), e[k], date]))
+    .sort((a, b) => b[2] - a[2]).forEach(([k, xx, v, date]) => {
+      const wide = kfmt(v).length * 6.5 + 8;
+      if (placed[k].some(([px, pw]) => Math.abs(px - xx) < (pw + wide) / 2)) return;
+      placed[k].push([xx, wide]); labelled.add(`${date}|${k}`);
+    });
+  let body = `<line x1="${x(0)}" x2="${x(d.days)}" y1="${cy}" y2="${cy}" style="stroke:var(--line);stroke-width:1.5"/>`;
+  const step = d.days > 30 ? 7 : d.days > 14 ? 5 : 2;
+  for (let i = 0; i <= d.days; i += step) body += `<line x1="${x(i)}" x2="${x(i)}" y1="${cy - 3}" y2="${cy + 3}" style="stroke:var(--ink-3)"/>`;
+  let hover = '';
+  for (const [date, e] of byDay) {
+    const xx = x(off(date)), sign = it => (it.dir === 'in' ? '+' : '-');
+    for (const dir of ['in', 'out']) {
+      const v = e[dir]; if (!v) continue;
+      const up = dir === 'in', len = h(v), yy = up ? cy - len : cy + len, r = 2.2 + Math.sqrt(v / big) * 2;
+      body += `<line x1="${xx}" x2="${xx}" y1="${cy}" y2="${yy}" style="stroke:var(--${dir});stroke-width:1.5;opacity:.7"/><circle cx="${xx}" cy="${yy}" r="${r}" ${fillOf(dir)}/>`;
+      if (labelled.has(`${date}|${dir}`)) body += `<text x="${xx}" y="${up ? yy - r - 4 : yy + r + 11}" text-anchor="middle" class="strong" style="fill:var(--${dir})">${up ? '+' : '-'}${kfmt(v)}</text>`;
+    }
+    const lines = [new Date(date + 'T00:00:00').toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' }),
+      ...(e.in ? [`Coming in: ${wfmt(e.in)}`] : []), ...(e.out ? [`Going out: ${wfmt(e.out)}`] : []), '',
+      ...e.items.map(it => `${sign(it)}${wfmt(it.amount)}  ${it.name}`)];
+    // A see-through column over the whole day, so hovering anywhere above or below the date shows the breakdown.
+    hover += `<rect x="${xx - Math.max(dayW, 10) / 2}" y="0" width="${Math.max(dayW, 10)}" height="${H - 16}" style="fill:transparent" class="dhover" ${tipOf(lines.join('\n'))}/>`;
+  }
+  const marks = [0, Math.round(d.days / 3), Math.round(2 * d.days / 3), d.days];
+  body += marks.map((m, i) => `<text x="${x(m)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === 3 ? 'end' : 'middle'}" class="${i === 0 ? 'strong' : ''}">${i === 0 ? 'Today' : dayShort(isoDate(new Date(t0.getTime() + m * 864e5)))}</text>`).join('');
+  return { title, tools, sub: `From your recurring transactions: <b class="pos">${wfmt(d.in)}</b> due in and <b class="neg">${wfmt(d.out)}</b> due out. Hover a day for what makes it up.`,
+    body: svgBox(W, H, body + hover, `Recurring money due in and out over the next ${d.days} days`) + legendOf([['in', `Coming in ${wfmt(d.in)}`], ['out', `Going out ${wfmt(d.out)}`]]) };
+}
+
+function drawCalendar(w, d, W = 1060) {
+  const title = `Spending calendar${d.name ? ` · ${esc(d.name)}` : ''}`;
+  if (d.missing) return { title: 'Spending calendar', sub: 'This bank account no longer exists. Edit or remove this calendar.', body: '' };
+  const first = new Date(d.start + 'T00:00:00'), last = new Date(d.end + 'T00:00:00'), wd = dt => (dt.getDay() + 6) % 7;
+  // Each month is its own block of week columns with a gap after it, so it's clear which days belong to which month.
+  const months = [];
+  for (let m = new Date(first.getFullYear(), first.getMonth(), 1); m <= last; m = new Date(m.getFullYear(), m.getMonth() + 1, 1)) {
+    const from = m < first ? first : m, end = new Date(m.getFullYear(), m.getMonth() + 1, 0), to = end > last ? last : end;
+    const col = dt => Math.floor((wd(m) + dt.getDate() - 1) / 7), c0 = col(from);
+    months.push({ m, from, to, col: dt => col(dt) - c0, cols: col(to) - c0 + 1 });
+  }
+  const L = 28, T = 16, MG = 8, cols = sumOf(months.map(b => b.cols));
+  const step = Math.max(10, Math.min(17, (W - L - MG * (months.length - 1)) / cols)), g = step > 13 ? 2.5 : 2, s = step - g;
+  const vals = Object.values(d.days).sort((a, b) => a - b), q = p => vals[Math.min(vals.length - 1, Math.floor(vals.length * p))] || 0;
+  const cuts = [q(.25), q(.5), q(.75)], lvl = v => (!v ? 0 : v <= cuts[0] ? 1 : v <= cuts[1] ? 2 : v <= cuts[2] ? 3 : 4), op = [0, .25, .45, .7, 1];
+  let body = '', x0 = L;
+  for (const b of months) {
+    // Name each month over its block (too-short first blocks stay unnamed); January also shows its year.
+    if (b.cols >= 3) body += `<text x="${x0}" y="10" class="lbl">${monShort(isoDate(b.m).slice(0, 7))}${b.m.getMonth() === 0 ? ` ’${String(b.m.getFullYear()).slice(2)}` : ''}</text>`;
+    for (let day = new Date(b.from); day <= b.to; day.setDate(day.getDate() + 1)) {
+      const iso = isoDate(day), v = d.days[iso] || 0, l = lvl(v), xx = x0 + b.col(day) * step, yy = T + wd(day) * step;
+      body += `<rect x="${xx.toFixed(1)}" y="${yy.toFixed(1)}" width="${s.toFixed(1)}" height="${s.toFixed(1)}" rx="2" style="fill:${l ? 'var(--out)' : 'var(--track)'};opacity:${l ? op[l] : 1}" ${tipOf(`${day.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}: ${v ? wfmt(v) + ' spent' : 'nothing spent'}`)}/>`;
+    }
+    x0 += b.cols * step + MG;
+  }
+  ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'].forEach((t, dd) => { if (t) body += `<text x="0" y="${T + dd * step + s / 2 + 3}" style="font-size:9px">${t}</text>`; });
+  const PW = Math.max(W, Math.ceil(x0 - MG)), H = T + 7 * step + 18;
+  body += `<text x="${PW - 5 * 13 - 32}" y="${H - 3}" style="font-size:9.5px" text-anchor="end">Less</text>` + op.map((o, i) => `<rect x="${PW - 5 * 13 - 27 + i * 13}" y="${H - 12}" width="10" height="10" rx="2" style="fill:${i ? 'var(--out)' : 'var(--track)'};opacity:${i ? o : 1}"/>`).join('') + `<text x="${PW}" y="${H - 3}" style="font-size:9.5px" text-anchor="end">More</text>`;
+  const total = sumOf(vals), busiest = Object.entries(d.days).sort((a, b) => b[1] - a[1])[0];
+  return { title, sub: total ? `${wfmt(total)} spent over the last 12 months${busiest ? `. Biggest day: ${dfmt(busiest[0])} (${wfmt(busiest[1])})` : ''}.` : 'Nothing spent in the last 12 months.',
+    body: `<div class="dscroll">${svgBox(PW, H, body, 'Calendar of daily spending, last 12 months', PW > W)}</div>` };
+}
+
+function drawNetWorth(w, d, W = 520) {
+  const H = 210, L = 44, R = 16, T = 20, B = 22, sc = niceScale(d.net), x = lin(0, 11, L + 6, W - R), y = lin(sc.lo, sc.hi, H - B, T);
+  const p = d.net.map((v, i) => [x(i), y(v)]), hi = d.net.indexOf(Math.max(...d.net)), base = y(Math.max(sc.lo, 0));
+  let body = yAxisOf(y, sc.ticks, L, W - R) + gradOf('nw-' + w.id, 'profit', .2) + `<path d="${pathOf(p)}L${p[11][0]} ${base}L${p[0][0]} ${base}Z" style="fill:url(#nw-${w.id})"/><path d="${pathOf(p)}" ${strokeOf('profit', 1.8)}/>` +
+    p.map((q, i) => `<circle cx="${q[0]}" cy="${q[1]}" r="${i === hi || i === 11 ? 3.5 : 2.2}" style="fill:var(--profit);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}: ${wfmt(d.net[i])} (own ${wfmt(d.assets[i])}, owe ${wfmt(d.liabilities[i])})`)}/>`).join('');
+  if (hi !== 11) body += `<text x="${p[hi][0]}" y="${p[hi][1] - 9}" text-anchor="middle" class="lbl">Highest</text>`;
+  body += `<text x="${p[11][0] + 2}" y="${p[11][1] - 10}" text-anchor="end" class="strong">${kfmt(d.net[11])}</text>` + monthTicks(d.months, x, H - 6, monthEvery(W), 11);
+  const ch = d.net[11] - d.net[0];
+  return { title: 'Net worth over time', sub: `You own ${wfmt(d.assets[11])} and owe ${wfmt(d.liabilities[11])}. That is ${ch === 0 ? 'no change' : `<b class="${ch > 0 ? 'pos' : 'neg'}">${sfmt(ch)}</b>`} since ${monShort(d.months[0])} last year.`,
+    body: svgBox(W, H, body, 'Net worth over 12 months') };
+}
+
+const RING_COLOURS = ['profit', 'in', 's4', 's3', 's5', 's2'];
+function drawGoals(w, d) {
+  const title = 'Savings goals';
+  if (!d.goals.length) return { title, sub: 'No goals yet.', body: `<button type="button" class="small dgoal-add">Set up a goal</button>` };
+  const months = iso => { const a = new Date(S.today + 'T00:00:00'), b = new Date(iso + 'T00:00:00'); return (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth(); };
+  return { title, body: `<div class="rings">${d.goals.map((g, i) => {
+    if (g.value === null) return `<div class="ring"><div class="muted">${esc(g.name)}: its account no longer exists.</div></div>`;
+    const f = Math.max(0, g.value / g.target), a1 = Math.min(f, .9999) * Math.PI * 2, c = RING_COLOURS[i % RING_COLOURS.length];
+    const left = g.target - g.value, m = g.date ? months(g.date) : 0;
+    const pace = left <= 0 ? '<span class="pos">Reached!</span>' : g.date ? (m > 0 ? `${wfmt(left / m)} a month to reach by ${monShort(g.date.slice(0, 7))} ${g.date.slice(0, 4)}` : `Target date ${dfmt(g.date)} has passed`) : `${wfmt(left)} to go`;
+    return `<div class="ring" ${tipOf(`${g.name} (${g.account}): ${wfmt(g.value)} of ${wfmt(g.target)}`)}>${svgBox(110, 110, `<circle cx="55" cy="55" r="44" style="fill:none;stroke:var(--track);stroke-width:12"/>` +
+      (f > 0 ? `<path d="${arcOf(55, 55, 38, 50, 0, a1)}" ${fillOf(c)}/>` : '') + `<text x="55" y="61" text-anchor="middle" class="big" style="font-size:20px">${Math.round(f * 100)}%</text>`, `${g.name} progress`)}
+      <div class="rn">${esc(g.name)}</div><div class="rv">${kfmt(g.value)} of ${kfmt(g.target)}</div><div class="rp">${pace}</div></div>`;
+  }).join('')}</div>` };
+}
+const polarOf = (cx, cy, r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+function arcOf(cx, cy, r0, r1, a0, a1) {
+  const big = a1 - a0 > Math.PI ? 1 : 0, [x0, y0] = polarOf(cx, cy, r1, a0), [x1, y1] = polarOf(cx, cy, r1, a1), [x2, y2] = polarOf(cx, cy, r0, a1), [x3, y3] = polarOf(cx, cy, r0, a0);
+  return `M${x0} ${y0}A${r1} ${r1} 0 ${big} 1 ${x1} ${y1}L${x2} ${y2}A${r0} ${r0} 0 ${big} 0 ${x3} ${y3}Z`;
+}
+
+function drawTwoYears(w, d, W = 520) {
+  if (d.missing) return { title: 'Same account, two years', sub: 'This account or group no longer exists. Edit or remove this visual.', body: '' };
+  const H = 200, L = 40, R = 58, T = 14, B = 22, ci = d.this.length - 1;
+  const sc = niceScale([...d.this, ...d.last]), x = lin(0, 11, L + 6, W - R), y = lin(sc.lo, sc.hi, H - B, T);
+  const lp = d.last.map((v, i) => [x(i), y(v)]), np = d.this.map((v, i) => [x(i), y(v)]);
+  let body = yAxisOf(y, sc.ticks, L, W - R + 10) + `<path d="${pathOf(lp)}" style="stroke:var(--ink-3);stroke-width:1.3;fill:none;opacity:.75"/>` +
+    lp.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="5" style="fill:transparent" ${tipOf(`${monShort(d.months[i])} ${d.last_label}: ${wfmt(d.last[i])}`)}/>`).join('') +
+    `<path d="${pathOf(np)}" ${strokeOf('in', 1.8)}/>` +
+    np.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === ci ? 3.5 : 2.2}" style="fill:var(--in);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])} ${d.this_label}: ${wfmt(d.this[i])} (${d.last_label} ${wfmt(d.last[i])})`)}/>`).join('') +
+    `<text x="${lp[11][0] + 6}" y="${lp[11][1] + 3}">${d.last_label}</text><text x="${np[ci][0] + 7}" y="${np[ci][1] + 3}" class="strong" style="fill:var(--in)">${d.this_label}</text>` +
+    monthTicks(d.months, x, H - 6, monthEvery(W));
+  const ch = d.this[ci] - d.last[ci];
+  return { title: `${esc(d.name)}: this year vs last`, sub: `${d.kind === 'pl' ? `${monShort(d.months[ci])} so far` : `${monShort(d.months[ci])} balance`}: <b>${wfmt(d.this[ci])}</b>, ${ch === 0 ? 'the same as' : `${wfmt(Math.abs(ch))} ${ch > 0 ? 'more' : 'less'} than`} a year ago.`,
+    body: svgBox(W, H, body, `${d.name} this year against last year`) };
+}
+
+const DASH_DRAW = { profit_forecast: drawProfitForecast, in_out: drawInOut, budget_used: drawBudgetUsed,
+  dollar: drawDollar, yoy: drawYoy, next_days: drawNextDays, calendar: drawCalendar, net_worth: drawNetWorth, goals: drawGoals, two_years: drawTwoYears };
+
+function editTools(w, tile = false) {
+  return `<span class="dedit"><button type="button" class="tk-btn" data-act="up" title="Move ${tile ? 'left' : 'up'}" aria-label="Move ${tile ? 'left' : 'up'}">${tile ? '←' : '↑'}</button>` +
+    `<button type="button" class="tk-btn" data-act="down" title="Move ${tile ? 'right' : 'down'}" aria-label="Move ${tile ? 'right' : 'down'}">${tile ? '→' : '↓'}</button>` +
+    (DASH_KINDS[w.type].setup ? '<button type="button" class="tk-btn" data-act="edit" title="Settings" aria-label="Settings">⚙</button>' : '') +
+    '<button type="button" class="tk-btn" data-act="remove" title="Remove" aria-label="Remove">×</button></span>';
+}
+
+// Charts are drawn at the width they take on screen (not scaled to fit), so their text and lines keep their real size.
+// Matches .dgrid: two columns 16px apart (one below 900px), cards with 18px padding and a 1px border.
+function plotWidth(wide) {
+  const box = $('#dash'), cw = box && box.clientWidth ? box.clientWidth : 1100, one = innerWidth <= 900;
+  return Math.max(260, Math.floor((wide || one ? cw : (cw - 16) / 2) - 38));
+}
+
+// Charts that stretch to fill their card when the card beside them is taller, at this least height.
+const DASH_FILL = { profit_forecast: 240 };
+function dashCard(w, H) {
+  const d = DASH.widgets[w.id] || { missing: true }, k = DASH_KINDS[w.type];
+  let c;
+  try { c = d.missing && w.type !== 'calendar' && w.type !== 'two_years' ? { title: k.name, sub: 'This visual can\'t be shown. Edit or remove it.', body: '' } : DASH_DRAW[w.type](w, d, plotWidth(k.wide), H); }
+  catch (e) { c = { title: k.name, sub: `This visual couldn't be drawn (${esc(e.message)}).`, body: '' }; }
+  return `<section class="dcard${k.wide ? ' wide' : ''}" data-id="${w.id}" data-type="${w.type}"><div class="dhead"><h2>${c.title}</h2>
+    <div class="dtools">${c.tools || ''}${DASH.edit ? editTools(w) : ''}</div></div>
+    ${c.sub ? `<p class="dsub">${c.sub}</p>` : ''}<div class="dplot">${c.body}</div></section>`;
+}
+
+async function saveDashLayout(layout) {
+  try {
+    const r = await api('PUT', '/api/dashboard/layout', { layout });
+    DASH.layout = r.layout; DASH.widgets = r.widgets;
+    drawDashboard();
+    return true;
+  } catch (e) { fail(e); return false; }
+}
+const newWidgetId = type => `${type}-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+
+// Options for choosing an account or a group: groups are listed with "(group)" so they stand out.
+const refKey = r => (!r ? '' : r.group_id != null ? `g:${r.group_id}` : `a:${r.account_id}`);
+const refFrom = v => (!v ? null : v.startsWith('g:') ? { group_id: +v.slice(2) } : { account_id: +v.slice(2) });
+function refOptions(sel, types = null) {
+  let h = '<option value="">Choose an account or group…</option>';
+  for (const [t, label] of TYPE_GROUPS) {
+    if (types && !types.includes(t)) continue;
+    const gs = groupsOfType(t).sort(byName);
+    if (gs.length) h += `<optgroup label="${label} groups">` + gs.map(g => `<option value="g:${g.id}" ${sel === `g:${g.id}` ? 'selected' : ''}>${esc(g.name)} (group)</option>`).join('') + '</optgroup>';
+    const list = S.accounts.filter(a => a.type === t && (!a.archived || sel === `a:${a.id}`)).sort(byName);
+    if (list.length) h += `<optgroup label="${label}">` + list.map(a => `<option value="a:${a.id}" ${sel === `a:${a.id}` ? 'selected' : ''}>${esc(a.name)}</option>`).join('') + '</optgroup>';
+  }
+  return h;
+}
+
+// Settings for one visual. Resolves with the new opts, or null if cancelled.
+function dashSettings(type, opts = {}) {
+  const k = DASH_KINDS[type];
+  return new Promise(resolve => {
+    let inner = '';
+    if (type === 'tile' || type === 'two_years') {
+      inner = `<div class="field"><label>Account or group</label><select class="acct-pick" id="ds-ref">${refOptions(refKey(opts.ref))}</select>
+        <div class="hint">Choose a group to add up every account in it.</div></div>` +
+        (type === 'tile' ? `<div class="field"><label for="ds-period">For income and expense accounts, show</label><select id="ds-period">
+          <option value="fy" ${opts.period !== 'month' ? 'selected' : ''}>This financial year so far</option>
+          <option value="month" ${opts.period === 'month' ? 'selected' : ''}>This month so far</option></select>
+          <div class="hint">Bank, asset and loan accounts always show today's balance.</div></div>` : '');
+    } else if (type === 'calendar') {
+      inner = `<div class="field"><label for="ds-src">Show spending from</label><select id="ds-src"><option value="overall">All spending (every expense account)</option>
+        ${S.accounts.filter(a => isBank(a) && (!a.archived || a.id == opts.source)).sort(byName).map(a => `<option value="${a.id}" ${a.id == opts.source ? 'selected' : ''}>Money out of ${esc(a.name)}</option>`).join('')}</select>
+        <div class="hint">For a bank account or card, transfers between your own accounts are left out.</div></div>`;
+    } else if (type === 'budget_used') {
+      inner = `<p class="muted" style="margin-top:0">Choose up to ${BU_MAX} spending accounts or groups to track, or leave the list empty to show the ones with the biggest budgets.</p>
+        <div id="ds-track"></div><button type="button" class="small" id="ds-track-add">+ Add an account or group</button>`;
+    } else if (type === 'goals') {
+      inner = `<p class="muted" style="margin-top:0">Pick an account (or group) and a target. Progress is its balance today, or its total for this financial year for income and expense accounts.</p>
+        <div id="ds-goals"></div><button type="button" class="small" id="ds-goal-add">+ Add a goal</button>`;
+    }
+    modal(`<h2>${esc(k.name)}</h2>${inner}<div class="modal-foot"><button data-x="no">Cancel</button><button class="primary" data-x="yes">Save</button></div>`, el => {
+      const goals = (opts.goals || []).map(g => ({ ...g, ref: refKey(g.ref) }));
+      if (type === 'goals' && !goals.length) goals.push({ name: '', ref: '', target: NaN, date: '' });
+      const drawGoalRows = () => {
+        el.querySelector('#ds-goals').innerHTML = goals.map((g, i) => `<div class="dgoal" data-i="${i}">
+          <input class="g-name" placeholder="Name, e.g. Tax savings" value="${esc(g.name)}" aria-label="Goal name">
+          <select class="acct-pick g-ref" aria-label="Account">${refOptions(g.ref)}</select>
+          <input class="g-target num" inputmode="decimal" placeholder="Target $" value="${isNaN(g.target) ? '' : fmt(g.target)}" aria-label="Target">
+          <input class="g-date" type="date" value="${esc(g.date || '')}" aria-label="Target date (optional)" title="Target date (optional)">
+          <button type="button" class="tk-btn g-rm" title="Remove" aria-label="Remove">×</button></div>`).join('');
+        el.querySelectorAll('.dgoal').forEach(row => {
+          const g = goals[+row.dataset.i];
+          row.querySelector('.g-name').oninput = e => { g.name = e.target.value; };
+          row.querySelector('.g-ref').onchange = e => { g.ref = e.target.value; };
+          row.querySelector('.g-target').oninput = e => { g.target = parseMoney(e.target.value); };
+          row.querySelector('.g-date').onchange = e => { g.date = e.target.value; };
+          row.querySelector('.g-rm').onclick = () => { goals.splice(+row.dataset.i, 1); drawGoalRows(); };
+        });
+      };
+      const track = (opts.track || []).map(refKey);
+      const drawTrack = () => {
+        el.querySelector('#ds-track').innerHTML = track.map((v, i) => `<div class="dtrack" data-i="${i}">
+          <select class="acct-pick t-ref" aria-label="Account or group">${refOptions(v, ['cos', 'expense'])}</select>
+          <button type="button" class="tk-btn t-rm" title="Remove" aria-label="Remove">×</button></div>`).join('') ||
+          '<p class="muted">Nothing chosen: the biggest budgets show.</p>';
+        el.querySelectorAll('.dtrack').forEach(row => {
+          row.querySelector('.t-ref').onchange = e => { track[+row.dataset.i] = e.target.value; };
+          row.querySelector('.t-rm').onclick = () => { track.splice(+row.dataset.i, 1); drawTrack(); };
+        });
+        el.querySelector('#ds-track-add').disabled = track.length >= BU_MAX;
+      };
+      if (type === 'budget_used') {
+        drawTrack();
+        el.querySelector('#ds-track-add').onclick = () => { if (track.length < BU_MAX) { track.push(''); drawTrack(); } };
+      }
+      if (type === 'goals') { drawGoalRows(); el.querySelector('#ds-goal-add').onclick = () => { goals.push({ name: '', ref: '', target: NaN, date: '' }); drawGoalRows(); }; }
+      el.querySelector('[data-x=no]').onclick = () => { closeModal(); resolve(null); };
+      el.querySelector('[data-x=yes]').onclick = () => {
+        let o;
+        if (type === 'tile' || type === 'two_years') {
+          const ref = refFrom(el.querySelector('#ds-ref').value);
+          if (!ref) { toast('Choose an account or group', true); return; }
+          o = type === 'tile' ? { ref, period: el.querySelector('#ds-period').value } : { ref };
+        } else if (type === 'calendar') {
+          const v = el.querySelector('#ds-src').value;
+          o = { source: v === 'overall' ? 'overall' : +v };
+        } else if (type === 'budget_used') {
+          const picked = track.filter(Boolean);
+          if (new Set(picked).size !== picked.length) { toast('Each account or group can only be chosen once', true); return; }
+          o = { ...opts, track: picked.map(refFrom) };
+        } else if (type === 'goals') {
+          const bad = goals.find(g => !g.name.trim() || !g.ref || isNaN(g.target) || g.target <= 0);
+          if (bad) { toast('Give each goal a name, an account and a target more than zero (or remove it)', true); return; }
+          o = { goals: goals.map(g => ({ name: g.name.trim(), ref: refFrom(g.ref), target: g.target, date: g.date || null })) };
+        } else o = { ...opts };
+        closeModal(); resolve(o);
+      };
+    });
+  });
+}
+
+function addVisualPanel() {
+  const have = new Set(DASH.layout.map(w => w.type));
+  const kinds = Object.entries(DASH_KINDS).filter(([t, k]) => k.multi || !have.has(t));
+  return `<div class="panel dadd"><h2>Add a visual</h2><div class="dadd-list">${kinds.map(([t, k]) =>
+    `<button type="button" data-add="${t}"><b>${k.name}</b><span>${k.desc}</span></button>`).join('')}</div></div>`;
+}
+
+function drawDashboard() {
+  const box = $('#dash'); if (!box) return;
+  dashWidth = box.clientWidth;
+  const tiles = DASH.layout.filter(w => w.type === 'tile'), cards = DASH.layout.filter(w => w.type !== 'tile');
+  box.innerHTML = (DASH.edit ? addVisualPanel() : '') +
+    (tiles.length ? `<div class="dtiles">${tiles.map(w => drawTile(w, DASH.widgets[w.id] || { missing: true })).join('')}</div>` : '') +
+    (cards.length ? `<div class="dgrid">${cards.map(w => dashCard(w)).join('')}</div>` : '') +
+    (!DASH.layout.length ? `<div class="panel empty"><p>Your dashboard is empty.</p><button class="primary" id="dash-empty-edit">Choose visuals</button></div>` : '');
+  fillDashCards(box);
+  $('#dash-edit').textContent = DASH.edit ? 'Done' : 'Customise';
+  $('#dash-edit').classList.toggle('primary', DASH.edit);
+  const empty = $('#dash-empty-edit'); if (empty) empty.onclick = () => { DASH.edit = true; drawDashboard(); };
+  const find = el => DASH.layout.find(w => w.id === el.closest('[data-id]').dataset.id);
+  $$('.dseg button', box).forEach(b => b.onclick = () => {
+    const w = find(b), key = b.parentNode.dataset.k, v = /^\d+$/.test(b.dataset.v) ? +b.dataset.v : b.dataset.v;
+    if (w.opts[key] === v) return;
+    saveDashLayout(DASH.layout.map(x => (x === w ? { ...x, opts: { ...x.opts, [key]: v } } : x)));
+  });
+  $$('.dgoal-add, .dbu-pick', box).forEach(b => b.onclick = async () => {
+    const w = find(b), o = await dashSettings(w.type, w.opts);
+    if (o) saveDashLayout(DASH.layout.map(x => (x === w ? { ...x, opts: o } : x)));
+  });
+  $$('.dedit button', box).forEach(b => b.onclick = async e => {
+    e.preventDefault();
+    const w = find(b), act = b.dataset.act, list = [...DASH.layout];
+    if (act === 'remove') return saveDashLayout(list.filter(x => x !== w));
+    if (act === 'edit') {
+      const o = await dashSettings(w.type, w.opts);
+      if (o) saveDashLayout(list.map(x => (x === w ? { ...x, opts: o } : x)));
+      return;
+    }
+    // Move past the next tile (or card) in that direction; tiles and cards keep their own order.
+    const same = list.map((x, i) => [x, i]).filter(([x]) => (x.type === 'tile') === (w.type === 'tile')).map(([, i]) => i);
+    const at = same.indexOf(list.indexOf(w)), to = same[at + (act === 'up' ? -1 : 1)];
+    if (to === undefined) return;
+    [list[same[at]], list[to]] = [list[to], list[same[at]]];
+    saveDashLayout(list);
+  });
+  $$('.dadd button[data-add]', box).forEach(b => b.onclick = async () => {
+    const type = b.dataset.add, k = DASH_KINDS[type];
+    const defaults = { next_days: { days: 30 }, dollar: { by: 'account' }, budget_used: { mode: 'to_date', by: 'account', track: [] }, yoy: { mode: 'year', side: 'spending', by: 'account' }, calendar: { source: 'overall' } };
+    const opts = k.setup ? await dashSettings(type, defaults[type] || {}) : (defaults[type] || {});
+    if (!opts) return;
+    if (await saveDashLayout([...DASH.layout, { id: newWidgetId(type), type, opts }])) toast(`${k.name} added`);
+  });
+}
+
+// A stretching chart whose card is shorter than its row (the card beside it is taller) is redrawn taller to fill
+// the gap. Runs before any handlers are attached, since the card is replaced.
+function fillDashCards(box) {
+  $$('.dgrid > .dcard', box).forEach(card => {
+    const min = DASH_FILL[card.dataset.type], w = DASH.layout.find(x => x.id === card.dataset.id);
+    let el = card;
+    // A couple of passes, since the redrawn chart can wrap its legend or round differently.
+    for (let pass = 0; pass < 3 && min; pass++) {
+      const svg = el.querySelector('.dplot > svg'), plot = el.querySelector('.dplot');
+      if (!svg) return;
+      // Free space: from the bottom of the last thing in the plot (the legend) to the bottom of the plot area.
+      const free = plot.getBoundingClientRect().bottom - plot.lastElementChild.getBoundingClientRect().bottom;
+      if (Math.abs(free) < 2 || (free < 0 && pass === 0)) return;
+      // The chart is drawn at its viewBox size and scaled to the card, so convert the gap back to drawing units.
+      const vb = svg.viewBox.baseVal, r = svg.getBoundingClientRect(), k = r.width ? vb.width / r.width : 1;
+      const H = Math.max(min, Math.floor((r.height + free) * k));
+      if (H === vb.height) return;
+      const id = el.dataset.id;
+      el.outerHTML = dashCard(w, H);
+      el = box.querySelector(`.dcard[data-id="${id}"]`);
+    }
+  });
+}
+
+// One floating tooltip for every chart: anything with data-tip shows its text on hover.
+function dashTip(e) {
+  let tip = document.getElementById('dtip');
+  const t = e.target.closest && e.target.closest('#dash [data-tip]');
+  if (!t) { if (tip) tip.hidden = true; return; }
+  if (!tip) { tip = document.createElement('div'); tip.id = 'dtip'; document.body.appendChild(tip); }
+  tip.textContent = t.getAttribute('data-tip'); tip.hidden = false;
+  const r = tip.getBoundingClientRect();
+  tip.style.left = `${Math.max(8, Math.min(e.clientX + 12, innerWidth - r.width - 8))}px`;
+  tip.style.top = `${Math.max(8, e.clientY - r.height - 10)}px`;
+}
+document.addEventListener('mousemove', dashTip);
+// Redraw the charts at their new size when the window is resized.
+let dashResize = 0, dashWidth = 0;
+addEventListener('resize', () => {
+  clearTimeout(dashResize);
+  dashResize = setTimeout(() => { const b = $('#dash'); if (b && b.clientWidth !== dashWidth) drawDashboard(); }, 150);
+});
+
 async function dashboard() {
   const d = await GET('/api/dashboard');
+  DASH.layout = d.layout; DASH.widgets = d.widgets; DASH.edit = false;
   const setupBanner = S.settings.setup_done !== '1'
     ? `<div class="notice warn">Setup isn't finished yet. <a href="#/setup">Continue setup</a> to enter your start date and opening balances.</div>` : '';
-  const banks = d.banks.map(b => `<div class="stat"><div class="label">${esc(b.name)}</div>
-      <a class="value" href="#/register/${b.id}">${$fmt(b.balance)}</a>
-      ${b.share_bp < 10000 ? `<div class="note">Your share (${pctText(b.share_bp)}): <b>${$fmt(b.my_balance)}</b></div>` : ''}
-      <div class="note">${b.last_reconciled ? `Reconciled to ${dfmt(b.last_reconciled)}` : 'Not reconciled yet'}
-      ${b.uncleared ? ` · <a href="#/reconcile?account=${b.id}">${b.uncleared} unreconciled</a>` : ''}</div></div>`).join('');
-  const tm = d.this_month, lm = d.last_month;
   const alerts = d.alerts.length ? `<div class="notice warn al-dash"><b>${d.alerts.length} alert${d.alerts.length === 1 ? ' is' : 's are'} going off</b>
     <table><tbody>${d.alerts.map(a => `<tr data-id="${a.id}"><td><a href="#/alerts/${a.id}"><b>${esc(a.name)}</b></a></td><td>${esc(a.summary)}</td>
       <td class="num">Now ${$fmt(a.watch_value)} vs ${$fmt(a.compare_value)}</td><td class="num">${a.status === 'triggered' ? '<button class="small al-gotit">Got it</button>' : alertPill('seen')}</td></tr>`).join('')}</tbody></table></div>` : '';
-  const recent = d.recent_recurring.length ? `<table><tbody>${d.recent_recurring.map(r => `<tr><td>${dfmt(r.date)}</td><td>${esc(r.name)}</td>
-      <td>${r.skipped ? `<span class="pill bad">Skipped</span> <span class="muted">${esc(r.reason)}</span>` : `<span class="pill ok">Created</span>`}</td>
-      <td class="num">${r.total !== undefined ? $fmt(r.total) : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Nothing yet</div>';
-  const upcoming = d.upcoming_recurring.length ? `<table><tbody>${d.upcoming_recurring.map(r => `<tr class="click" data-href="#/recurring/${r.id}">
-      <td>${dfmt(r.next_date)}</td><td>${esc(r.name)}${r.contact_name ? ` <span class="muted">· ${esc(r.contact_name)}</span>` : ''}</td>
-      <td class="num">${$fmt(r.total)}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Nothing due in the next 30 days</div>';
   page('Dashboard', new Date(S.today + 'T00:00:00').toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
     `<a class="btn" href="#/sales/new">New invoice</a><a class="btn" href="#/purchases/new">New bill</a>
-     <a class="btn" href="#/banking/spend">Spend money</a><a class="btn primary" href="#/reconcile">Reconcile</a>`,
-    `${setupBanner}${alerts}
-    <div class="grid g4" style="margin-bottom:16px">${banks}</div>
-    <div class="grid g4" style="margin-bottom:16px">
-      <div class="stat"><div class="label">Owed to you</div><a class="value" href="#/sales">${$fmt(d.receivable.total)}</a>
-        <div class="note">${d.receivable.count} open invoice${d.receivable.count === 1 ? '' : 's'}${d.receivable.overdue ? ` · <span class="neg">${$fmt(d.receivable.overdue)} overdue</span>` : ''}</div></div>
-      <div class="stat"><div class="label">You owe</div><a class="value" href="#/purchases">${$fmt(d.payable.total)}</a>
-        <div class="note">${d.payable.count} open bill${d.payable.count === 1 ? '' : 's'}${d.payable.overdue ? ` · <span class="neg">${$fmt(d.payable.overdue)} overdue</span>` : ''}</div></div>
-      ${d.contributions.count ? `<div class="stat"><div class="label">Partner contributions due</div><a class="value" href="#/partner">${$fmt(d.contributions.total)}</a>
-        <div class="note">${d.contributions.count} open${d.contributions.overdue ? ` · <span class="neg">${$fmt(d.contributions.overdue)} overdue</span>` : ''}</div></div>` : ''}
-      <div class="stat"><div class="label">Profit · ${monthLabel(tm.month)}</div><a class="value${tm.profit < 0 ? ' neg' : ''}" href="#/reports/pl">${$fmt(tm.profit)}</a>
-        <div class="note">Income ${$fmt(tm.income)} · Expenses ${$fmt(tm.expenses)}</div></div>
-      <div class="stat"><div class="label">Profit · ${monthLabel(lm.month)}</div><div class="value${lm.profit < 0 ? ' neg' : ''}">${$fmt(lm.profit)}</div>
-        <div class="note">Income ${$fmt(lm.income)} · Expenses ${$fmt(lm.expenses)}</div></div>
-    </div>
-    <div class="grid g2">
-      <div class="panel flush"><h2>Coming up (recurring)</h2>${upcoming}</div>
-      <div class="panel flush"><h2>Recently created by recurring</h2>${recent}</div>
-    </div>`);
-  $$('tr[data-href]').forEach(tr => tr.onclick = () => go(tr.dataset.href));
+     <a class="btn" href="#/banking/spend">Spend money</a><a class="btn" href="#/reconcile">Reconcile</a><button id="dash-edit">Customise</button>`,
+    `${setupBanner}${alerts}<div id="dash"></div>`);
+  $('#dash-edit').onclick = () => { DASH.edit = !DASH.edit; drawDashboard(); };
   $$('.al-dash .al-gotit').forEach(b => b.onclick = async () => { await dismissAlert(b.closest('tr').dataset.id); dashboard(); updateAlertCount(); });
+  drawDashboard();
 }
 
 // ---------------------------------------------------------------- setup wizard
@@ -1204,10 +1756,15 @@ async function txnForm(source, id) {
   if (j) source = j.source;
   if (j && !['spend', 'receive', 'transfer', 'journal'].includes(source)) { go(sourceHref(j.source, j.source_id, j.id)); return; }
   const pre = PREFILL; PREFILL = null;
-  const ro = j && !j.editable;
+  const recat = !!(j && j.recategorise);  // reconciled: only the categories (and memo etc.) can change
+  const ro = j && !j.editable && !recat;
   const titles = { spend: 'Spend money', receive: 'Receive money', transfer: 'Transfer money', journal: 'General journal' };
   const backHref = source === 'journal' ? '#/journal' : '#/banking';
   const why = ro ? (j.reconciled ? 'This transaction is reconciled. Undo the reconciliation to change it.' : `This is dated in a locked period (on or before ${dfmt(S.settings.lock_date)}).`) : '';
+  const recatNote = !recat ? '' : source === 'spend' || source === 'receive'
+    ? `This transaction is reconciled, so its bank account, date and total (${$fmt(j.total)}) stay as they are. You can still change the accounts it's categorised to, split it across several accounts, or edit the memo and contact.`
+    : source === 'transfer' ? 'This transfer is reconciled, so its date, amount and reconciled account stay as they are.'
+    : 'This journal is reconciled, so its date and its reconciled bank lines stay as they are. You can still change the other lines.';
   let body;
   const d = j || pre || {};
   if (source === 'spend' || source === 'receive') {
@@ -1232,8 +1789,8 @@ async function txnForm(source, id) {
       <div id="t-jlines"></div>`;
   }
   page(j ? `${titles[source]}` : titles[source], j ? `${dfmt(j.date)}${j.recurring_id ? ' · created by a recurring transaction' : ''}` : '',
-    `<a class="btn" href="${RETURN_TO || backHref}" id="t-cancel">${ro ? 'Back' : 'Cancel'}</a>${j && !ro ? '<button class="danger" id="t-del">Delete</button>' : ''}${ro ? '' : '<button class="primary" id="t-save">Save</button>'}`,
-    `${ro ? `<div class="notice info">${why}</div>` : ''}${j && j.rule_id ? `<div class="notice ${j.rule_mode === 'recommend' && !j.reviewed ? 'warn' : 'info'}">
+    `<a class="btn" href="${RETURN_TO || backHref}" id="t-cancel">${ro ? 'Back' : 'Cancel'}</a>${j && !ro && !recat ? '<button class="danger" id="t-del">Delete</button>' : ''}${ro ? '' : '<button class="primary" id="t-save">Save</button>'}`,
+    `${ro ? `<div class="notice info">${why}</div>` : ''}${recat ? `<div class="notice info">${recatNote}</div>` : ''}${j && j.rule_id ? `<div class="notice ${j.rule_mode === 'recommend' && !j.reviewed ? 'warn' : 'info'}">
       ${j.rule_mode === 'auto' ? 'Categorised and ticked automatically' : j.reviewed ? 'Categorised (and since reviewed)' : 'Categorised, waiting for your review,'} by the bank rule
       <a href="#/rules/${j.rule_id}"><b>${esc(j.rule_name || 'rule')}</b></a>${j.bank_text ? ` from the statement line "${esc(j.bank_text)}"` : ''}.
       ${ro ? '' : 'If the category is wrong, change it below and save. To stop it happening again, edit the rule.'}</div>` : ''}<div class="panel">${body}</div>`);
@@ -1245,9 +1802,13 @@ async function txnForm(source, id) {
     wireContactSelect(csel, source === 'spend' ? 'supplier' : 'customer', () => { const c = contactById(csel.value); if (c) ed.setDefaultAccount(c.default_account_id); });
     ed = lineEditor($('#t-lines'), { lines: j ? j.items : (pre?.lines || []), filter: a => postable(a) });
   } else if (source === 'journal') {
-    jed = journalEditor($('#t-jlines'), j ? j.lines.map(l => ({ account_id: l.account_id, description: l.description || '', debit: l.amount > 0 ? l.amount : 0, credit: l.amount < 0 ? -l.amount : 0 })) : []);
+    jed = journalEditor($('#t-jlines'), j ? j.lines.map(l => ({ account_id: l.account_id, description: l.description || '', debit: l.amount > 0 ? l.amount : 0, credit: l.amount < 0 ? -l.amount : 0, fixed: !!l.recon_id })) : []);
   }
   if (ro) $$('input, select, textarea, .lines button, button.add-line').forEach(e => { e.disabled = true; });
+  if (recat) {
+    ['#t-date', '#t-bank', '#t-amount'].forEach(s => { if ($(s)) $(s).disabled = true; });
+    if (source === 'transfer') j.lines.filter(l => l.recon_id).forEach(l => { $(l.amount < 0 ? '#t-from' : '#t-to').disabled = true; });
+  }
   const save = $('#t-save');
   if (save) save.onclick = async () => {
     try {
@@ -1273,8 +1834,8 @@ function journalEditor(el, lines) {
   const tot = k => rows.reduce((s, r) => s + (isNaN(r[k]) ? 0 : r[k]), 0);
   function render() {
     el.innerHTML = `<table class="lines"><thead><tr><th style="width:34%">Account</th><th>Description</th><th class="num" style="width:15%">Debit</th><th class="num" style="width:15%">Credit</th><th></th></tr></thead><tbody>
-      ${rows.map((r, i) => `<tr data-i="${i}"><td><select class="acct-pick" data-f="account_id">${acctOptions(r.account_id, postable)}</select></td><td><input data-f="description" value="${esc(r.description)}"></td>
-      <td><input class="num" data-f="debit" value="${r.debit ? fmt(r.debit) : ''}"></td><td><input class="num" data-f="credit" value="${r.credit ? fmt(r.credit) : ''}"></td><td><button type="button" class="rm">×</button></td></tr>`).join('')}
+      ${rows.map((r, i) => { const fx = r.fixed ? ' disabled title="Reconciled"' : ''; return `<tr data-i="${i}"><td><select class="acct-pick" data-f="account_id"${fx}>${acctOptions(r.account_id, postable)}</select></td><td><input data-f="description" value="${esc(r.description)}"></td>
+      <td><input class="num" data-f="debit" value="${r.debit ? fmt(r.debit) : ''}"${fx}></td><td><input class="num" data-f="credit" value="${r.credit ? fmt(r.credit) : ''}"${fx}></td><td><button type="button" class="rm"${fx}>×</button></td></tr>`; }).join('')}
       </tbody></table><button type="button" class="small add-line">+ Add line</button>
       <div class="totals-box"><table><tr><td>Total debits</td><td class="num jd"></td></tr><tr><td>Total credits</td><td class="num jc"></td></tr><tr class="grand"><td>Out of balance</td><td class="num jo"></td></tr></table></div>`;
     const upd = () => { const d = tot('debit'), c = tot('credit'); el.querySelector('.jd').textContent = fmt(d); el.querySelector('.jc').textContent = fmt(c); const o = el.querySelector('.jo'); o.textContent = fmt(d - c); o.className = 'num jo' + (d !== c ? ' neg' : ''); };

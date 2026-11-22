@@ -19,7 +19,7 @@ How the books are run day to day with numbr. For installing it, see `README.md`.
      - a partner's share arriving → **Partner contribution**
      - anything else (fees, interest, direct debits) → **Spend/Receive money**, or **Make a rule** so it's handled next time (then **Apply rules again**)
    - When *Out by* shows $0.00, click **Reconcile**.
-3. Check the Dashboard for overdue invoices and anything recurring that was skipped.
+3. Check Aged Receivables for overdue invoices, and the Audit log for any recurring transaction that was skipped (numbr also shows a red message when one is).
 
 ## Month end
 
@@ -55,6 +55,20 @@ Near the end of each financial year, build next year's budget: each account star
 To see how one part of your affairs is going (say an investment property), make a project for it: **Chart of Accounts → Projects → New project**, name it, and tick the accounts that belong to it (e.g. Rent Income, Property Expenses, the property and its loan). You can also tick projects when you open an account. An account can be in more than one project, e.g. Insurance if one policy covers two properties.
 
 On the **Profit & Loss** or **Balance Sheet**, choose the project in the **Project** box to see only its accounts; choose **All accounts** to go back. Budget vs actual works the same way. The project balance sheet shows the project's assets and loans plus "Project earnings" (its profit). It won't balance on its own, because the rent and bills go through your bank account, which usually isn't in the project. Projects never change any figures; deleting one leaves the accounts and transactions alone.
+
+## Dashboard
+
+- Press **Customise** to choose what the Dashboard shows, then **Done** when you're finished.
+  - Add a visual from the list.
+  - Move cards and tiles with the arrows.
+  - Change a card's settings with ⚙.
+  - Remove a card with ×.
+- **Account tiles** sit along the top, and you can add as many as you like. Each tile shows one account or a whole group (for example "Tax savings" or "Vehicle costs"), with its trend over 12 months.
+- **Spending calendars** can be added more than once:
+  - one for all spending
+  - one for money out of a chosen bank account or card, with transfers between your own accounts left out
+- **Profit forecast**, **Profit against budget** and **Budget used so far** need a budget for this financial year. The forecast starts from your profit so far and adds each later month's budgeted profit.
+- Some cards have buttons to switch views. **Budget used so far** switches between so far and the whole year. **This year vs last year** switches between year and month, and between spending and income. **Coming up** switches between 14, 30 and 60 days.
 
 ## Alerts
 
@@ -96,7 +110,8 @@ In Banking, transactions a rule made show a badge with the rule's name: **Auto**
 |---|---|
 | Wrong unpaid invoice/bill | Edit it, or Void it |
 | Wrong invoice that's already paid | Open the payment → Delete payment, then edit/void the invoice and re-enter the payment |
-| Wrong bank transaction that's reconciled | Reconcile → history → Undo (latest only), fix it, then reconcile again |
+| Reconciled bank transaction in the wrong category | Open it and change the account (or split it) and save. The bank account, date and total stay fixed, and it stays reconciled |
+| Wrong amount, date or bank account on a reconciled transaction | Reconcile → history → Undo (latest only), fix it, then reconcile again |
 | Anything in a locked month | Settings → move the lock date back, fix it, then re-lock (the change is recorded in the audit log) |
 | Opening balance wrong for a reconciled account | Undo that account's reconciliations back to the opening one, then edit it. Accounts you haven't reconciled can be edited any time |
 
@@ -113,4 +128,4 @@ In Banking, transactions a rule made show a badge with the rule's name: **Auto**
 - Trial balance debits = credits (always; if not, it's a bug).
 - Balance sheet: Net assets = Total equity, and Historical Balancing = 0.
 - Aged reports tie to the AR/AP control accounts (banner on the report).
-- Bank balance on the Dashboard = the bank's balance once everything is entered and reconciled.
+- A bank account's tile on the Dashboard = the bank's balance once everything is entered and reconciled (a shared account's tile shows your share).

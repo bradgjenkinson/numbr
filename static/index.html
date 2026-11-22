@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>numbr</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="stylesheet" href="/app.css">
+<!-- On some Windows computers a local download is now and then cut off. Try the stylesheet again rather than show the app unstyled. -->
+<link rel="stylesheet" href="/app.css" onerror="var n = (+this.dataset.n || 0) + 1; this.dataset.n = n; var l = this; if (n < 4) setTimeout(function () { l.href = '/app.css?retry=' + n; }, 400 * n);">
 </head>
 <body>
 <div id="shell">
@@ -53,6 +54,36 @@
 </div>
 <div id="toast"></div>
 <div id="modal" hidden><div class="modal-card" role="dialog" aria-modal="true"></div></div>
-<script src="/app.js"></script>
+<script>
+// Load the app, trying again if the download is cut off (it happens now and then on some Windows computers),
+// rather than leave the page stuck on "Loading...".
+(function load(n) {
+  // A download can also stall rather than fail, so an attempt that hasn't arrived in 8 seconds is tried again.
+  // If a late copy arrives as well it can't run twice: its top-level declarations clash, so the browser refuses it.
+  var s = document.createElement('script'), done = false;
+  var retry = function () {
+    if (done) return;
+    done = true; clearTimeout(slow); s.remove();
+    if (n < 4) return setTimeout(function () { load(n + 1); }, 400 * (n + 1));
+    var d = document.createElement('div');
+    d.className = 'notice'; d.classList.add('bad');
+    d.textContent = 'numbr could not load. Check it is still running, then refresh this page.';
+    document.getElementById('main').replaceChildren(d);
+  };
+  var slow = setTimeout(retry, 8000);
+  s.src = '/app.js' + (n ? '?retry=' + n : '');
+  s.onload = function () { done = true; clearTimeout(slow); };
+  s.onerror = retry;
+  document.body.appendChild(s);
+})(0);
+// The stylesheet's own onerror (in <head>) catches a failed download; this catches one that stalled.
+(function checkCss(n) {
+  setTimeout(function () {
+    var l = document.querySelector('link[rel=stylesheet]'), ok = false;
+    try { ok = l.sheet && l.sheet.cssRules.length > 0; } catch (e) { ok = true; }
+    if (!ok && n < 3) { l.href = '/app.css?stalled=' + (n + 1); checkCss(n + 1); }
+  }, 8000);
+})(0);
+</script>
 </body>
 </html>
