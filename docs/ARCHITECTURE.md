@@ -127,9 +127,9 @@ The Dashboard shows the visuals the user picks, in the order they choose. Like r
   - `profit_forecast`
   - `in_out`
   - `profit_budget`
-  - `budget_used`: `to_date` or `full_year`.
+  - `budget_used`: `mode` `to_date` or `full_year`; `by` `account` or `group`; `track`, up to 8 expense or cost of sales account/group refs shown in that order (empty means the 8 biggest budgets, by account or top-level group).
   - `dollar`: `account` or `group`.
-  - `yoy`: `year` or `month`, and `spending` or `income`.
+  - `yoy`: `year` or `month`, `spending` or `income`, and `by` `account` or `group` (each account counts under its top-level group). Up to 15 rows, biggest increase first.
   - `next_days`: 14, 30 or 60 days.
   - `calendar`: `overall` or a bank account id.
   - `net_worth`

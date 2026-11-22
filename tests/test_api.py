@@ -1371,8 +1371,24 @@ try:
     check(pf['has_budget'] and ok and len(pf['actual']) == dfy_months.index(cur) + 1,
           "profit forecast adds each later month's budgeted profit to the profit so far")
     check(pb['actual'] == pf['actual'] and pb['budget'][-1] == 12 * 200000, 'profit against budget adds up the budget for the year')
-    bu = [r for r in W['bu']['rows'] if r['account_id'] == dexp]
+    bu = [r for r in W['bu']['rows'] if r['ref'] == {'account_id': dexp}]
     check(bu and bu[0]['budget'] == 1200000 and bu[0]['actual'] >= 1234, "budget used compares spending with the whole year's budget")
+    bug = call('POST', '/api/groups', {'name': 'Dash budget group', 'type': 'expense'})['id']
+    call('PUT', f'/api/accounts/{dexp}', {'name': 'Dash expense', 'type': 'expense', 'group_id': bug})
+    bw = call('PUT', '/api/dashboard/layout', {'layout': [
+        {'id': 'bg', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'by': 'group'}},
+        {'id': 'bt', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'track': [{'account_id': dexp}, {'group_id': bug}]}}]})['widgets']
+    check([r for r in bw['bg']['rows'] if r['name'] == 'Dash budget group' and r['budget'] == 1200000],
+          'budget used can add up by group')
+    check([r['name'] for r in bw['bt']['rows']] == ['Dash expense', 'Dash budget group'] and bw['bt']['chosen']
+          and bw['bt']['rows'][1]['budget'] == 1200000, 'budget used shows the accounts and groups the user chose, in order')
+    for bad, why in [({'track': [{'account_id': dinc}]}, 'an income account'),
+                     ({'track': [{'account_id': dexp}] * 2}, 'the same account twice'),
+                     ({'track': [{'account_id': dexp}] * 9}, 'more than 8 rows')]:
+        check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'b', 'type': 'budget_used', 'opts': bad}]}, expect_ok=False).get('error'),
+              f'budget used refuses {why}')
+    call('PUT', f'/api/accounts/{dexp}', {'name': 'Dash expense', 'type': 'expense', 'group_id': None})
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
     nd = [i for i in W['nd']['items'] if i['recurring_id'] == rw['id']]
     check(len(nd) == 2 and all(i['dir'] == 'out' and i['amount'] == 2500 for i in nd), f'coming up repeats a weekly item within 14 days ({len(nd)})')
     check(W['cal']['days'].get(t_iso) == 1234, f"the bank spending calendar leaves out transfers ({W['cal']['days'].get(t_iso)})")
@@ -1381,6 +1397,17 @@ try:
     check(g['value'] == W['g']['value'] and g['target'] == 120000, 'a savings goal tracks its group balance')
     check(W['two']['this'][-1] >= 1234 and len(W['two']['last']) == 12, 'same account, two years has both years')
     check(W['yoy']['rows'] and W['yoy']['side'] == 'income', 'this month vs last month lists income accounts')
+    ch_ = [r['now'] - r['then'] for r in W['yoy']['rows']]
+    check(ch_ == sorted(ch_, reverse=True), 'this month vs last month shows the biggest increase first')
+    dcg = call('POST', '/api/groups', {'name': 'Dash costs', 'type': 'expense'})['id']
+    dexp2 = call('POST', '/api/accounts', {'name': 'Dash expense 2', 'type': 'expense', 'group_id': dcg})['id']
+    call('POST', '/api/txn/spend', {'date': t_iso, 'bank_account_id': A['1-1100'], 'lines': [{'account_id': dexp2, 'amount': 777}]})
+    yg = call('PUT', '/api/dashboard/layout', {'layout': layout + [{'id': 'yg', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'spending', 'by': 'group'}}]})['widgets']['yg']
+    check(yg['by'] == 'group' and any(r['name'] == 'Dash costs' and r['now'] >= 777 for r in yg['rows'])
+          and not any(r['name'] == 'Dash expense 2' for r in yg['rows']), 'this month vs last month can add up by group')
+    check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'x', 'type': 'yoy', 'opts': {'by': 'team'}}]}, expect_ok=False).get('error'),
+          'dashboard refuses an unknown accounts-or-groups choice')
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
     check(len(W['io']['months']) == 12 and W['io']['months'][-1] == cur, 'money in vs out covers the last 12 months')
     check(W['dl']['spent'] == sum(p_['amount'] for p_ in W['dl']['parts']), 'where each dollar went splits all spending')
     check(W['nw']['net'][-1] == W['nw']['assets'][-1] - W['nw']['liabilities'][-1], 'net worth is what you own minus what you owe')

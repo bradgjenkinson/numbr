@@ -393,15 +393,15 @@ tr.ob-locked input:disabled { background: var(--bg); cursor: not-allowed; }
 .dplot { min-width: 0; }
 .dplot svg { display: block; width: 100%; height: auto; overflow: visible; }
 .dscroll { overflow-x: auto; }
-.dscroll svg { min-width: 620px; }
-.dplot svg text, .dtile svg text { font-family: var(--sans); fill: var(--ink-3); font-size: 11px; }
+.dplot svg text, .dtile svg text { font-family: var(--sans); fill: var(--ink-3); font-size: 10px; }
+.dcard:is([data-type=profit_forecast], [data-type=profit_budget], [data-type=next_days], [data-type=net_worth]) .dplot svg text { font-size: 12.5px; }
 .dplot svg .lbl { fill: var(--ink-2); }
 .dplot svg .strong { fill: var(--ink); font-weight: 600; }
 .dplot svg .big { fill: var(--ink); font-family: var(--display); font-weight: 700; }
 .dplot svg .gl { stroke: var(--grid); stroke-width: 1; }
 .dplot svg .zl { stroke: var(--ink-3); stroke-width: 1; opacity: .5; }
 .dplot [data-tip]:hover, .dtile [data-tip]:hover { opacity: .8; }
-@media (prefers-reduced-motion: no-preference) { .dplot .grow { animation: dgrow .6s ease-out both; transform-box: fill-box; transform-origin: bottom; } @keyframes dgrow { from { transform: scaleY(.1); } } }
+.dplot .dhover:hover { opacity: 1; fill: var(--ink) !important; fill-opacity: .05; }
 .dseg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .dseg button { border: 0; border-radius: 0; padding: 3px 10px; font-size: 12.5px; background: var(--panel); color: var(--ink-2); }
 .dseg button + button { border-left: 1px solid var(--line); }
@@ -438,6 +438,34 @@ tr.ob-locked input:disabled { background: var(--bg); cursor: not-allowed; }
 .dadd-list button:hover { border-color: var(--accent); }
 .dadd-list b { display: block; font-size: 13.5px; }
 .dadd-list span { font-size: 12px; color: var(--ink-3); }
+.dtrack { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.dtrack > :first-child { flex: 1; min-width: 0; }
 .dgoal { display: grid; grid-template-columns: 1.2fr 1.6fr 0.9fr 1fr auto; gap: 6px; align-items: center; margin-bottom: 8px; }
 @media (max-width: 700px) { .dgoal { grid-template-columns: 1fr 1fr; } }
-#dtip { position: fixed; pointer-events: none; background: var(--nav); color: #fff; font-size: 12px; padding: 5px 9px; border-radius: 6px; z-index: 60; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+#dtip { position: fixed; pointer-events: none; background: var(--nav); color: #fff; font-size: 12px; padding: 5px 9px; border-radius: 6px; z-index: 60; white-space: pre; line-height: 1.45; box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+
+/* Dashboard dark look: the navy palette from the visuals gallery. Only the Dashboard sets body.dash-dark
+   (router in app.js); the rest of the app stays light. Tokens are redefined so every chart and card follows. */
+body.dash-dark {
+  --bg: #0c121b; --panel: #141c29; --ink: #e6ebf3; --ink-2: #a9b4c6; --ink-3: #7d889b;
+  --line: #253044; --line-2: #1f2a3b; --grid: #1f2a3b; --track: #1f2a3b;
+  --accent: #2dd4bf; --accent-ink: #062a26; --accent-soft: #123a37;
+  --in: #2dd4bf; --out: #f5a524; --profit: #93b4ff;
+  --good: #34d399; --bad: #f87171; --bad-soft: #3a1717; --warn: #fbbf24; --warn-soft: #33290d;
+  --s2: #60a5fa; --s3: #f5a524; --s4: #a78bfa; --s5: #f472b6; --s6: #94a3b8; --s7: #a3e635;
+  color-scheme: dark;
+}
+body.dash-dark button:hover, body.dash-dark .btn:hover { border-color: #3a4760; }
+body.dash-dark button.primary:hover, body.dash-dark .btn.primary:hover { background: #5eead4; border-color: #5eead4; }
+body.dash-dark input, body.dash-dark select, body.dash-dark textarea { background: #0f1622; border-color: #2c3850; }
+body.dash-dark .acct-pick-input { background-color: #0f1622; }
+body.dash-dark .acct-pick-list { box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+body.dash-dark th { background: #182131; }
+body.dash-dark .notice.warn { background: var(--warn-soft); border-color: #5a4512; color: #fcd98a; }
+body.dash-dark .notice.warn a { color: #fde68a; }
+body.dash-dark #modal { background: rgba(0,0,0,.6); }
+body.dash-dark .modal-card { border: 1px solid var(--line); box-shadow: 0 20px 50px rgba(0,0,0,.6); }
+body.dash-dark .page-head h1 { color: #fff; }
+body.dash-dark .dcard, body.dash-dark .dtile { box-shadow: 0 1px 0 rgba(255,255,255,.02) inset; }
+body.dash-dark #dtip { background: #e6ebf3; color: #0c121b; }
+body.dash-dark #toast { color: #0c121b; }

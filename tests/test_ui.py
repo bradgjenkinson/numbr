@@ -608,6 +608,17 @@ try:
         page.click('.dcard[data-id=budget_used] .dseg button[data-v=full_year]')
         page.wait_for_selector('.dcard[data-id=budget_used] .dseg button.on[data-v=full_year]')
         shot(page, '25-dashboard-edit')
+        # budget used: track one chosen expense account, then go back to the biggest budgets
+        page.click('.dcard[data-id=budget_used] .dbu-pick'); page.wait_for_selector('#ds-track-add')
+        page.click('#ds-track-add'); page.wait_for_selector('#ds-track .t-ref')
+        page.evaluate("""() => { const s = document.querySelector('#ds-track .t-ref'), o = [...s.options].find(o => o.value.startsWith('a:'));
+                          s.value = o.value; s.dispatchEvent(new Event('change')); }""")
+        shot(page, '25b-budget-used-choose')
+        page.click('#modal [data-x=yes]'); page.wait_for_selector('.dcard[data-id=budget_used] .dbu-pick:text("Change")')
+        assert page.locator('.dcard[data-id=budget_used] .bul').count() == 1
+        page.click('.dcard[data-id=budget_used] .dbu-pick'); page.wait_for_selector('#ds-track .t-rm')
+        page.click('#ds-track .t-rm'); page.click('#modal [data-x=yes]')
+        page.wait_for_selector('.dcard[data-id=budget_used] .dbu-pick:text("Choose")')
         page.click('.dcard[data-id^="two_years-"] [data-act=remove]'); page.wait_for_timeout(400)
         assert page.locator('.dcard').count() == n0
         page.click('#dash-edit'); page.wait_for_selector('.dadd', state='detached')
