@@ -124,15 +124,14 @@ The Dashboard shows the visuals the user picks, in the order they choose. Like r
 - **Layout.** `settings.dashboard_layout` is a JSON list of `{id, type, opts}`, checked by `clean_layout()` and saved with `PUT /dashboard/layout`. That call writes a `dashboard_layout` audit row. When the setting is unset, `default_layout()` gives one tile per bank account plus the standard visuals.
 - **Types:**
   - `tile`: one account or group, with a 12-month trend.
-  - `profit_forecast`
+  - `profit_forecast` (shown as Profit outlook): profit so far added up, the budget added up, and the forecast (profit so far plus each later month's budgeted profit).
   - `in_out`
-  - `profit_budget`
   - `budget_used`: `mode` `to_date` or `full_year`; `by` `account` or `group`; `track`, up to 8 expense or cost of sales account/group refs shown in that order (empty means the 8 biggest budgets, by account or top-level group).
   - `dollar`: `account` or `group`.
   - `yoy`: `year` or `month`, `spending` or `income`, and `by` `account` or `group` (each account counts under its top-level group). Up to 15 rows, biggest increase first.
   - `next_days`: 14, 30 or 60 days.
   - `calendar`: `overall` or a bank account id.
-  - `net_worth`
+  - `net_worth`: half width, first by default (beside `in_out`, with `profit_forecast` beside `budget_used`). A saved `profit_budget` or `cash_runway` visual (both retired) is replaced by `net_worth` in that place, moving an existing Net worth card there; if `profit_forecast` comes earlier, the two then swap (`dash_layout()`).
   - `goals`: a name, account or group, target and optional date for each goal.
   - `two_years`
 - **Account references.** A reference is `{account_id}` or `{group_id}`. A group means every account in it and in its subgroups (`group_account_ids()`). If a referenced account or group is deleted, its visual comes back as `{missing: true}` and asks the user to edit or remove it.

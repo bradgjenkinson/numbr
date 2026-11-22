@@ -8,10 +8,15 @@ let RETURN_TO = null;        // where to go after saving a prefilled form
 
 // ---------------------------------------------------------------- utilities
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method, headers: { 'X-Ledger': '1', 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const opts = { method, headers: { 'X-Ledger': '1', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) };
+  let res;
+  // A dropped connection (not an error reply) is tried again for reads only; a save is never sent twice.
+  for (let tries = method === 'GET' ? 3 : 1; ; ) {
+    try { res = await fetch(path, opts); break; } catch (e) {
+      if (--tries <= 0) throw new Error('numbr could not be reached. Check it is still running, then try again.');
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
   let data;
   try { data = await res.json(); } catch { data = { error: 'The app returned an unexpected response' }; }
   if (!res.ok) throw new Error(data.error || 'Request failed');
@@ -686,15 +691,14 @@ async function alertForm(id) {
 // charts below are hand-drawn SVG, no libraries. Money arrives in cents.
 const DASH_KINDS = {
   tile: { name: 'Account tile', multi: true, setup: true, desc: 'Any account or group: its figure now and a 12-month trend. Tiles sit together along the top.' },
-  profit_forecast: { name: 'Profit forecast', desc: 'Profit so far this financial year, then where your budget says it will end up.' },
+  net_worth: { name: 'Net worth over time', desc: 'Everything you own minus everything you owe, month by month.' },
+  profit_forecast: { name: 'Profit outlook', desc: 'Profit so far this financial year against your budget, and where both are heading by June.' },
   in_out: { name: 'Money in vs money out', desc: 'Income and spending for each of the last 12 months, with profit as a line.' },
-  profit_budget: { name: 'Profit against budget', desc: 'Profit added up month by month, against your budget.' },
   budget_used: { name: 'Budget used so far', setup: true, desc: 'How much of each spending budget you have used.' },
   dollar: { name: 'Where each dollar went', desc: '100 squares showing how every dollar that came in this year was spent or kept.' },
   yoy: { name: 'This year vs last year', desc: 'Each account now, against the same dates last year or last month.' },
   next_days: { name: 'Coming up', wide: true, desc: 'Recurring money due in and out over the next few weeks.' },
   calendar: { name: 'Spending calendar', wide: true, multi: true, setup: true, desc: 'One square per day for the last year. Darker days had more spending.' },
-  net_worth: { name: 'Net worth over time', wide: true, desc: 'Everything you own minus everything you owe, month by month.' },
   goals: { name: 'Savings goals', setup: true, desc: 'Set a target for any account and watch the ring fill up.' },
   two_years: { name: 'Same account, two years', multi: true, setup: true, desc: 'This financial year drawn over last year, month by month.' },
 };
@@ -766,27 +770,49 @@ function drawTile(w, d) {
 // Every 2nd month label when the chart is too narrow for all 12.
 const monthEvery = W => (W >= 440 ? 1 : 2);
 
-function drawProfitForecast(w, d, W = 520) {
-  const H = 210, L = 40, R = 76, T = 18, B = 22, ci = d.actual.length - 1;
-  const fc = d.forecast ? [d.actual[ci], ...d.forecast] : [];
-  const sc = niceScale([...d.actual, ...fc]), x = lin(0, 11, L + 8, W - R), y = lin(sc.lo, sc.hi, H - B, T);
+function drawProfitForecast(w, d, W = 520, H = 240) {
+  // Profit outlook: profit so far against the budget, and where both end up by June. H grows to fill the card's row.
+  const title = 'Profit outlook', L = 40, R = 58, T = 32, B = 22, ci = d.actual.length - 1, now = d.actual[ci];
+  const fc = d.forecast ? [now, ...d.forecast] : [];
+  const sc = niceScale([...d.actual, ...fc, ...(d.budget || [])]), x = lin(0, 11, L + 8, W - R), y = lin(sc.lo, sc.hi, H - B, T);
   const ap = d.actual.map((v, i) => [x(i), y(v)]), fp = fc.map((v, i) => [x(ci + i), y(v)]);
-  let body = yAxisOf(y, sc.ticks, L, W - R + 24) + gradOf('pf-' + w.id, 'in', .2) +
-    `<path d="${pathOf(ap)}L${ap[ci][0]} ${y(Math.max(sc.lo, 0))}L${ap[0][0]} ${y(Math.max(sc.lo, 0))}Z" style="fill:url(#pf-${w.id})"/>` +
-    `<path d="${pathOf(ap)}" ${strokeOf('in', 1.8)}/>`;
-  if (fp.length > 1) body += `<path d="${pathOf(fp)}" ${strokeOf('in', 1.5, '4 4')}/>` + fp.slice(1).map((p, i) =>
-    `<circle cx="${p[0]}" cy="${p[1]}" r="2.4" style="fill:var(--panel);stroke:var(--in);stroke-width:1.4" ${tipOf(`${monShort(d.months[ci + 1 + i])} (expected): ${wfmt(d.forecast[i])}`)}/>`).join('');
-  body += ap.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === ci ? 3.5 : 2.2}" style="fill:var(--in);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}${i === ci ? ' (so far)' : ''}: ${wfmt(d.actual[i])}`)}/>`).join('');
-  body += `<line x1="${x(ci)}" x2="${x(ci)}" y1="${T}" y2="${H - B}" style="stroke:var(--ink-3);stroke-width:1;stroke-dasharray:2 3"/>` +
-    `<text x="${ap[ci][0]}" y="${ap[ci][1] - 9}" text-anchor="${ci > 9 ? 'end' : 'middle'}" class="strong">${kfmt(d.actual[ci])}</text>`;
-  const end = fp.length > 1 ? fp[fp.length - 1] : null, endV = fc[fc.length - 1];
-  if (end) body += `<text x="${end[0] + 7}" y="${end[1] + 1}" class="strong">${kfmt(endV)}</text><text x="${end[0] + 7}" y="${end[1] + 13}">by ${monShort(d.months[11])}</text>`;
+  let body = yAxisOf(y, sc.ticks, L, W), sub;
+  if (d.budget) {
+    const bp = d.budget.map((v, i) => [x(i), y(v)]), bNow = [x(ci), y(d.budget_to_date)], gap = now - d.budget_to_date, ahead = gap >= 0, tone = ahead ? 'good' : 'bad';
+    const end = fc.length ? fc[fc.length - 1] : now, goal = d.budget[11];
+    // The gap to budget so far, then the same gap carried on between the forecast and the budget.
+    body += `<path d="${pathOf([...ap, bNow, ...bp.slice(0, ci).reverse()])}Z" style="fill:var(--${tone});opacity:.18"/>`;
+    if (fp.length > 1) body += `<path d="${pathOf([...fp, ...bp.slice(ci + 1).reverse(), bNow])}Z" style="fill:var(--${tone});opacity:.07"/>`;
+    body += `<line x1="${x(ci)}" x2="${x(ci)}" y1="${T - 6}" y2="${H - B}" style="stroke:var(--ink-3);stroke-width:1;stroke-dasharray:2 3"/><text x="${x(ci)}" y="${T - 12}" text-anchor="${ci > 7 ? 'end' : ci < 3 ? 'start' : 'middle'}" class="strong" style="fill:var(--${tone})">Today: ${kfmt(Math.abs(gap))} ${ahead ? 'ahead of' : 'behind'} budget</text>`;
+    body += `<path d="${pathOf(bp)}" ${strokeOf('ink-3', 1.3, '4 3')}/>` +
+      bp.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="5" style="fill:transparent" ${tipOf(`${monShort(d.months[i])} budget (added up): ${wfmt(d.budget[i])}`)}/>`).join('');
+    if (fp.length > 1) body += `<path d="${pathOf(fp)}" ${strokeOf('in', 1.5, '4 4')}/>` + fp.slice(1).map((p, i) => { const m = ci + 1 + i;
+      return `<circle cx="${p[0]}" cy="${p[1]}" r="2.4" style="fill:var(--panel);stroke:var(--in);stroke-width:1.4" ${tipOf(`${monShort(d.months[m])} expected: ${wfmt(d.forecast[i])}\nBudget: ${wfmt(d.budget[m])}\nDifference: ${sfmt(d.forecast[i] - d.budget[m])}`)}/>`; }).join('');
+    // Today's two figures: the higher one labelled above-left of its point, the lower one below-right, so they
+    // never sit on each other or on the lines. In June the end labels already show them.
+    if (ci < 11) {
+      const pts = [[y(now), `${kfmt(now)} so far`, 'strong', `fill:var(--in)`], [y(d.budget_to_date), `${kfmt(d.budget_to_date)} budget`, 'lbl', 'font-weight:600']];
+      const [up, low] = pts[0][0] <= pts[1][0] ? pts : [pts[1], pts[0]];
+      const lx = ci < 2 ? [x(ci) + 7, 'start'] : [x(ci) - 7, 'end'], rx = ci > 9 ? [x(ci) - 7, 'end'] : [x(ci) + 7, 'start'];
+      body += `<text x="${lx[0]}" y="${Math.max(T + 4, up[0] - 8)}" text-anchor="${lx[1]}" class="${up[2]}" style="${up[3]}">${up[1]}</text>` +
+        `<text x="${rx[0]}" y="${Math.min(H - B - 4, low[0] + 16)}" text-anchor="${rx[1]}" class="${low[2]}" style="${low[3]}">${low[1]}</text>`;
+    }
+    // End-of-year labels, pushed apart when the two lines finish close together.
+    const e1 = fp.length > 1 ? fp[fp.length - 1] : ap[ci], e2 = bp[11], near = Math.abs(e1[1] - e2[1]) < 28, hiFirst = e1[1] <= e2[1];
+    const y1 = near ? (hiFirst ? Math.min(e1[1], e2[1] - 14) : Math.max(e1[1], e2[1] + 14)) : e1[1];
+    const y2 = near ? (hiFirst ? y1 + 28 : y1 - 28) : e2[1];
+    body += `<text x="${e1[0] + 7}" y="${y1}" class="strong" style="fill:var(--in)">${kfmt(end)}</text><text x="${e1[0] + 7}" y="${y1 + 13}">${fp.length > 1 ? 'expected' : 'so far'}</text>`;
+    body += `<text x="${e2[0] + 7}" y="${y2}" class="lbl" style="font-weight:600">${kfmt(goal)}</text><text x="${e2[0] + 7}" y="${y2 + 13}">budget</text>`;
+    sub = `Profit for ${d.fy_label}, added up month by month. ` + (fp.length > 1 ?
+      `The expected line assumes every month from ${monShort(d.months[ci + 1])} goes exactly to budget, so today's gap carries through to ${monShort(d.months[11])}.` :
+      'Hover over a month for its figures.');
+  } else sub = `Profit for ${d.fy_label}, added up month by month. ${budgetLink} for the year to compare against it and see where it is heading.`;
+  body += gradOf('pf-' + w.id, 'in', .12) + `<path d="${pathOf(ap)}L${ap[ci][0]} ${y(Math.max(sc.lo, 0))}L${ap[0][0]} ${y(Math.max(sc.lo, 0))}Z" style="fill:url(#pf-${w.id})"/>` +
+    `<path d="${pathOf(ap)}" ${strokeOf('in', 1.8)}/>` + ap.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === ci ? 3.5 : 2.2}" style="fill:var(--in);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}${i === ci ? ' (so far)' : ''}: ${wfmt(d.actual[i])}${d.budget ? `\nBudget: ${wfmt(i === ci ? d.budget_to_date : d.budget[i])}` : ''}`)}/>`).join('');
+  if (!d.budget) body += `<text x="${ap[ci][0]}" y="${ap[ci][1] - 9}" text-anchor="${ci > 9 ? 'end' : 'middle'}" class="strong" style="fill:var(--in)">${kfmt(now)} so far</text>`;
   body += monthTicks(d.months, x, H - 6, monthEvery(W), ci);
-  const legend = legendOf([['in', 'Profit so far', 'ln'], ...(d.forecast && d.forecast.length ? [['in', 'Expected, adding your budget for each month', 'dash']] : [])]);
-  const sub = !d.has_budget ? `Profit so far in ${d.fy_label}. ${budgetLink} for the rest of the year to see where it is heading.`
-    : d.forecast.length ? `${wfmt(d.actual[ci])} so far in ${d.fy_label}. Adding each month's budgeted profit, the year ends at about <b>${wfmt(endV)}</b>.`
-      : `Profit for ${d.fy_label}: ${wfmt(d.actual[ci])} so far.`;
-  return { title: 'Profit forecast', sub, body: svgBox(W, H, body, 'Profit so far this year and expected profit') + legend };
+  const legend = legendOf([['in', 'Profit so far, added up', 'ln'], ...(d.budget ? [['in', 'Expected, adding each later month\'s budget', 'dash'], ['ink-3', 'Budget, added up', 'dash']] : [])]);
+  return { title, sub, body: svgBox(W, H, body, 'Profit so far and expected profit against budget') + legend };
 }
 
 function drawInOut(w, d, W = 520) {
@@ -804,25 +830,6 @@ function drawInOut(w, d, W = 520) {
   const tin = sumOf(d.income), tout = sumOf(d.spending);
   return { title: 'Money in vs money out', sub: `Last 12 months: ${wfmt(tin)} in, ${wfmt(tout)} out, leaving <b class="${tin - tout < 0 ? 'neg' : ''}">${wfmt(tin - tout)}</b>.`,
     body: svgBox(W, H, body.join(''), 'Income and spending by month') + legendOf([['in', 'Money in'], ['out', 'Money out'], ['profit', 'Profit (what was left)', 'ln']]) };
-}
-
-function drawProfitBudget(w, d, W = 520) {
-  const H = 210, L = 40, R = 58, T = 18, B = 22, ci = d.actual.length - 1;
-  const sc = niceScale([...d.actual, ...(d.budget || [])]), x = lin(0, 11, L + 6, W - R), y = lin(sc.lo, sc.hi, H - B, T);
-  const ap = d.actual.map((v, i) => [x(i), y(v)]);
-  let body = yAxisOf(y, sc.ticks, L, W - R + 10), sub;
-  if (d.budget) {
-    const bp = d.budget.map((v, i) => [x(i), y(v)]), diff = d.actual[ci] - d.budget_to_date, ahead = diff >= 0;
-    const btd = [x(ci), y(d.budget_to_date)], gap = ap.concat([btd], bp.slice(0, ci).reverse());
-    body += `<path d="${pathOf(gap)}Z" style="fill:var(--${ahead ? 'good' : 'bad'});opacity:.15"/><path d="${pathOf(bp)}" ${strokeOf('ink-3', 1.3, '4 3')}/>` +
-      bp.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="5" style="fill:transparent" ${tipOf(`${monShort(d.months[i])} budget (added up): ${wfmt(d.budget[i])}`)}/>`).join('') +
-      `<text x="${bp[11][0] + 6}" y="${bp[11][1] + 3}" class="lbl">${kfmt(d.budget[11])}</text><text x="${bp[11][0] + 6}" y="${bp[11][1] + 15}">year goal</text>`;
-    body += `<text x="${ap[ci][0] + (ci > 7 ? -7 : 7)}" y="${ap[ci][1] - 9}" text-anchor="${ci > 7 ? 'end' : 'start'}" class="strong" style="fill:var(--${ahead ? 'good' : 'bad'})">${kfmt(Math.abs(diff))} ${ahead ? 'ahead' : 'behind'}</text>`;
-    sub = `Profit so far is <b>${wfmt(d.actual[ci])}</b>. Your budget expected ${wfmt(d.budget_to_date)} by today, so you are <b class="${ahead ? 'pos' : 'neg'}">${wfmt(Math.abs(diff))} ${ahead ? 'ahead' : 'behind'}</b>.`;
-  } else sub = `There is no budget for ${d.fy_label} yet. ${budgetLink} to compare.`;
-  body += `<path d="${pathOf(ap)}" ${strokeOf('in', 1.8)}/>` + ap.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="${i === ci ? 3.5 : 2.2}" style="fill:var(--in);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}: ${wfmt(d.actual[i])}${d.budget ? ` (budget ${wfmt(d.budget[i])})` : ''}`)}/>`).join('');
-  body += monthTicks(d.months, x, H - 6, monthEvery(W), ci);
-  return { title: 'Profit against budget', sub, body: svgBox(W, H, body, 'Profit so far this year against budget') + legendOf([['in', 'Actual profit, added up', 'ln'], ...(d.budget ? [['ink-3', 'Budget, added up', 'dash']] : [])]) };
 }
 
 function drawBudgetUsed(w, d) {
@@ -967,13 +974,13 @@ function drawCalendar(w, d, W = 1060) {
     body: `<div class="dscroll">${svgBox(PW, H, body, 'Calendar of daily spending, last 12 months', PW > W)}</div>` };
 }
 
-function drawNetWorth(w, d, W = 1060) {
-  const H = 200, L = 44, R = 16, T = 20, B = 22, sc = niceScale(d.net), x = lin(0, 11, L + 6, W - R), y = lin(sc.lo, sc.hi, H - B, T);
+function drawNetWorth(w, d, W = 520) {
+  const H = 210, L = 44, R = 16, T = 20, B = 22, sc = niceScale(d.net), x = lin(0, 11, L + 6, W - R), y = lin(sc.lo, sc.hi, H - B, T);
   const p = d.net.map((v, i) => [x(i), y(v)]), hi = d.net.indexOf(Math.max(...d.net)), base = y(Math.max(sc.lo, 0));
   let body = yAxisOf(y, sc.ticks, L, W - R) + gradOf('nw-' + w.id, 'profit', .2) + `<path d="${pathOf(p)}L${p[11][0]} ${base}L${p[0][0]} ${base}Z" style="fill:url(#nw-${w.id})"/><path d="${pathOf(p)}" ${strokeOf('profit', 1.8)}/>` +
     p.map((q, i) => `<circle cx="${q[0]}" cy="${q[1]}" r="${i === hi || i === 11 ? 3.5 : 2.2}" style="fill:var(--profit);stroke:var(--panel);stroke-width:1" ${tipOf(`${monShort(d.months[i])}: ${wfmt(d.net[i])} (own ${wfmt(d.assets[i])}, owe ${wfmt(d.liabilities[i])})`)}/>`).join('');
   if (hi !== 11) body += `<text x="${p[hi][0]}" y="${p[hi][1] - 9}" text-anchor="middle" class="lbl">Highest</text>`;
-  body += `<text x="${p[11][0]}" y="${p[11][1] - 9}" text-anchor="end" class="strong">${wfmt(d.net[11])}</text>` + monthTicks(d.months, x, H - 6, monthEvery(W), 11);
+  body += `<text x="${p[11][0] + 2}" y="${p[11][1] - 10}" text-anchor="end" class="strong">${kfmt(d.net[11])}</text>` + monthTicks(d.months, x, H - 6, monthEvery(W), 11);
   const ch = d.net[11] - d.net[0];
   return { title: 'Net worth over time', sub: `You own ${wfmt(d.assets[11])} and owe ${wfmt(d.liabilities[11])}. That is ${ch === 0 ? 'no change' : `<b class="${ch > 0 ? 'pos' : 'neg'}">${sfmt(ch)}</b>`} since ${monShort(d.months[0])} last year.`,
     body: svgBox(W, H, body, 'Net worth over 12 months') };
@@ -1016,7 +1023,7 @@ function drawTwoYears(w, d, W = 520) {
     body: svgBox(W, H, body, `${d.name} this year against last year`) };
 }
 
-const DASH_DRAW = { profit_forecast: drawProfitForecast, in_out: drawInOut, profit_budget: drawProfitBudget, budget_used: drawBudgetUsed,
+const DASH_DRAW = { profit_forecast: drawProfitForecast, in_out: drawInOut, budget_used: drawBudgetUsed,
   dollar: drawDollar, yoy: drawYoy, next_days: drawNextDays, calendar: drawCalendar, net_worth: drawNetWorth, goals: drawGoals, two_years: drawTwoYears };
 
 function editTools(w, tile = false) {
@@ -1033,10 +1040,12 @@ function plotWidth(wide) {
   return Math.max(260, Math.floor((wide || one ? cw : (cw - 16) / 2) - 38));
 }
 
-function dashCard(w) {
+// Charts that stretch to fill their card when the card beside them is taller, at this least height.
+const DASH_FILL = { profit_forecast: 240 };
+function dashCard(w, H) {
   const d = DASH.widgets[w.id] || { missing: true }, k = DASH_KINDS[w.type];
   let c;
-  try { c = d.missing && w.type !== 'calendar' && w.type !== 'two_years' ? { title: k.name, sub: 'This visual can\'t be shown. Edit or remove it.', body: '' } : DASH_DRAW[w.type](w, d, plotWidth(k.wide)); }
+  try { c = d.missing && w.type !== 'calendar' && w.type !== 'two_years' ? { title: k.name, sub: 'This visual can\'t be shown. Edit or remove it.', body: '' } : DASH_DRAW[w.type](w, d, plotWidth(k.wide), H); }
   catch (e) { c = { title: k.name, sub: `This visual couldn't be drawn (${esc(e.message)}).`, body: '' }; }
   return `<section class="dcard${k.wide ? ' wide' : ''}" data-id="${w.id}" data-type="${w.type}"><div class="dhead"><h2>${c.title}</h2>
     <div class="dtools">${c.tools || ''}${DASH.edit ? editTools(w) : ''}</div></div>
@@ -1165,8 +1174,9 @@ function drawDashboard() {
   const tiles = DASH.layout.filter(w => w.type === 'tile'), cards = DASH.layout.filter(w => w.type !== 'tile');
   box.innerHTML = (DASH.edit ? addVisualPanel() : '') +
     (tiles.length ? `<div class="dtiles">${tiles.map(w => drawTile(w, DASH.widgets[w.id] || { missing: true })).join('')}</div>` : '') +
-    (cards.length ? `<div class="dgrid">${cards.map(dashCard).join('')}</div>` : '') +
+    (cards.length ? `<div class="dgrid">${cards.map(w => dashCard(w)).join('')}</div>` : '') +
     (!DASH.layout.length ? `<div class="panel empty"><p>Your dashboard is empty.</p><button class="primary" id="dash-empty-edit">Choose visuals</button></div>` : '');
+  fillDashCards(box);
   $('#dash-edit').textContent = DASH.edit ? 'Done' : 'Customise';
   $('#dash-edit').classList.toggle('primary', DASH.edit);
   const empty = $('#dash-empty-edit'); if (empty) empty.onclick = () => { DASH.edit = true; drawDashboard(); };
@@ -1202,6 +1212,30 @@ function drawDashboard() {
     const opts = k.setup ? await dashSettings(type, defaults[type] || {}) : (defaults[type] || {});
     if (!opts) return;
     if (await saveDashLayout([...DASH.layout, { id: newWidgetId(type), type, opts }])) toast(`${k.name} added`);
+  });
+}
+
+// A stretching chart whose card is shorter than its row (the card beside it is taller) is redrawn taller to fill
+// the gap. Runs before any handlers are attached, since the card is replaced.
+function fillDashCards(box) {
+  $$('.dgrid > .dcard', box).forEach(card => {
+    const min = DASH_FILL[card.dataset.type], w = DASH.layout.find(x => x.id === card.dataset.id);
+    let el = card;
+    // A couple of passes, since the redrawn chart can wrap its legend or round differently.
+    for (let pass = 0; pass < 3 && min; pass++) {
+      const svg = el.querySelector('.dplot > svg'), plot = el.querySelector('.dplot');
+      if (!svg) return;
+      // Free space: from the bottom of the last thing in the plot (the legend) to the bottom of the plot area.
+      const free = plot.getBoundingClientRect().bottom - plot.lastElementChild.getBoundingClientRect().bottom;
+      if (Math.abs(free) < 2 || (free < 0 && pass === 0)) return;
+      // The chart is drawn at its viewBox size and scaled to the card, so convert the gap back to drawing units.
+      const vb = svg.viewBox.baseVal, r = svg.getBoundingClientRect(), k = r.width ? vb.width / r.width : 1;
+      const H = Math.max(min, Math.floor((r.height + free) * k));
+      if (H === vb.height) return;
+      const id = el.dataset.id;
+      el.outerHTML = dashCard(w, H);
+      el = box.querySelector(`.dcard[data-id="${id}"]`);
+    }
   });
 }
 

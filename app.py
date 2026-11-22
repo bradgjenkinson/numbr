@@ -3635,7 +3635,7 @@ def api_alert_dismiss(db, q, body, aid):
 # shared invoices count at the user's share) and budget_amounts on every request, and never post anything.
 # The user's choice of visuals is a JSON list in settings.dashboard_layout: [{id, type, opts}].
 
-DASH_TYPES = ('tile', 'profit_forecast', 'next_days', 'in_out', 'dollar', 'profit_budget', 'budget_used', 'yoy',
+DASH_TYPES = ('tile', 'profit_forecast', 'next_days', 'in_out', 'dollar', 'budget_used', 'yoy',
               'calendar', 'net_worth', 'goals', 'two_years')
 DASH_MAX = 40
 DASH_ID = re.compile(r'^[A-Za-z0-9_-]{1,40}$')
@@ -3760,9 +3760,9 @@ def clean_layout(db, layout):
 def default_layout(db):
     tiles = [{'id': f'tile{r[0]}', 'type': 'tile', 'opts': {'ref': {'account_id': r[0]}, 'period': 'fy'}}
              for r in db.execute("SELECT id FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY type, name COLLATE NOCASE")]
-    rest = [('profit_forecast', {}), ('in_out', {}), ('profit_budget', {}), ('budget_used', {'mode': 'to_date', 'by': 'account', 'track': []}),
+    rest = [('net_worth', {}), ('in_out', {}), ('profit_forecast', {}), ('budget_used', {'mode': 'to_date', 'by': 'account', 'track': []}),
             ('dollar', {'by': 'account'}), ('yoy', {'mode': 'year', 'side': 'spending', 'by': 'account'}), ('next_days', {'days': 30}),
-            ('calendar', {'source': 'overall'}), ('net_worth', {})]
+            ('calendar', {'source': 'overall'})]
     return tiles + [{'id': typ, 'type': typ, 'opts': o} for typ, o in rest]
 
 
@@ -3771,9 +3771,24 @@ def dash_layout(db):
     if not raw:
         return default_layout(db)
     try:
-        return json.loads(raw)
+        layout = json.loads(raw)
     except ValueError:
         return default_layout(db)
+    # Retired visuals: Profit against budget (now part of the Profit outlook) and Cash runway. Net worth over time
+    # takes the first one's place, moving there if it was already on the dashboard; any others are dropped. If the
+    # Profit outlook sits before that place, the two swap, so the outlook gets the taller row beside Budget used.
+    if not isinstance(layout, list):
+        return default_layout(db)
+    old = [i for i, w in enumerate(layout) if isinstance(w, dict) and w.get('type') in ('profit_budget', 'cash_runway')]
+    if old:
+        nw = next((w for w in layout if isinstance(w, dict) and w.get('type') == 'net_worth'), None)
+        layout[old[0]] = nw or {'id': 'net_worth', 'type': 'net_worth', 'opts': {}}
+        layout = [w for i, w in enumerate(layout) if i == old[0] or (i not in old and w is not nw)]
+        at = layout.index(nw or next(w for w in layout if isinstance(w, dict) and w.get('type') == 'net_worth'))
+        pf = next((i for i, w in enumerate(layout) if isinstance(w, dict) and w.get('type') == 'profit_forecast'), None)
+        if pf is not None and pf < at:
+            layout[pf], layout[at] = layout[at], layout[pf]
+    return layout
 
 
 def same_day(d, years=0, months=0):
@@ -3886,36 +3901,28 @@ def dash_tile(b, ref):
 
 
 def dash_profit_forecast(b):
+    """Profit outlook: profit so far this financial year, added up month by month, against the budget added up. From
+    today on, each later month adds that month's budgeted profit, so the gap to budget today carries to year end."""
     cur_i = b.fy_months.index(b.cur)
     actual, run = [], 0
     for m in b.fy_months[:cur_i + 1]:
         run += b.profit(m)
         actual.append(run)
-    later = b.fy_months[cur_i + 1:]
-    has = b.has_budget(later) if later else True
-    forecast = []
+    has = b.has_budget(b.fy_months)
+    out = {'months': b.fy_months, 'actual': actual, 'has_budget': has, 'forecast': None, 'budget': None,
+           'budget_to_date': None, 'fy_label': fy_label(b.fy)}
     if has:
-        for m in later:
+        forecast = []
+        for m in b.fy_months[cur_i + 1:]:
             run += b.budget_profit(m)
             forecast.append(run)
-    return {'months': b.fy_months, 'actual': actual, 'forecast': forecast if has else None, 'has_budget': has,
-            'fy_label': fy_label(b.fy)}
-
-
-def dash_profit_budget(b):
-    cur_i = b.fy_months.index(b.cur)
-    has = b.has_budget(b.fy_months)
-    actual, run = [], 0
-    for m in b.fy_months[:cur_i + 1]:
-        run += b.profit(m)
-        actual.append(run)
-    budget, brun = [], 0
-    for m in b.fy_months:
-        brun += b.budget_profit(m)
-        budget.append(brun)
-    to_date = (budget[cur_i - 1] if cur_i else 0) + b.budget_to_date_part(b.budget_profit(b.cur))
-    return {'months': b.fy_months, 'actual': actual, 'budget': budget if has else None, 'has_budget': has,
-            'budget_to_date': to_date if has else None, 'fy_label': fy_label(b.fy)}
+        budget, brun = [], 0
+        for m in b.fy_months:
+            brun += b.budget_profit(m)
+            budget.append(brun)
+        out.update(forecast=forecast, budget=budget,
+                   budget_to_date=(budget[cur_i - 1] if cur_i else 0) + b.budget_to_date_part(b.budget_profit(b.cur)))
+    return out
 
 
 BU_ROWS = 8
@@ -4131,7 +4138,7 @@ def dash_two_years(b, o):
 
 DASH_BUILD = {
     'tile': dash_tile, 'profit_forecast': lambda b, o: dash_profit_forecast(b), 'next_days': dash_next_days,
-    'in_out': lambda b, o: dash_in_out(b), 'dollar': dash_dollar, 'profit_budget': lambda b, o: dash_profit_budget(b),
+    'in_out': lambda b, o: dash_in_out(b), 'dollar': dash_dollar,
     'budget_used': dash_budget_used, 'yoy': dash_yoy, 'calendar': dash_calendar,
     'net_worth': lambda b, o: dash_net_worth(b), 'goals': dash_goals, 'two_years': dash_two_years,
 }

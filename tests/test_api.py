@@ -1336,7 +1336,7 @@ try:
         {'id': 's1', 'type': 'tile', 'opts': {'ref': {'account_id': dsave1}}},
         {'id': 's2', 'type': 'tile', 'opts': {'ref': {'account_id': dsave2}}},
         {'id': 'inc', 'type': 'tile', 'opts': {'ref': {'account_id': dinc}, 'period': 'month'}},
-        {'id': 'pf', 'type': 'profit_forecast'}, {'id': 'pb', 'type': 'profit_budget'},
+        {'id': 'pf', 'type': 'profit_forecast'},
         {'id': 'bu', 'type': 'budget_used', 'opts': {'mode': 'full_year'}},
         {'id': 'nd', 'type': 'next_days', 'opts': {'days': 14}},
         {'id': 'cal', 'type': 'calendar', 'opts': {'source': dsave1}}, {'id': 'calall', 'type': 'calendar'},
@@ -1362,7 +1362,7 @@ try:
           f"a group tile adds up its accounts ({W['g']['value']})")
     check(W['g']['spark'][-1] == W['g']['value'] and len(W['g']['spark']) == 12, 'tiles carry a 12-month trend ending today')
     check(W['inc']['value'] == 20000 and W['inc']['kind'] == 'pl', 'an income tile shows this month so far')
-    pf, pb = W['pf'], W['pb']
+    pf = W['pf']
     later = dfy_months[dfy_months.index(cur) + 1:]
     exp_, ok = pf['actual'][-1], True
     for i, m in enumerate(later):
@@ -1370,7 +1370,9 @@ try:
         ok = ok and pf['forecast'][i] == exp_
     check(pf['has_budget'] and ok and len(pf['actual']) == dfy_months.index(cur) + 1,
           "profit forecast adds each later month's budgeted profit to the profit so far")
-    check(pb['actual'] == pf['actual'] and pb['budget'][-1] == 12 * 200000, 'profit against budget adds up the budget for the year')
+    check(pf['budget'][-1] == 12 * 200000 and pf['forecast'][-1] - pf['budget'][-1] == pf['actual'][-1] - pf['budget'][len(pf['actual']) - 1],
+          'profit outlook adds up the budget, and the forecast keeps the gap to budget at the end of this month')
+    call('PUT', '/api/dashboard/layout', {'layout': layout})
     bu = [r for r in W['bu']['rows'] if r['ref'] == {'account_id': dexp}]
     check(bu and bu[0]['budget'] == 1200000 and bu[0]['actual'] >= 1234, "budget used compares spending with the whole year's budget")
     bug = call('POST', '/api/groups', {'name': 'Dash budget group', 'type': 'expense'})['id']
@@ -1415,6 +1417,28 @@ try:
     W = call('GET', '/api/dashboard')['widgets']
     check(W['pf']['forecast'] is None or not later, 'without a budget the forecast is left off')
     check('dashboard_layout' in [a['action'] for a in call('GET', '/api/audit')], 'dashboard changes are audited')
+    # A layout saved with the retired visuals shows Net worth over time in the first one's place, moved from lower down.
+    con = sqlite3.connect(os.path.join(data, 'books.db'))
+    con.execute("UPDATE settings SET value=? WHERE key='dashboard_layout'", (json.dumps([
+        {'id': 'a', 'type': 'in_out', 'opts': {}}, {'id': 'old', 'type': 'cash_runway', 'opts': {'basis': 'average', 'months': 6, 'banks': []}},
+        {'id': 'b', 'type': 'dollar', 'opts': {'by': 'account'}}, {'id': 'old2', 'type': 'profit_budget', 'opts': {}},
+        {'id': 'mine', 'type': 'net_worth', 'opts': {}}]),))
+    con.commit(); con.close()
+    old = call('GET', '/api/dashboard')
+    check([(w['id'], w['type']) for w in old['layout']] == [('a', 'in_out'), ('mine', 'net_worth'), ('b', 'dollar')] and 'net' in old['widgets']['mine'],
+          f"retired Cash runway and Profit against budget visuals give their place to Net worth ({old['layout']})")
+    check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'r', 'type': 'cash_runway', 'opts': {}}]}, expect_ok=False).get('error'),
+          'Cash runway can no longer be added')
+    # With the Profit outlook earlier on, it takes Cash runway's place and Net worth takes the outlook's.
+    con = sqlite3.connect(os.path.join(data, 'books.db'))
+    con.execute("UPDATE settings SET value=? WHERE key='dashboard_layout'", (json.dumps([
+        {'id': 'pf', 'type': 'profit_forecast', 'opts': {}}, {'id': 'a', 'type': 'in_out', 'opts': {}},
+        {'id': 'old', 'type': 'cash_runway', 'opts': {}}, {'id': 'bu', 'type': 'budget_used', 'opts': {'mode': 'to_date'}},
+        {'id': 'mine', 'type': 'net_worth', 'opts': {}}]),))
+    con.commit(); con.close()
+    check([w['id'] for w in call('GET', '/api/dashboard')['layout']] == ['mine', 'a', 'pf', 'bu'],
+          'Net worth and the Profit outlook swap so the outlook sits beside Budget used')
+    call('PUT', '/api/dashboard/layout', {'layout': old['layout']})
     call('DELETE', f"/api/recurring/{rw['id']}")
     tb_ = call('GET', '/api/reports/tb')
     check(tb_['debit'] == tb_['credit'], 'TB still balances with the dashboard')

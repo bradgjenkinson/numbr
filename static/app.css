@@ -391,10 +391,11 @@ tr.ob-locked input:disabled { background: var(--bg); cursor: not-allowed; }
 .dsub { margin: 0; font-size: 13px; color: var(--ink-2); }
 .dsub .pos, .pos { color: var(--good); }
 .dplot { min-width: 0; }
+.dcard[data-type=profit_forecast] .dplot { flex: 1; }
 .dplot svg { display: block; width: 100%; height: auto; overflow: visible; }
 .dscroll { overflow-x: auto; }
 .dplot svg text, .dtile svg text { font-family: var(--sans); fill: var(--ink-3); font-size: 10px; }
-.dcard:is([data-type=profit_forecast], [data-type=profit_budget], [data-type=next_days], [data-type=net_worth]) .dplot svg text { font-size: 12.5px; }
+.dcard:is([data-type=profit_forecast], [data-type=next_days], [data-type=net_worth]) .dplot svg text { font-size: 12.5px; }
 .dplot svg .lbl { fill: var(--ink-2); }
 .dplot svg .strong { fill: var(--ink); font-weight: 600; }
 .dplot svg .big { fill: var(--ink); font-family: var(--display); font-weight: 700; }
