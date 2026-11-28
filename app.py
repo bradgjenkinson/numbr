@@ -54,11 +54,12 @@ CODE_PREFIX = {'asset': '1', 'liability': '2', 'equity': '3', 'income': '4', 'co
 TYPE_ORDER_SQL = ("CASE type WHEN 'asset' THEN 1 WHEN 'liability' THEN 2 WHEN 'equity' THEN 3 "
                   "WHEN 'income' THEN 4 WHEN 'cos' THEN 5 ELSE 6 END")
 EDITABLE_SOURCES = ('spend', 'receive', 'transfer', 'journal')
-# For a bank line a rule created: the account(s) on the other side, so the user can see how it was categorised.
-RULE_CATEGORY_SQL = ("CASE WHEN j.rule_id IS NOT NULL THEN (CASE WHEN j.source='transfer' THEN 'Transfer: ' ELSE '' END) || "
-                     "(SELECT GROUP_CONCAT(a2.name, ', ') "
-                     'FROM journal_lines l2 JOIN accounts a2 ON a2.id=l2.account_id '
-                     'WHERE l2.journal_id=j.id AND l2.id<>l.id) END AS category')
+# For a register or reconcile line: the account(s) on the other side, so the user can see how it was categorised.
+# Left blank for the opening balances journal, whose other side is every account.
+CATEGORY_SQL = ("CASE WHEN j.source<>'opening' THEN (CASE WHEN j.source='transfer' THEN 'Transfer: ' ELSE '' END) || "
+                "(SELECT GROUP_CONCAT(name, ', ') FROM (SELECT DISTINCT a2.name "
+                'FROM journal_lines l2 JOIN accounts a2 ON a2.id=l2.account_id '
+                'WHERE l2.journal_id=j.id AND l2.id<>l.id ORDER BY l2.id)) END AS category')
 SHARE_FULL = 10000          # share_bp of an account the user owns outright
 PARTNER = 0                 # pseudo account id for other owners' share of shared bank accounts
 PARTNER_NAME = "Other owners' share"
@@ -1831,7 +1832,7 @@ def api_register(db, q, body):
                                  'WHERE l.account_id=? AND j.date<?', (a['id'], frm))
     sql = ('SELECT l.id, l.amount, l.description, l.recon_id, l.bank_text, j.id AS journal_id, j.date, j.memo, j.reference, '
            'j.source, j.source_id, j.rule_id, j.rule_mode, j.reviewed, r.name AS rule_name, c.name AS contact_name, '
-           f'{RULE_CATEGORY_SQL} '
+           f'{CATEGORY_SQL} '
            'FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
            'LEFT JOIN contacts c ON c.id=COALESCE(l.contact_id, j.contact_id) LEFT JOIN bank_rules r ON r.id=j.rule_id '
            'WHERE l.account_id=?')
@@ -1888,7 +1889,7 @@ def api_reconcile_get(db, q, body):
                          (a['id'],))
     lines = rows(db.execute('SELECT l.id, l.amount, l.description, l.bank_text, j.id AS journal_id, j.date, j.memo, j.reference, '
                             'j.source, j.source_id, j.rule_id, j.rule_mode, j.reviewed, r.name AS rule_name, '
-                            f'{RULE_CATEGORY_SQL}, '
+                            f'{CATEGORY_SQL}, '
                             'c.name AS contact_name FROM journal_lines l JOIN journals j ON j.id=l.journal_id '
                             'LEFT JOIN contacts c ON c.id=COALESCE(l.contact_id, j.contact_id) '
                             'LEFT JOIN bank_rules r ON r.id=j.rule_id '

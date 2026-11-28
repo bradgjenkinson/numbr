@@ -1806,15 +1806,15 @@ async function registerView(id, { title, picker = '', actions = '', hashBase }) 
       <div style="font-size:20px;font-weight:650">${$fmt(r.closing)}</div>
       ${sh ? `<div class="muted" style="font-size:12px">Your share ${$fmt(r.share_closing)}</div>` : ''}</div></div>
     ${sh ? `<div class="notice info">${isShared(a) ? `This is a shared account. ${pctText(a.share_bp)} of it is yours.` : 'Some of these transactions came from a shared bank account.'} Reports use the <b>Your share</b> column.</div>` : ''}
-    <div class="panel flush">${lines.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Type</th><th>Ref</th>
+    <div class="panel flush">${lines.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Type</th>
       <th class="num">${bank ? 'Money in' : 'Debit'}</th><th class="num">${bank ? 'Money out' : 'Credit'}</th><th class="num">Balance</th>${sh ? '<th class="num">Your share</th><th class="num">Your balance</th>' : ''}${bank ? '<th></th>' : ''}</tr></thead><tbody>
-      ${lines.map(l => `<tr class="click" data-href="${sourceHref(l.source, l.source_id, l.journal_id)}" data-rule="${!l.rule_id ? '' : l.rule_mode === 'auto' ? 'auto' : l.reviewed ? 'reviewed' : 'review'}" data-q="${esc((l.memo + ' ' + (l.description || '') + ' ' + (l.contact_name || '') + ' ' + (l.rule_name || '') + ' ' + (l.bank_text || '') + ' ' + fmt(Math.abs(l.amount))).toLowerCase())}">
+      ${lines.map(l => `<tr class="click" data-href="${sourceHref(l.source, l.source_id, l.journal_id)}" data-rule="${!l.rule_id ? '' : l.rule_mode === 'auto' ? 'auto' : l.reviewed ? 'reviewed' : 'review'}" data-q="${esc((l.memo + ' ' + (l.description || '') + ' ' + (l.contact_name || '') + ' ' + (l.rule_name || '') + ' ' + (l.bank_text || '') + ' ' + (l.category || '') + ' ' + (l.reference || '') + ' ' + fmt(Math.abs(l.amount))).toLowerCase())}">
         <td>${dfmt(l.date)}</td><td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))}${rulePill(l)}${l.category ? `<div class="muted" style="font-size:12px">→ ${esc(l.category)}</div>` : ''}</td>
-        <td class="muted">${SOURCE_LABEL[l.source] || l.source}</td><td class="muted">${esc(l.reference || '')}</td>
+        <td class="muted">${SOURCE_LABEL[l.source] || l.source}</td>
         <td class="num">${l.amount > 0 ? fmt(l.amount) : ''}</td><td class="num">${l.amount < 0 ? fmt(-l.amount) : ''}</td><td class="num">${fmt(l.balance)}</td>
         ${sh ? `<td class="num">${fmt(l.share * sgn)}</td><td class="num">${fmt(l.share_balance)}</td>` : ''}
         ${bank ? `<td title="${l.recon_id ? 'Reconciled' : 'Not reconciled'}">${l.recon_id ? '✓' : ''}</td>` : ''}</tr>`).join('')}
-      <tr class="total"><td colspan="6">Opening balance ${dfmt(from)}</td><td class="num">${fmt(r.opening)}</td>${sh ? `<td></td><td class="num">${fmt(r.share_opening)}</td>` : ''}${bank ? '<td></td>' : ''}</tr>
+      <tr class="total"><td colspan="5">Opening balance ${dfmt(from)}</td><td class="num">${fmt(r.opening)}</td>${sh ? `<td></td><td class="num">${fmt(r.share_opening)}</td>` : ''}${bank ? '<td></td>' : ''}</tr>
       </tbody></table></div>` : '<div class="empty">No transactions in this period</div>'}</div>`);
   $$('tr[data-href]').forEach(tr => tr.onclick = e => { if (!e.target.closest('a')) go(tr.dataset.href); });
   const sep = hashBase.includes('?') ? (hashBase.endsWith('?') ? '' : '&') : '?';
@@ -1983,7 +1983,7 @@ async function reconcilePage() {
       <div style="margin-left:auto" class="actions"><button id="rc-all">Tick all shown</button><button id="rc-none">Clear ticks</button><button class="primary" id="rc-go" disabled>Reconcile</button></div>
     </div>
     <div id="rc-csv"></div>
-    <div class="panel flush"><div class="table-wrap"><table><thead><tr><th style="width:36px"></th><th>Date</th><th>Description</th><th>Type</th><th>Ref</th><th class="num">Money in</th><th class="num">Money out</th></tr></thead>
+    <div class="panel flush"><div class="table-wrap"><table><thead><tr><th style="width:36px"></th><th>Date</th><th>Description</th><th>Type</th><th class="num">Money in</th><th class="num">Money out</th></tr></thead>
       <tbody id="rc-body"></tbody></table></div></div>
     <div class="panel flush"><h2>Reconciliation history</h2>${data.history.length ? `<table><thead><tr><th>Statement date</th><th class="num">Balance</th><th class="num">Items</th><th>Done</th><th></th></tr></thead><tbody>
       ${data.history.map((h, i) => `<tr><td>${dfmt(h.statement_date)}</td><td class="num">${fmt(h.statement_balance)}</td><td class="num">${h.note === 'opening' ? 'Opening balance' : h.line_count}</td>
@@ -1999,9 +1999,9 @@ async function reconcilePage() {
       <td><input type="checkbox" ${R.ticked.has(l.id) ? 'checked' : ''}></td><td>${dfmt(l.date)}${l.date > sd ? ' <span class="pill overdue">after</span>' : ''}</td>
       <td>${esc(l.contact_name ? `${l.contact_name}${l.description && !l.description.includes(l.contact_name) ? ' – ' + l.description : ''}` : (l.description || l.memo || ''))} <a href="${sourceHref(l.source, l.source_id, l.journal_id)}" class="muted" title="Open">↗</a>${rulePill(l)}
         ${l.category ? `<div class="muted" style="font-size:12px">→ ${esc(l.category)}</div>` : ''}</td>
-      <td class="muted">${SOURCE_LABEL[l.source] || ''}</td><td class="muted">${esc(l.reference || '')}</td>
+      <td class="muted">${SOURCE_LABEL[l.source] || ''}</td>
       <td class="num">${l.amount > 0 ? fmt(l.amount) : ''}</td><td class="num">${l.amount < 0 ? fmt(-l.amount) : ''}</td></tr>`).join('')
-      : `<tr><td colspan="7" class="empty">Everything up to this date is reconciled. Enter new transactions, or import your statement.</td></tr>`;
+      : `<tr><td colspan="6" class="empty">Everything up to this date is reconciled. Enter new transactions, or import your statement.</td></tr>`;
     $$('tr[data-id]', body).forEach(tr => {
       tr.onclick = e => {
         if (e.target.closest('a')) return;
