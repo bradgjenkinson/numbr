@@ -860,21 +860,74 @@ function drawBudgetUsed(w, d) {
     body: body + `<div class="dlegend"><span><i style="--c:var(--in)"></i>Within budget</span><span><i style="--c:var(--out)"></i>Over budget</span><span><i class="tick"></i>${full ? 'Budget for the year' : 'Budget up to today'}</span></div>` };
 }
 
-const SQUARE_COLOURS = ['s2', 's4', 's3', 's5', 's7', 's6'];
-function drawDollar(w, d) {
+// Six colours, then the same six paler, so more categories can show without two looking the same.
+const SQUARE_COLOURS = ['s2', 's4', 's3', 's5', 's7', 's8'];
+const squarePaint = i => ({ c: SQUARE_COLOURS[i % 6], o: i % 12 >= 6 ? .45 : 1 });
+// Squares keep one size (17px, 3px apart, 10 across). A card with room for 20 rows shows 200 squares worth half a cent each,
+// otherwise 100 worth 1c. fit = { T: squares, n: most rows in the key }, worked out by fitDollar() from the card's room.
+const WAFFLE_SQ = 17, WAFFLE_GAP = 3, waffleH = T => T / 10 * (WAFFLE_SQ + WAFFLE_GAP) - WAFFLE_GAP;
+function drawDollar(w, d, W = 520, fit) {
   const tools = seg('by', [['account', 'Accounts'], ['group', 'Groups']], w.opts.by);
   const title = 'Where each dollar went';
   if (d.income <= 0 && d.spent <= 0) return { title, tools, sub: `Nothing has come in or gone out yet in ${d.fy_label}.`, body: '' };
-  const kept = d.kept > 0, base = kept ? d.income : d.spent;
-  const cats = (kept ? [['Kept as profit', d.kept, 'in']] : []).concat(d.parts.map((p, i) => [p.name, p.amount, p.name === 'Everything else' ? 's6' : SQUARE_COLOURS[i % 5]]));
-  const raw = cats.map(c => c[1] / base * 100), cells = raw.map(Math.floor);
-  raw.map((v, i) => [v - cells[i], i]).sort((a, b) => b[0] - a[0]).slice(0, Math.max(0, 100 - sumOf(cells))).forEach(([, i]) => cells[i]++);
-  const order = cells.flatMap((n, i) => Array(n).fill(i)).slice(0, 100), s = 17, g = 3;
-  const grid = order.map((ci, k) => `<rect x="${(k % 10) * (s + g)}" y="${Math.floor(k / 10) * (s + g)}" width="${s}" height="${s}" rx="4" ${fillOf(cats[ci][2])} ${tipOf(`${cats[ci][0]}: ${wfmt(cats[ci][1])} (${cells[ci]}c of every $1)`)}/>`).join('');
-  const head = kept ? `<div class="bignum" style="color:var(--in)">${cells[0]}c</div><div class="dcap">kept from every $1 that came in during ${d.fy_label}</div>`
+  const kept = d.kept > 0, base = kept ? d.income : d.spent, stack = W < 360;
+  const T = fit ? fit.T : 100, n = fit ? fit.n : 8, per = 100 / T;
+  // A part gets its own row only if it rounds to at least one square and there's room; the rest share "Everything else".
+  const named = d.parts.filter(p => p.name !== 'Everything else' && p.amount / base * T >= .5), room = Math.max(2, n - (kept ? 1 : 0));
+  const show = named.length + (named.length < d.parts.length ? 1 : 0) <= room ? named : named.slice(0, room - 1);
+  const other = sumOf(d.parts.filter(p => !show.includes(p)).map(p => p.amount));
+  const cats = (kept ? [['Kept as profit', d.kept, { c: 'in', o: 1 }]] : []).concat(show.map((p, i) => [p.name, p.amount, squarePaint(i)]),
+    other ? [['Everything else', other, { c: 's6', o: 1 }]] : []);
+  const raw = cats.map(c => c[1] / base * T), cells = raw.map(Math.floor);
+  raw.map((v, i) => [v - cells[i], i]).sort((a, b) => b[0] - a[0]).slice(0, Math.max(0, T - sumOf(cells))).forEach(([, i]) => cells[i]++);
+  const cents = cells.map(k => `${Math.round(k * per)}c`), s = WAFFLE_SQ, g = WAFFLE_GAP, H = waffleH(T);
+  const order = cells.flatMap((k, i) => Array(k).fill(i)).slice(0, T);
+  const grid = order.map((ci, k) => `<rect data-ci="${ci}" x="${(k % 10) * (s + g)}" y="${Math.floor(k / 10) * (s + g)}" width="${s}" height="${s}" rx="4" style="fill:var(--${cats[ci][2].c});fill-opacity:${cats[ci][2].o}"/>`).join('');
+  const head = kept ? `<div class="bignum" style="color:var(--in)">${cents[0]}</div><div class="dcap">kept from every $1 that came in during ${d.fy_label}</div>`
     : `<div class="bignum neg">${wfmt(d.spent - d.income)}</div><div class="dcap">more went out than came in during ${d.fy_label}. Squares show how the spending splits.</div>`;
-  return { title, tools, body: `<div class="waffle"><div class="wgrid">${svgBox(197, 197, grid, '100 squares, each one cent of every dollar')}</div>
-    <div class="wkey">${head}${cats.map((c, i) => `<div class="wrow"><span><i style="background:var(--${c[2]})"></i>${esc(c[0])}</span><b>${cells[i]}c</b></div>`).join('')}</div></div>` };
+  const key = cats.map((c, i) => `<div class="wrow" data-ci="${i}"><i style="background:var(--${c[2].c});opacity:${c[2].o}"></i><span class="wname">${esc(c[0])}</span><span class="wlead"></span><b>${cents[i]}</b></div>`).join('');
+  return { title, tools, body: `<div class="waffle${stack ? ' stack' : ''}"><div class="wgrid">${svgBox(197, H, grid, `${T} squares, each ${per === 1 ? 'one cent' : 'half a cent'} of every dollar`)}
+    <div class="wnote">Each square is ${per === 1 ? 'one cent' : 'half a cent'}</div></div><div class="wkey">${head}${key}</div></div>` };
+}
+// Pointing at a square or a key row lights up that category in both places.
+document.addEventListener('mouseover', e => {
+  const wf = e.target.closest && e.target.closest('.waffle');
+  $$('.waffle.hl').forEach(x => { if (x !== wf) x.classList.remove('hl'); });
+  if (!wf) return;
+  const on = e.target.closest('[data-ci]'), ci = on && on.dataset.ci;
+  wf.classList.toggle('hl', !!on);
+  $$('[data-ci]', wf).forEach(x => x.classList.toggle('on', x.dataset.ci === ci));
+});
+
+// Stretch the waffle down to the room its row gives it (the card beside it may be taller), then list as many categories as
+// fit beside the squares (or below them on a narrow card) before folding the rest into "Everything else".
+function fitDollar(card, w, box) {
+  const natural = c => c.lastElementChild.getBoundingClientRect().bottom - c.getBoundingClientRect().top + 15;
+  const top = card.offsetTop, row = $$('.dgrid > .dcard', box).filter(c => c !== card && Math.abs(c.offsetTop - top) < 2);
+  const rowH = Math.max(0, ...row.map(natural));
+  let el = card, seen = new Set();
+  for (let pass = 0; pass < 5; pass++) {
+    const plot = el.querySelector('.dplot'), wf = el.querySelector('.waffle');
+    if (!wf) return;
+    const rows = $$('.wrow', wf), key = wf.querySelector('.wkey');
+    if (!rows.length) return;
+    const stack = wf.classList.contains('stack');
+    // Alone on its row (one column, or nothing beside it), it keeps 100 squares and allows about 320px for the key.
+    const avail = row.length ? rowH - (plot.getBoundingClientRect().top - el.getBoundingClientRect().top) - 15 : 0;
+    const rh = rows[0].getBoundingClientRect().height, headH = key.getBoundingClientRect().height - rh * rows.length;
+    // 200 squares when the room is nearer the height of 20 rows than 10 (the card may grow a little to fit them),
+    // otherwise 100, so a tall neighbour never leaves a short grid with a gap under it.
+    const T = row.length && !stack && avail >= (waffleH(100) + waffleH(200)) / 2 + 20 ? 200 : 100, gridH = waffleH(T) + 20;
+    const keyRoom = !row.length ? 320 : stack ? Math.max(avail - gridH - 18, headH + rh * 8) : Math.max(gridH, avail);
+    const n = Math.max(4, Math.floor((keyRoom - headH) / rh));
+    const sig = `${T}:${n}`, cur = wf.dataset.fit;
+    if (sig === cur || seen.has(sig)) return;
+    seen.add(sig);
+    const id = el.dataset.id;
+    el.outerHTML = dashCard(w, { T, n });
+    el = box.querySelector(`.dcard[data-id="${id}"]`);
+    el.querySelector('.waffle').dataset.fit = sig;
+  }
 }
 
 function drawYoy(w, d, W = 520) {
@@ -1247,6 +1300,7 @@ function drawDashboard() {
 function fillDashCards(box) {
   $$('.dgrid > .dcard', box).forEach(card => {
     const min = DASH_FILL[card.dataset.type], w = DASH.layout.find(x => x.id === card.dataset.id);
+    if (card.dataset.type === 'dollar') return fitDollar(card, w, box);
     let el = card;
     // A couple of passes, since the redrawn chart can wrap its legend or round differently.
     for (let pass = 0; pass < 3 && min; pass++) {

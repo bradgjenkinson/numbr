@@ -34,7 +34,7 @@
   --profit: #1e3a8a;
   --grid: #e8ecf0;
   --track: #e6eaef;
-  --s2: #2563eb; --s3: #e08a2e; --s4: #7c3aed; --s5: #db2777; --s6: #8a94a6; --s7: #65a30d;
+  --s2: #2563eb; --s3: #e08a2e; --s4: #7c3aed; --s5: #db2777; --s6: #8a94a6; --s7: #65a30d; --s8: #a16207;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -421,13 +421,24 @@ tr.ob-locked input:disabled { background: var(--bg); cursor: not-allowed; }
 .bul-t { position: relative; height: 12px; background: var(--track); border-radius: 6px; margin-top: 4px; }
 .bul-t i { position: absolute; inset: 0 auto 0 0; border-radius: 6px; }
 .bul-t b { position: absolute; top: -4px; bottom: -4px; width: 2.5px; margin-left: -1px; background: var(--ink); border-radius: 2px; }
-.waffle { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
-.waffle .wgrid { width: 200px; max-width: 100%; }
-.waffle .wkey { flex: 1; min-width: 160px; }
+.waffle { display: flex; gap: 18px; align-items: flex-start; }
+.waffle.stack { flex-direction: column; }
+.waffle .wgrid { flex: none; width: 197px; max-width: 100%; }
+.waffle .wnote { font-size: 11.5px; color: var(--ink-3); margin-top: 6px; }
+.waffle .wkey { flex: 1; min-width: 0; max-width: 340px; }
+.waffle.stack .wkey { width: 100%; }
+.waffle rect, .waffle .wrow { transition: opacity .12s; }
+.waffle.hl rect:not(.on), .waffle.hl .wrow:not(.on) { opacity: .22 !important; }
+.waffle.hl .wrow.on { font-weight: 600; }
 .bignum { font-family: var(--display); font-weight: 700; font-size: 34px; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
 .dcap { color: var(--ink-2); font-size: 13px; margin: 2px 0 10px; }
-.wrow { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; padding: 2px 0; font-variant-numeric: tabular-nums; }
-.wrow i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
+.wrow { display: flex; align-items: baseline; font-size: 12.5px; padding: 2px 4px; margin: 0 -4px; border-radius: 4px; font-variant-numeric: tabular-nums; cursor: default; }
+.wrow:hover { background: var(--accent-soft); }
+.wrow i { flex: none; align-self: center; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
+.wrow .wname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* Dotted leader from each name to its cents, so it's clear which figure goes with which category. */
+.wrow .wlead { flex: 1; min-width: 12px; margin: 0 6px; border-bottom: 1.5px dotted var(--ink-3); opacity: .55; transform: translateY(-3px); }
+.wrow b { flex: none; }
 .rings { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 .ring { text-align: center; min-width: 0; }
 .ring svg { max-width: 110px; margin: 0 auto; }
@@ -453,7 +464,7 @@ body.dash-dark {
   --accent: #2dd4bf; --accent-ink: #062a26; --accent-soft: #123a37;
   --in: #2dd4bf; --out: #f5a524; --profit: #93b4ff;
   --good: #34d399; --bad: #f87171; --bad-soft: #3a1717; --warn: #fbbf24; --warn-soft: #33290d;
-  --s2: #60a5fa; --s3: #f5a524; --s4: #a78bfa; --s5: #f472b6; --s6: #94a3b8; --s7: #a3e635;
+  --s2: #60a5fa; --s3: #f5a524; --s4: #a78bfa; --s5: #f472b6; --s6: #94a3b8; --s7: #a3e635; --s8: #facc15;
   color-scheme: dark;
 }
 body.dash-dark button:hover, body.dash-dark .btn:hover { border-color: #3a4760; }
