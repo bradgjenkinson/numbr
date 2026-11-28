@@ -583,6 +583,9 @@ try:
     check(again[0]['line_id'] == imp[0]['line_id'] and again[0]['reconciled'] is False,
           'a duplicate points at the existing unreconciled line so it can still be ticked')
     check(rr[imp[0]['journal_id']]['category'] == 'General Expenses', 'register shows the category a rule chose')
+    manual = [x for x in rr.values() if not x['rule_id'] and x['source'] != 'opening']
+    check(manual and all(x['category'] for x in manual), 'register shows the category of transactions entered by hand too')
+    check(all(not x['category'] for x in rr.values() if x['source'] == 'opening'), 'opening balances show no category')
     triple = call('POST', '/api/reconcile/import', {'account_id': bank1, 'lines': [stmt[0]] * 3})['results']
     check([x['status'] for x in triple] == ['duplicate', 'duplicate', 'recommend'], 'identical lines are counted, not collapsed')
     call('DELETE', f"/api/journals/{triple[2]['journal_id']}")
