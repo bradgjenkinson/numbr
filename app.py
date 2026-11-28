@@ -4051,8 +4051,9 @@ def dash_dollar(b, o):
         parts[key] = parts.get(key, 0) + v
     spent = sum(parts.values())
     ordered = sorted(parts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
-    top = [{'name': k, 'amount': v} for k, v in ordered[:5]]
-    other = sum(v for _, v in ordered[5:])
+    # The card shows as many of these as fit its height and folds the rest into "Everything else" itself.
+    top = [{'name': k, 'amount': v} for k, v in ordered[:40]]
+    other = sum(v for _, v in ordered[40:])
     if other:
         top.append({'name': 'Everything else', 'amount': other})
     return {'income': income, 'spent': spent, 'kept': income - spent, 'parts': top, 'by': o['by'],
