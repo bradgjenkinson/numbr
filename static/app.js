@@ -704,6 +704,10 @@ const DASH_KINDS = {
 };
 const DASH = { layout: [], widgets: {}, edit: false };
 const BU_MAX = 8;   // Budget used so far: most rows the card can show (BU_ROWS in app.py)
+const YOY_MAX = 15;   // This year vs last year: most rows (YOY_ROWS in app.py)
+const PICK_EXCLUDE = 40;   // most accounts or groups a card can leave out (PICK_EXCLUDE in app.py)
+// The Choose/Change button on cards whose rows the user can pick or leave out.
+const pickBtn = (set, what) => `<button type="button" class="small dbu-pick" title="Choose which ${what} show or leave some out">${set ? 'Change' : 'Choose'}</button>`;
 
 // Chart helpers. Values are cents; labels show whole dollars.
 const wfmt = c => (c < 0 ? '-$' : '$') + Math.round(Math.abs(c) / 100).toLocaleString('en-AU');
@@ -833,22 +837,26 @@ function drawInOut(w, d, W = 520) {
 }
 
 function drawBudgetUsed(w, d) {
-  const chosen = (w.opts.track || []).length > 0;
+  const chosen = (w.opts.track || []).length > 0, left = (w.opts.exclude || []).length > 0;
   const tools = seg('mode', [['to_date', 'So far'], ['full_year', 'Whole year']], w.opts.mode) +
+    seg('sort', [['pct', '% used'], ['spent', '$ spent']], w.opts.sort || 'pct') +
     (chosen ? '' : seg('by', [['account', 'Accounts'], ['group', 'Groups']], w.opts.by || 'account')) +
-    `<button type="button" class="small dbu-pick" title="Choose which accounts or groups to track">${chosen ? 'Change' : 'Choose'}</button>`;
+    pickBtn(chosen || left, 'accounts or groups');
   if (!d.has_budget) return { title: 'Budget used so far', tools, sub: `There is no budget for ${d.fy_label} yet. ${budgetLink} to track spending against it.`, body: '' };
-  if (!d.rows.length) return { title: 'Budget used so far', tools, sub: chosen ? 'The accounts or groups chosen for this visual no longer exist. Choose others.' : `Your ${d.fy_label} budget has no spending accounts in it.`, body: '' };
+  if (!d.rows.length) return { title: 'Budget used so far', tools, sub: chosen ? 'The accounts or groups chosen for this visual no longer exist. Choose others.' :
+    d.excluded ? `Every spending account in your ${d.fy_label} budget is left out. Use Change to show some.` : `Your ${d.fy_label} budget has no spending accounts in it.`, body: '' };
   const full = d.mode === 'full_year';
   const body = d.rows.map(r => {
     const pct = r.budget ? r.actual / r.budget * 100 : 0, over = r.actual > r.budget, max = Math.max(r.budget, r.actual) * 1.15 || 1;
     const of = r.budget ? `<span class="muted">of ${wfmt(r.budget)}</span> <b style="color:var(--${over ? 'out' : 'in'})">${Math.round(pct)}%</b>` : '<span class="muted">no budget</span>';
     return `<div class="bul"><div class="bul-h"><span>${esc(r.name)}</span><span><b>${wfmt(r.actual)}</b> ${of}</span></div>
       <div class="bul-t" ${tipOf(`${r.name}: ${Math.round(pct)}% of the ${full ? 'year\'s budget' : 'budget so far'} used`)}><i style="width:${Math.min(r.actual / max, 1) * 100}%;background:var(--${over ? 'out' : 'in'})"></i><b style="left:${r.budget / max * 100}%"></b></div></div>`;
-  }).join('') + (d.more ? `<div class="muted" style="font-size:12px">and ${d.more} more ${d.by === 'group' ? 'group' : 'account'}${d.more === 1 ? '' : 's'} with a budget. Use Choose to pick which ones show.</div>` : '');
+  }).join('') + (d.more ? `<div class="muted" style="font-size:12px">and ${d.more} more ${d.by === 'group' ? 'group' : 'account'}${d.more === 1 ? '' : 's'} with a budget. Use ${chosen || left ? 'Change' : 'Choose'} to pick which ones show or leave some out.</div>` : '');
   return { title: 'Budget used so far', tools,
     sub: (full ? `Spending so far in ${d.fy_label} against the budget for the whole year.` : `Spending so far in ${d.fy_label} against the budget up to today.`) +
-      (chosen ? '' : ` Showing the ${d.by === 'group' ? 'groups' : 'accounts'} with the biggest budgets.`),
+      ` ${d.sort === 'spent' ? 'Most spent' : 'Most of its budget used'} first.` +
+      (chosen ? '' : ` Showing the ${d.by === 'group' ? 'groups' : 'accounts'} that have ${d.sort === 'spent' ? 'spent the most' : 'used the most of their budget'}` +
+        (d.excluded ? `, except the ${d.excluded === 1 ? 'one' : d.excluded} you left out` : '') + '.'),
     body: body + `<div class="dlegend"><span><i style="--c:var(--in)"></i>Within budget</span><span><i style="--c:var(--out)"></i>Over budget</span><span><i class="tick"></i>${full ? 'Budget for the year' : 'Budget up to today'}</span></div>` };
 }
 
@@ -870,13 +878,14 @@ function drawDollar(w, d) {
 }
 
 function drawYoy(w, d, W = 520) {
-  const by = w.opts.by || 'account';
+  const by = w.opts.by || 'account', p = (w.opts.picks || {})[w.opts.side || 'spending'] || {};
+  const chosen = (p.track || []).length > 0, left = (p.exclude || []).length > 0;
   const tools = seg('mode', [['year', 'Year'], ['month', 'Month']], w.opts.mode) + seg('side', [['spending', 'Spending'], ['income', 'Income']], w.opts.side) +
-    seg('by', [['account', 'Accounts'], ['group', 'Groups']], by);
+    (chosen ? '' : seg('by', [['account', 'Accounts'], ['group', 'Groups']], by)) + pickBtn(chosen || left, 'accounts or groups');
   const title = d.mode === 'year' ? 'This year vs last year' : 'This month vs last month';
   const what = d.side === 'income' ? 'income' : 'spending';
   const range = r => `${dayShort(r[0])} – ${dfmt(r[1])}`;
-  if (!d.rows.length) return { title, tools, sub: `No ${what} in either period yet.`, body: '' };
+  if (!d.rows.length) return { title, tools, sub: chosen ? `The ${what} accounts or groups chosen for this visual no longer exist. Choose others.` : `No ${what} in either period yet.`, body: '' };
   const RH = 21, L = Math.min(170, Math.max(110, W * .3)), R = 56, H = RH * d.rows.length + 26;
   const sc = niceScale(d.rows.flatMap(r => [r.now, r.then]), W >= 440 ? 4 : 3), x = lin(sc.lo, sc.hi, L, W - R);
   const upTone = d.side === 'income' ? 'in' : 'out', downTone = d.side === 'income' ? 'out' : 'in';
@@ -890,7 +899,8 @@ function drawYoy(w, d, W = 520) {
         `<text x="${W}" y="${yy + 3.5}" text-anchor="end" class="strong" style="fill:var(--${c})">${ch ? (ch > 0 ? '+' : '-') + kfmt(Math.abs(ch)) : 'same'}</text>`;
     }).join('');
   const ch = d.now_total - d.then_total;
-  return { title, tools, sub: `Total ${what} ${wfmt(d.now_total)}, ${ch === 0 ? 'the same as' : `${wfmt(Math.abs(ch))} ${ch > 0 ? 'more' : 'less'} than`} the same period before. Biggest increase first.`,
+  return { title, tools, sub: `Total ${what} ${wfmt(d.now_total)}, ${ch === 0 ? 'the same as' : `${wfmt(Math.abs(ch))} ${ch > 0 ? 'more' : 'less'} than`} the same period before. Biggest increase first.` +
+    (chosen ? ` Showing the ${what} accounts or groups you chose.` : d.excluded ? ` Leaving out the ${d.excluded === 1 ? 'one' : d.excluded} you chose to hide.` : ''),
     body: svgBox(W, H, body, `${what} compared with the same period before`) +
       `<div class="dlegend"><span><i class="ring"></i>${range(d.then_range)}</span><span><i class="dot"></i>${range(d.now_range)}</span>` +
       `${d.more ? `<span class="muted">and ${d.more} more ${by === 'group' ? 'group' : 'account'}${d.more === 1 ? '' : 's'} with smaller changes</span>` : ''}</div>` };
@@ -1080,6 +1090,13 @@ function refOptions(sel, types = null) {
 // Settings for one visual. Resolves with the new opts, or null if cancelled.
 function dashSettings(type, opts = {}) {
   const k = DASH_KINDS[type];
+  // Cards whose rows can be chosen or left out. This year vs last year keeps a separate pair of lists per side.
+  const side = opts.side === 'income' ? 'income' : 'spending';
+  const pk = type === 'budget_used' ? { types: ['cos', 'expense'], cap: BU_MAX, what: 'spending', dflt: 'the ones that have used the most of their budget', p: opts }
+    : type === 'yoy' ? { types: side === 'income' ? ['income'] : ['cos', 'expense'], cap: YOY_MAX, what: side, dflt: 'the ones with the biggest changes', p: (opts.picks || {})[side] || {} }
+    : null;
+  const pick = pk && { track: (pk.p.track || []).map(refKey), exclude: (pk.p.exclude || []).map(refKey) };
+  if (pick) pick.how = pick.track.length ? 'track' : pick.exclude.length ? 'exclude' : 'all';
   return new Promise(resolve => {
     let inner = '';
     if (type === 'tile' || type === 'two_years') {
@@ -1093,9 +1110,11 @@ function dashSettings(type, opts = {}) {
       inner = `<div class="field"><label for="ds-src">Show spending from</label><select id="ds-src"><option value="overall">All spending (every expense account)</option>
         ${S.accounts.filter(a => isBank(a) && (!a.archived || a.id == opts.source)).sort(byName).map(a => `<option value="${a.id}" ${a.id == opts.source ? 'selected' : ''}>Money out of ${esc(a.name)}</option>`).join('')}</select>
         <div class="hint">For a bank account or card, transfers between your own accounts are left out.</div></div>`;
-    } else if (type === 'budget_used') {
-      inner = `<p class="muted" style="margin-top:0">Choose up to ${BU_MAX} spending accounts or groups to track, or leave the list empty to show the ones with the biggest budgets.</p>
-        <div id="ds-track"></div><button type="button" class="small" id="ds-track-add">+ Add an account or group</button>`;
+    } else if (pk) {
+      const how = (v, label) => `<label class="check" style="margin-bottom:6px"><input type="radio" name="ds-how" value="${v}" ${v === pick.how ? 'checked' : ''}> ${label}</label>`;
+      inner = `<p class="muted" style="margin-top:0">Which ${pk.what} accounts or groups should this card show?</p>
+        <div class="field">${how('all', `Show ${pk.dflt}`)}${how('exclude', `Show ${pk.dflt}, but leave some out`)}${how('track', `Only show the ones I choose (up to ${pk.cap})`)}</div>
+        <div id="ds-pick"><p class="muted" id="ds-pick-hint"></p><div id="ds-track"></div><button type="button" class="small" id="ds-track-add">+ Add an account or group</button></div>`;
     } else if (type === 'goals') {
       inner = `<p class="muted" style="margin-top:0">Pick an account (or group) and a target. Progress is its balance today, or its total for this financial year for income and expense accounts.</p>
         <div id="ds-goals"></div><button type="button" class="small" id="ds-goal-add">+ Add a goal</button>`;
@@ -1119,21 +1138,28 @@ function dashSettings(type, opts = {}) {
           row.querySelector('.g-rm').onclick = () => { goals.splice(+row.dataset.i, 1); drawGoalRows(); };
         });
       };
-      const track = (opts.track || []).map(refKey);
+      // The chosen and left-out lists are kept apart, so switching between them loses nothing until Save.
       const drawTrack = () => {
-        el.querySelector('#ds-track').innerHTML = track.map((v, i) => `<div class="dtrack" data-i="${i}">
-          <select class="acct-pick t-ref" aria-label="Account or group">${refOptions(v, ['cos', 'expense'])}</select>
+        const list = pick[pick.how] || [], cap = pick.how === 'track' ? pk.cap : PICK_EXCLUDE;
+        el.querySelector('#ds-pick').hidden = pick.how === 'all';
+        el.querySelector('#ds-pick-hint').textContent = pick.how === 'track' ? 'Show only these:' : 'Leave these out:';
+        el.querySelector('#ds-track').innerHTML = list.map((v, i) => `<div class="dtrack" data-i="${i}">
+          <select class="acct-pick t-ref" aria-label="Account or group">${refOptions(v, pk.types)}</select>
           <button type="button" class="tk-btn t-rm" title="Remove" aria-label="Remove">×</button></div>`).join('') ||
-          '<p class="muted">Nothing chosen: the biggest budgets show.</p>';
+          `<p class="muted">Nothing added yet: ${pk.dflt} show.</p>`;
         el.querySelectorAll('.dtrack').forEach(row => {
-          row.querySelector('.t-ref').onchange = e => { track[+row.dataset.i] = e.target.value; };
-          row.querySelector('.t-rm').onclick = () => { track.splice(+row.dataset.i, 1); drawTrack(); };
+          row.querySelector('.t-ref').onchange = e => { list[+row.dataset.i] = e.target.value; };
+          row.querySelector('.t-rm').onclick = () => { list.splice(+row.dataset.i, 1); drawTrack(); };
         });
-        el.querySelector('#ds-track-add').disabled = track.length >= BU_MAX;
+        el.querySelector('#ds-track-add').disabled = list.length >= cap;
       };
-      if (type === 'budget_used') {
+      if (pk) {
         drawTrack();
-        el.querySelector('#ds-track-add').onclick = () => { if (track.length < BU_MAX) { track.push(''); drawTrack(); } };
+        el.querySelectorAll('[name=ds-how]').forEach(r => r.onchange = () => { pick.how = r.value; drawTrack(); });
+        el.querySelector('#ds-track-add').onclick = () => {
+          const list = pick[pick.how], cap = pick.how === 'track' ? pk.cap : PICK_EXCLUDE;
+          if (list && list.length < cap) { list.push(''); drawTrack(); }
+        };
       }
       if (type === 'goals') { drawGoalRows(); el.querySelector('#ds-goal-add').onclick = () => { goals.push({ name: '', ref: '', target: NaN, date: '' }); drawGoalRows(); }; }
       el.querySelector('[data-x=no]').onclick = () => { closeModal(); resolve(null); };
@@ -1146,10 +1172,11 @@ function dashSettings(type, opts = {}) {
         } else if (type === 'calendar') {
           const v = el.querySelector('#ds-src').value;
           o = { source: v === 'overall' ? 'overall' : +v };
-        } else if (type === 'budget_used') {
-          const picked = track.filter(Boolean);
+        } else if (pk) {
+          const picked = pick.how === 'all' ? [] : pick[pick.how].filter(Boolean);
           if (new Set(picked).size !== picked.length) { toast('Each account or group can only be chosen once', true); return; }
-          o = { ...opts, track: picked.map(refFrom) };
+          const lists = { track: pick.how === 'track' ? picked.map(refFrom) : [], exclude: pick.how === 'exclude' ? picked.map(refFrom) : [] };
+          o = type === 'yoy' ? { ...opts, picks: { ...(opts.picks || {}), [side]: lists } } : { ...opts, ...lists };
         } else if (type === 'goals') {
           const bad = goals.find(g => !g.name.trim() || !g.ref || isNaN(g.target) || g.target <= 0);
           if (bad) { toast('Give each goal a name, an account and a target more than zero (or remove it)', true); return; }
@@ -1208,7 +1235,7 @@ function drawDashboard() {
   });
   $$('.dadd button[data-add]', box).forEach(b => b.onclick = async () => {
     const type = b.dataset.add, k = DASH_KINDS[type];
-    const defaults = { next_days: { days: 30 }, dollar: { by: 'account' }, budget_used: { mode: 'to_date', by: 'account', track: [] }, yoy: { mode: 'year', side: 'spending', by: 'account' }, calendar: { source: 'overall' } };
+    const defaults = { next_days: { days: 30 }, dollar: { by: 'account' }, budget_used: { mode: 'to_date', by: 'account', sort: 'pct', track: [], exclude: [] }, yoy: { mode: 'year', side: 'spending', by: 'account' }, calendar: { source: 'overall' } };
     const opts = k.setup ? await dashSettings(type, defaults[type] || {}) : (defaults[type] || {});
     if (!opts) return;
     if (await saveDashLayout([...DASH.layout, { id: newWidgetId(type), type, opts }])) toast(`${k.name} added`);

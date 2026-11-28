@@ -68,7 +68,8 @@ On the **Profit & Loss** or **Balance Sheet**, choose the project in the **Proje
   - one for all spending
   - one for money out of a chosen bank account or card, with transfers between your own accounts left out
 - **Profit forecast**, **Profit against budget** and **Budget used so far** need a budget for this financial year. The forecast starts from your profit so far and adds each later month's budgeted profit.
-- Some cards have buttons to switch views. **Budget used so far** switches between so far and the whole year. **This year vs last year** switches between year and month, and between spending and income. **Coming up** switches between 14, 30 and 60 days.
+- Some cards have buttons to switch views. **Budget used so far** switches between so far and the whole year, and between sorting by % of budget used and by dollars spent (most first). **This year vs last year** switches between year and month, and between spending and income.
+- **Budget used so far** and **This year vs last year** have a **Choose** button (it says **Change** once set). Show the default rows, the default rows less the accounts or groups you leave out, or only the ones you pick. This year vs last year keeps separate choices for spending and for income. **Coming up** switches between 14, 30 and 60 days.
 
 ## Alerts
 

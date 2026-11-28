@@ -1382,13 +1382,62 @@ try:
         {'id': 'bt', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'track': [{'account_id': dexp}, {'group_id': bug}]}}]})['widgets']
     check([r for r in bw['bg']['rows'] if r['name'] == 'Dash budget group' and r['budget'] == 1200000],
           'budget used can add up by group')
-    check([r['name'] for r in bw['bt']['rows']] == ['Dash expense', 'Dash budget group'] and bw['bt']['chosen']
-          and bw['bt']['rows'][1]['budget'] == 1200000, 'budget used shows the accounts and groups the user chose, in order')
+    check(sorted(r['name'] for r in bw['bt']['rows']) == ['Dash budget group', 'Dash expense'] and bw['bt']['chosen']
+          and all(r['budget'] == 1200000 for r in bw['bt']['rows']), 'budget used shows the accounts and groups the user chose')
     for bad, why in [({'track': [{'account_id': dinc}]}, 'an income account'),
                      ({'track': [{'account_id': dexp}] * 2}, 'the same account twice'),
                      ({'track': [{'account_id': dexp}] * 9}, 'more than 8 rows')]:
         check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'b', 'type': 'budget_used', 'opts': bad}]}, expect_ok=False).get('error'),
               f'budget used refuses {why}')
+    # sorting: a small budget mostly used beats a big one barely used by share, but not by dollars
+    dsm = call('POST', '/api/accounts', {'name': 'Dash small', 'type': 'expense', 'group_id': bug})['id']
+    call('POST', '/api/txn/spend', {'date': t_iso, 'bank_account_id': A['1-1100'], 'lines': [{'account_id': dsm, 'amount': 600}]})
+    call('PUT', f'/api/budgets/{dbid}', {'amounts': [{'account_id': dsm, 'month': m, 'amount': 1000} for m in dfy_months]})
+    pair = [{'account_id': dexp}, {'account_id': dsm}]
+    bw = call('PUT', '/api/dashboard/layout', {'layout': [
+        {'id': 'bp', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'track': pair}},
+        {'id': 'bs', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'sort': 'spent', 'track': pair}},
+        {'id': 'bd', 'type': 'budget_used', 'opts': {'mode': 'full_year'}},
+        {'id': 'bds', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'sort': 'spent'}},
+        {'id': 'bx', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'exclude': [{'account_id': dsm}]}},
+        {'id': 'bgd', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'by': 'group'}},
+        {'id': 'bgx', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'by': 'group', 'exclude': [{'account_id': dexp}]}},
+        {'id': 'bgg', 'type': 'budget_used', 'opts': {'mode': 'full_year', 'by': 'group', 'exclude': [{'group_id': bug}]}},
+        {'id': 'ys', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'spending', 'picks': {'spending': {'track': [{'account_id': dsm}]}}}},
+        {'id': 'yi', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'income', 'picks': {'spending': {'track': [{'account_id': dsm}]}}}},
+        {'id': 'yx', 'type': 'yoy', 'opts': {'mode': 'month', 'side': 'spending', 'picks': {'spending': {'exclude': [{'account_id': dsm}]}}}}]})['widgets']
+    names = lambda w: [r['name'] for r in bw[w]['rows']]
+    check(names('bp') == ['Dash small', 'Dash expense'] and bw['bp']['sort'] == 'pct', 'chosen budget rows are sorted by share of budget used')
+    check(names('bs') == ['Dash expense', 'Dash small'], 'chosen budget rows can be sorted by dollars spent')
+    def pct_sorted(rs):
+        k = [(0, -r['actual'] / r['budget']) if r['budget'] else (1, -r['actual']) for r in rs]
+        return k == sorted(k)
+    check(pct_sorted(bw['bd']['rows']) and names('bd').index('Dash small') < names('bd').index('Dash expense'),
+          'the default budget used rows are sorted by share of budget used')
+    sp = [r['actual'] for r in bw['bds']['rows']]
+    check(sp == sorted(sp, reverse=True), 'the default budget used rows can be sorted by dollars spent')
+    check('Dash small' not in names('bx') and 'Dash expense' in names('bx') and bw['bx']['excluded'] == 1 and not bw['bx']['chosen'],
+          'budget used can leave an account out of the default rows')
+    gb = lambda w: next((r['budget'] for r in bw[w]['rows'] if r['name'] == 'Dash budget group'), None)
+    check(gb('bgd') == 1200000 + 12000 and gb('bgx') == 12000, 'leaving an account out takes it out of its group total')
+    check(gb('bgg') is None, 'budget used can leave a whole group out')
+    check(names('ys') == ['Dash small'] and bw['ys']['chosen'], 'this year vs last year shows only the accounts chosen for spending')
+    check(not bw['yi']['chosen'] and bw['yi']['side'] == 'income', 'spending choices do not apply to the income side')
+    check(bw['yx']['rows'] and 'Dash small' not in [r['name'] for r in bw['yx']['rows']] and bw['yx']['excluded'] == 1,
+          'this year vs last year can leave an account out')
+    for bad, why in [({'track': [{'account_id': dexp}], 'exclude': [{'account_id': dsm}]}, 'both a chosen and a left-out list'),
+                     ({'exclude': [{'account_id': dinc}]}, 'leaving out an income account'),
+                     ({'exclude': [{'account_id': dsm}] * 2}, 'leaving out the same account twice'),
+                     ({'sort': 'size'}, 'an unknown sort')]:
+        check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'b', 'type': 'budget_used', 'opts': bad}]}, expect_ok=False).get('error'),
+              f'budget used refuses {why}')
+    for bad, why in [({'spending': {'track': [{'account_id': dinc}]}}, 'an income account on the spending side'),
+                     ({'income': {'exclude': [{'account_id': dexp}]}}, 'an expense account on the income side'),
+                     ({'spending': {'track': [{'account_id': dexp}], 'exclude': [{'account_id': dsm}]}}, 'both lists on one side'),
+                     ({'spending': {'track': [{'account_id': dexp}] * 16}}, 'more than 15 rows'),
+                     ('all', 'choices that are not a list per side')]:
+        check(call('PUT', '/api/dashboard/layout', {'layout': [{'id': 'y', 'type': 'yoy', 'opts': {'picks': bad}}]}, expect_ok=False).get('error'),
+              f'this year vs last year refuses {why}')
     call('PUT', f'/api/accounts/{dexp}', {'name': 'Dash expense', 'type': 'expense', 'group_id': None})
     call('PUT', '/api/dashboard/layout', {'layout': layout})
     nd = [i for i in W['nd']['items'] if i['recurring_id'] == rw['id']]

@@ -652,9 +652,12 @@ try:
             page.click('.dcard[data-id=budget_used] .dseg button[data-v=full_year]')
             page.wait_for_selector('.dcard[data-id=budget_used] .dseg button.on[data-v=full_year]')
             shot(page, '25-dashboard-edit')
-            # budget used: track one chosen expense account, then go back to the biggest budgets
-            page.click('.dcard[data-id=budget_used] .dbu-pick'); page.wait_for_selector('#ds-track-add')
-            page.click('#ds-track-add'); page.wait_for_selector('#ds-track .t-ref')
+            page.click('.dcard[data-id=budget_used] .dseg button[data-v=spent]')
+            page.wait_for_selector('.dcard[data-id=budget_used] .dseg button.on[data-v=spent]')
+            # budget used: track one chosen expense account, then go back to the default rows
+            page.click('.dcard[data-id=budget_used] .dbu-pick'); page.wait_for_selector('[name=ds-how][value=track]')
+            assert page.locator('#ds-pick').is_hidden(), 'the list is hidden while the default rows show'
+            page.check('[name=ds-how][value=track]'); page.click('#ds-track-add'); page.wait_for_selector('#ds-track .t-ref')
             page.evaluate("""() => { const s = document.querySelector('#ds-track .t-ref'), o = [...s.options].find(o => o.value.startsWith('a:'));
                               s.value = o.value; s.dispatchEvent(new Event('change')); }""")
             shot(page, '25b-budget-used-choose')
@@ -663,6 +666,19 @@ try:
             page.click('.dcard[data-id=budget_used] .dbu-pick'); page.wait_for_selector('#ds-track .t-rm')
             page.click('#ds-track .t-rm'); page.click('#modal [data-x=yes]')
             page.wait_for_selector('.dcard[data-id=budget_used] .dbu-pick:text("Choose")')
+            # this year vs last year: leave one account out from its Choose button, then show them all again
+            yoy = '.dcard[data-type=yoy]'
+            n_yoy = page.locator(f'{yoy} text.lbl').count()
+            page.click(f'{yoy} .dbu-pick'); page.wait_for_selector('[name=ds-how][value=exclude]')
+            page.check('[name=ds-how][value=exclude]'); page.click('#ds-track-add'); page.wait_for_selector('#ds-track .t-ref')
+            page.evaluate("""() => { const card = document.querySelector('.dcard[data-type=yoy] text.lbl title').textContent;
+                              const s = document.querySelector('#ds-track .t-ref'), o = [...s.options].find(o => o.text.trim() === card) || [...s.options].find(o => o.value);
+                              s.value = o.value; s.dispatchEvent(new Event('change')); }""")
+            page.click('#modal [data-x=yes]'); page.wait_for_selector(f'{yoy} .dbu-pick:text("Change")')
+            assert page.locator(f'{yoy} text.lbl').count() <= n_yoy
+            page.click(f'{yoy} .dbu-pick'); page.wait_for_selector('[name=ds-how][value=all]')
+            page.check('[name=ds-how][value=all]'); page.click('#modal [data-x=yes]')
+            page.wait_for_selector(f'{yoy} .dbu-pick:text("Choose")')
             page.click('.dcard[data-id^="two_years-"] [data-act=remove]'); page.wait_for_timeout(400)
             assert page.locator('.dcard').count() == n0
             page.click('#dash-edit'); page.wait_for_selector('.dadd', state='detached')
