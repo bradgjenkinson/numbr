@@ -3686,6 +3686,40 @@ def pick(opts, key, allowed, label):
     return v
 
 
+PICK_EXCLUDE = 40   # most accounts or groups a card can leave out
+
+
+def clean_picks(db, o, types, cap, label, what):
+    """A card's chosen list (`track`, shown instead of the default rows) and left-out list (`exclude`, taken off the
+    default rows). Each is a list of account/group refs of the given types; only one of the two may be used."""
+    out = []
+    for key, most, verb in (('track', cap, 'choose'), ('exclude', PICK_EXCLUDE, 'leave out')):
+        refs = o.get(key) or []
+        if not isinstance(refs, list) or len(refs) > most:
+            raise ApiError(f'{label}: {verb} up to {most} accounts or groups')
+        clean = []
+        for ref in refs:
+            ref = clean_ref(db, ref if isinstance(ref, dict) else {}, label)
+            if dash_ref(db, ref)['type'] not in types:
+                raise ApiError(f'{label}: choose {what} accounts or groups')
+            if ref in clean:
+                raise ApiError(f'{label}: each account or group can only be chosen once')
+            clean.append(ref)
+        out.append(clean)
+    if out[0] and out[1]:
+        raise ApiError(f'{label}: either choose the accounts to show or the ones to leave out, not both')
+    return out
+
+
+def excluded_ids(db, refs):
+    ids = set()
+    for ref in refs:
+        r = dash_ref(db, ref)
+        if r:
+            ids |= r['ids']
+    return ids
+
+
 def clean_layout(db, layout):
     if not isinstance(layout, list):
         raise ApiError('The dashboard layout must be a list of visuals')
@@ -3714,21 +3748,24 @@ def clean_layout(db, layout):
         elif typ == 'budget_used':
             c['mode'] = pick(o, 'mode', ('to_date', 'full_year'), 'Budget comparison')
             c['by'] = pick(o, 'by', ('account', 'group'), 'Show accounts or groups')
-            track = o.get('track') or []
-            if not isinstance(track, list) or len(track) > BU_ROWS:
-                raise ApiError(f'Budget used so far: choose up to {BU_ROWS} accounts or groups')
-            c['track'] = []
-            for ref in track:
-                ref = clean_ref(db, ref if isinstance(ref, dict) else {}, 'Budget used so far')
-                if dash_ref(db, ref)['type'] not in ('cos', 'expense'):
-                    raise ApiError('Budget used so far: choose expense or cost of sales accounts or groups')
-                if ref in c['track']:
-                    raise ApiError('Budget used so far: each account or group can only be chosen once')
-                c['track'].append(ref)
+            c['sort'] = pick(o, 'sort', ('pct', 'spent'), 'Sort budget used by')
+            c['track'], c['exclude'] = clean_picks(db, o, ('cos', 'expense'), BU_ROWS, 'Budget used so far',
+                                                   'expense or cost of sales')
         elif typ == 'yoy':
             c['mode'] = pick(o, 'mode', ('year', 'month'), 'Comparison')
             c['side'] = pick(o, 'side', ('spending', 'income'), 'Income or spending')
             c['by'] = pick(o, 'by', ('account', 'group'), 'Show accounts or groups')
+            picks = o.get('picks') or {}
+            if not isinstance(picks, dict):
+                raise ApiError('This year vs last year: the chosen accounts are not valid')
+            c['picks'] = {}
+            for side, types, what in (('spending', ('cos', 'expense'), 'expense or cost of sales'), ('income', ('income',), 'income')):
+                p = picks.get(side) or {}
+                if not isinstance(p, dict):
+                    raise ApiError('This year vs last year: the chosen accounts are not valid')
+                track, exclude = clean_picks(db, p, types, YOY_ROWS, 'This year vs last year', what)
+                if track or exclude:
+                    c['picks'][side] = {'track': track, 'exclude': exclude}
         elif typ == 'calendar':
             src = o.get('source', 'overall')
             if src != 'overall':
@@ -3760,7 +3797,7 @@ def clean_layout(db, layout):
 def default_layout(db):
     tiles = [{'id': f'tile{r[0]}', 'type': 'tile', 'opts': {'ref': {'account_id': r[0]}, 'period': 'fy'}}
              for r in db.execute("SELECT id FROM accounts WHERE subtype='bank' AND archived=0 ORDER BY type, name COLLATE NOCASE")]
-    rest = [('net_worth', {}), ('in_out', {}), ('profit_forecast', {}), ('budget_used', {'mode': 'to_date', 'by': 'account', 'track': []}),
+    rest = [('net_worth', {}), ('in_out', {}), ('profit_forecast', {}), ('budget_used', {'mode': 'to_date', 'by': 'account', 'sort': 'pct', 'track': [], 'exclude': []}),
             ('dollar', {'by': 'account'}), ('yoy', {'mode': 'year', 'side': 'spending', 'by': 'account'}), ('next_days', {'days': 30}),
             ('calendar', {'source': 'overall'})]
     return tiles + [{'id': typ, 'type': typ, 'opts': o} for typ, o in rest]
@@ -3930,13 +3967,15 @@ BU_ROWS = 8
 
 def dash_budget_used(b, o):
     """Spending so far against its budget. Rows are the accounts or groups the user chose (opts.track), or else the
-    ones with the biggest budgets, by account or by top-level group (opts.by)."""
+    ones that have used the most of their budget (by account or by top-level group, opts.by), less any the user left
+    out (opts.exclude). Every view is ordered by opts.sort: share of the budget used, or dollars spent."""
     has = b.has_budget(b.fy_months)
     if not has:
         return {'has_budget': False, 'fy_label': fy_label(b.fy)}
     cur_i = b.fy_months.index(b.cur)
     spend = set(b.ids_of('cos', 'expense'))
     frm = month_start(b.fy).isoformat()
+    sort = o.get('sort', 'pct')
 
     def budget_of(ids):
         months = [sum(b.budget.get(m, {}).get(a, 0) for a in ids) for m in b.fy_months]
@@ -3947,17 +3986,28 @@ def dash_budget_used(b, o):
     def row(name, ids, ref):
         return {'name': name, 'ref': ref, 'budget': budget_of(ids), 'actual': b.between(ids, frm, b.t)}
 
+    def order(r):
+        # Most used first. By share, rows with no budget (to date) go after every budgeted row.
+        if sort == 'spent':
+            return (0, -r['actual'], r['name'].lower())
+        if r['budget'] > 0:
+            return (0, -r['actual'] / r['budget'], -r['actual'], r['name'].lower())
+        return (1, -r['actual'], r['name'].lower())
+
     by = o.get('by', 'account')
     track = o.get('track') or []
+    base = {'has_budget': True, 'mode': o['mode'], 'by': by, 'sort': sort, 'fy_label': fy_label(b.fy)}
     if track:
         rows_ = []
         for ref in track:
             r = dash_ref(b.db, ref)
             if r:
                 rows_.append(row(r['name'], r['ids'] & spend, ref))
-        return {'has_budget': True, 'mode': o['mode'], 'by': by, 'chosen': True, 'rows': rows_, 'more': 0,
-                'fy_label': fy_label(b.fy)}
-    budgeted = [a for a in spend if any(b.budget.get(m, {}).get(a, 0) for m in b.fy_months)]
+        rows_.sort(key=order)
+        return {**base, 'chosen': True, 'excluded': 0, 'rows': rows_, 'more': 0}
+    exclude = [ref for ref in (o.get('exclude') or []) if dash_ref(b.db, ref)]
+    gone = excluded_ids(b.db, exclude)
+    budgeted = [a for a in spend - gone if any(b.budget.get(m, {}).get(a, 0) for m in b.fy_months)]
     accts = {r[0]: (r[1], r[2]) for r in b.db.execute('SELECT id, name, group_id FROM accounts')}
     found = {}
     if by == 'group':
@@ -3972,9 +4022,9 @@ def dash_budget_used(b, o):
             key, label, ref = ('a', a), name, {'account_id': a}
         found.setdefault(key, [label, set(), ref])[1].add(a)
     rows_ = [row(label, ids, ref) for label, ids, ref in found.values()]
-    rows_.sort(key=lambda r: (-r['budget'], r['name'].lower()))
-    return {'has_budget': True, 'mode': o['mode'], 'by': by, 'chosen': False, 'rows': rows_[:BU_ROWS],
-            'more': max(0, len(rows_) - BU_ROWS), 'fy_label': fy_label(b.fy)}
+    rows_.sort(key=order)
+    return {**base, 'chosen': False, 'excluded': len(exclude), 'rows': rows_[:BU_ROWS],
+            'more': max(0, len(rows_) - BU_ROWS)}
 
 
 def top_group(db, gid, parents):
@@ -4029,7 +4079,27 @@ def dash_yoy(b, o):
         frm = t.replace(day=1)
         pf, pt = same_day(frm, months=1), same_day(t, months=1)
         labels = ['This month so far', 'Same days last month']
-    ids = b.ids_of('income') if o['side'] == 'income' else b.ids_of('cos', 'expense')
+    ids = set(b.ids_of('income') if o['side'] == 'income' else b.ids_of('cos', 'expense'))
+    p = (o.get('picks') or {}).get(o['side']) or {}
+    track = [ref for ref in (p.get('track') or []) if dash_ref(b.db, ref)]
+    exclude = [ref for ref in (p.get('exclude') or []) if dash_ref(b.db, ref)]
+    base = {'mode': o['mode'], 'side': o['side'], 'labels': labels,
+            'now_range': [frm.isoformat(), b.t], 'then_range': [pf.isoformat(), pt.isoformat()]}
+
+    def increase(r):
+        # Biggest increase first, so the accounts that grew the most are at the top.
+        return (-(r['now'] - r['then']), r['name'].lower())
+    if track:
+        rows_ = []
+        for ref in track:
+            r = dash_ref(b.db, ref)
+            got = r['ids'] & ids
+            rows_.append({'name': r['name'], 'now': b.between(got, frm.isoformat(), b.t),
+                          'then': b.between(got, pf.isoformat(), pt.isoformat())})
+        rows_.sort(key=increase)
+        return {**base, 'by': o.get('by', 'account'), 'chosen': True, 'excluded': 0, 'rows': rows_, 'more': 0,
+                'now_total': sum(r['now'] for r in rows_), 'then_total': sum(r['then'] for r in rows_)}
+    ids -= excluded_ids(b.db, exclude)
     accts = {r[0]: (r[1], r[2]) for r in b.db.execute('SELECT id, name, group_id FROM accounts')}
     by_group = o.get('by') == 'group'
     if by_group:
@@ -4046,11 +4116,9 @@ def dash_yoy(b, o):
         r = found.setdefault(key, {'name': groups[key[1]][0] if key[0] == 'g' else name, 'now': 0, 'then': 0})
         r['now'] += now_v
         r['then'] += then_v
-    # Biggest increase first, so the accounts that grew the most are at the top.
-    rows_ = sorted(found.values(), key=lambda r: (-(r['now'] - r['then']), r['name'].lower()))
-    return {'mode': o['mode'], 'side': o['side'], 'by': 'group' if by_group else 'account', 'labels': labels,
+    rows_ = sorted(found.values(), key=increase)
+    return {**base, 'by': 'group' if by_group else 'account', 'chosen': False, 'excluded': len(exclude),
             'rows': rows_[:YOY_ROWS], 'more': max(0, len(rows_) - YOY_ROWS),
-            'now_range': [frm.isoformat(), b.t], 'then_range': [pf.isoformat(), pt.isoformat()],
             'now_total': sum(r['now'] for r in rows_), 'then_total': sum(r['then'] for r in rows_)}
 
 
